@@ -127,6 +127,21 @@ fn libaom_streams_match_libdav1d() {
             aom: &["-cpu-used", "4"],
         },
         Case {
+            // 64x64 blocks carry 32x32-max chroma: 4:2:2 32x64 (two tx blocks)
+            // and 4:4:4 64x64 (four). Spec `residual()` codes all of U's
+            // transform blocks before any of V's; interleaving them desyncs.
+            name: "testsrc 548x388 4:2:2 (multi-tx chroma blocks: U-before-V order)",
+            lavfi: "testsrc=size=548x388:rate=10",
+            pix_fmt: "yuv422p",
+            aom: &["-cpu-used", "1"],
+        },
+        Case {
+            name: "testsrc 320x240 4:4:4 (multi-tx chroma blocks: U-before-V order)",
+            lavfi: "testsrc=size=320x240:rate=10",
+            pix_fmt: "yuv444p",
+            aom: &["-cpu-used", "1"],
+        },
+        Case {
             name: "testsrc2 192x128 4:4:4 (unsubsampled chroma planes and refs)",
             lavfi: "testsrc2=size=192x128:rate=10",
             pix_fmt: "yuv444p",

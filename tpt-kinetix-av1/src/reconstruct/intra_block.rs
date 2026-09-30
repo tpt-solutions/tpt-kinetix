@@ -752,26 +752,32 @@ impl<'a> TileDecodeState<'a> {
                 let chroma_bw = BLOCK_WIDTH[plane_sz];
                 let chroma_bh = BLOCK_HEIGHT[plane_sz];
                 let (ccy0, ccx0) = (cy0 >> sub_y, cx0 >> sub_x);
-                for ty in (ccy0..((cy0 + 64) >> sub_y).min(chroma_bh)).step_by(ch) {
-                    for tx in (ccx0..((cx0 + 64) >> sub_x).min(chroma_bw)).step_by(cw) {
-                        if (mi_col >> sub_x) * MI_SIZE + tx >= (self.mi_cols * MI_SIZE) >> sub_x
-                            || (mi_row >> sub_y) * MI_SIZE + ty >= (self.mi_rows * MI_SIZE) >> sub_y
-                        {
-                            continue;
-                        }
-                        let cpx_x = base_cpx_x + tx;
-                        let cpx_y = base_cpx_y + ty;
-                        if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_INTRA_CXY") {
-                            if let Some((sx, sy)) = spec.split_once(',') {
-                                if let (Ok(tx_), Ok(ty_)) =
-                                    (sx.trim().parse::<usize>(), sy.trim().parse::<usize>())
-                                {
-                                    if tx_ >= cpx_x
-                                        && tx_ < cpx_x + cw
-                                        && ty_ >= cpx_y
-                                        && ty_ < cpx_y + ch
+                // Spec `residual()`: for each 64x64 chunk, all transform blocks of
+                // plane 1 (U) come before any of plane 2 (V). With a chroma block
+                // larger than one transform (4:4:4 64x64, 4:2:2 32x64) the two
+                // planes' symbols must not be interleaved per transform block.
+                for chroma_pass in 0..2usize {
+                    for ty in (ccy0..((cy0 + 64) >> sub_y).min(chroma_bh)).step_by(ch) {
+                        for tx in (ccx0..((cx0 + 64) >> sub_x).min(chroma_bw)).step_by(cw) {
+                            if (mi_col >> sub_x) * MI_SIZE + tx >= (self.mi_cols * MI_SIZE) >> sub_x
+                                || (mi_row >> sub_y) * MI_SIZE + ty
+                                    >= (self.mi_rows * MI_SIZE) >> sub_y
+                            {
+                                continue;
+                            }
+                            let cpx_x = base_cpx_x + tx;
+                            let cpx_y = base_cpx_y + ty;
+                            if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_INTRA_CXY") {
+                                if let Some((sx, sy)) = spec.split_once(',') {
+                                    if let (Ok(tx_), Ok(ty_)) =
+                                        (sx.trim().parse::<usize>(), sy.trim().parse::<usize>())
                                     {
-                                        eprintln!(
+                                        if tx_ >= cpx_x
+                                            && tx_ < cpx_x + cw
+                                            && ty_ >= cpx_y
+                                            && ty_ < cpx_y + ch
+                                        {
+                                            eprintln!(
                                         "INTRACXY fr={} mi=({mi_col},{mi_row}) bsize={bsize} cpx=({cpx_x},{cpx_y}) cw={cw} ch={ch} max_luma=({max_luma_w},{max_luma_h}) uv_mode={uv_mode} cfl_alpha={:?} tile_cw={} tile_ch={} y_stride={}",
                                         crate::debug_frame_seq::current(),
                                         cfl_alpha,
@@ -779,158 +785,165 @@ impl<'a> TileDecodeState<'a> {
                                         self.tile_ch,
                                         self.y_stride,
                                     );
+                                        }
                                     }
                                 }
                             }
+                            if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                                continue;
+                            }
+                            // Mark this individual chroma transform sub-block's own
+                            // left/top grid cells as real deblock edges — same
+                            // reasoning as the luma `mark_luma_edges` call above.
+                            // Chroma is stored at the shared luma-grid resolution
+                            // (`FrameMeta`'s doc comment: one grid cell == 4 chroma
+                            // samples == 8 luma samples), matching the `/8`-of-luma
+                            // == `/4`-of-chroma scale the existing `bx0`/`by0`
+                            // computation below already relies on.
+                            self.meta.mark_chroma_edges(
+                                cpx_x / 4,
+                                cpx_y / 4,
+                                (cpx_x + cw).div_ceil(4),
+                                (cpx_y + ch).div_ceil(4),
+                            );
+                            let blk_u = TxBlockCtx {
+                                plane: 1,
+                                tx_size: c_tx,
+                                x4: cpx_x / 4,
+                                y4: cpx_y / 4,
+                                max_x4: self.uv_max_x4,
+                                max_y4: self.uv_max_y4,
+                                // Same fix as the luma case above: the coded block's
+                                // chroma plane-residual size (`chroma_bw`/`chroma_bh`,
+                                // already `Block_Width`/`Height[get_plane_residual_
+                                // size(MiSize, 1)]`), not this transform block's own
+                                // `cw`/`ch`.
+                                block_w: chroma_bw,
+                                block_h: chroma_bh,
+                                intra_dir: uv_mode,
+                                uv_mode,
+                                qindex_positive: !self.lossless,
+                                reduced_tx_set: self.reduced_tx_set,
+                                lossless: self.lossless,
+                                is_inter: false,
+                                coincident_luma_tx_type: av1::DCT_DCT,
+                            };
+                            let blk_v = TxBlockCtx { plane: 2, ..blk_u };
+                            let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
+                                luma: &*y_plane,
+                                luma_stride: self.y_stride,
+                                sub_x: self.subsampling_x,
+                                sub_y: self.subsampling_y,
+                                max_luma_w,
+                                max_luma_h,
+                                luma_w: self.tile_w,
+                                luma_h: self.tile_h,
+                                overhang: &self.luma_overhang,
+                                alpha: au,
+                            });
+                            let cfl_v = cfl_alpha.map(|(_, av)| CflParams {
+                                luma: &*y_plane,
+                                luma_stride: self.y_stride,
+                                sub_x: self.subsampling_x,
+                                sub_y: self.subsampling_y,
+                                max_luma_w,
+                                max_luma_h,
+                                luma_w: self.tile_w,
+                                luma_h: self.tile_h,
+                                overhang: &self.luma_overhang,
+                                alpha: av,
+                            });
+                            let palette_u =
+                                (!palette.colors_u.is_empty()).then(|| PaletteBlockInfo {
+                                    colors: &palette.colors_u,
+                                    color_map: &palette.map_uv,
+                                    map_stride: palette.stride_uv,
+                                    off_x: tx,
+                                    off_y: ty,
+                                });
+                            let palette_v =
+                                (!palette.colors_v.is_empty()).then(|| PaletteBlockInfo {
+                                    colors: &palette.colors_v,
+                                    color_map: &palette.map_uv,
+                                    map_stride: palette.stride_uv,
+                                    off_x: tx,
+                                    off_y: ty,
+                                });
+                            if chroma_pass == 0 {
+                                reconstruct_tx_block(
+                                    &mut self.dec,
+                                    &mut self.coeff_cdfs,
+                                    &mut self.coeff_ctxs,
+                                    &blk_u,
+                                    u_plane,
+                                    self.uv_stride,
+                                    self.tile_cw,
+                                    self.tile_ch,
+                                    cpx_x,
+                                    cpx_y,
+                                    c_tx,
+                                    u_qindex_dc,
+                                    u_qindex_ac,
+                                    uv_mode,
+                                    skip,
+                                    None,
+                                    self.enable_intra_edge_filter,
+                                    filter_type_uv,
+                                    cfl_u,
+                                    angle_delta_uv,
+                                    palette_u,
+                                    {
+                                        let (sr, sc) = bd_index(1, cpx_x, cpx_y);
+                                        BlockDecodedCtx {
+                                            grid: &mut bd_u[..],
+                                            sub_r: sr,
+                                            sub_c: sc,
+                                            step_x: cw >> 2,
+                                            step_y: ch >> 2,
+                                            overhang: None,
+                                        }
+                                    },
+                                    self.bit_depth,
+                                )?;
+                            }
+                            if chroma_pass == 1 {
+                                reconstruct_tx_block(
+                                    &mut self.dec,
+                                    &mut self.coeff_cdfs,
+                                    &mut self.coeff_ctxs,
+                                    &blk_v,
+                                    v_plane,
+                                    self.uv_stride,
+                                    self.tile_cw,
+                                    self.tile_ch,
+                                    cpx_x,
+                                    cpx_y,
+                                    c_tx,
+                                    v_qindex_dc,
+                                    v_qindex_ac,
+                                    uv_mode,
+                                    skip,
+                                    None,
+                                    self.enable_intra_edge_filter,
+                                    filter_type_uv,
+                                    cfl_v,
+                                    angle_delta_uv,
+                                    palette_v,
+                                    {
+                                        let (sr, sc) = bd_index(2, cpx_x, cpx_y);
+                                        BlockDecodedCtx {
+                                            grid: &mut bd_v[..],
+                                            sub_r: sr,
+                                            sub_c: sc,
+                                            step_x: cw >> 2,
+                                            step_y: ch >> 2,
+                                            overhang: None,
+                                        }
+                                    },
+                                    self.bit_depth,
+                                )?;
+                            }
                         }
-                        if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
-                            continue;
-                        }
-                        // Mark this individual chroma transform sub-block's own
-                        // left/top grid cells as real deblock edges — same
-                        // reasoning as the luma `mark_luma_edges` call above.
-                        // Chroma is stored at the shared luma-grid resolution
-                        // (`FrameMeta`'s doc comment: one grid cell == 4 chroma
-                        // samples == 8 luma samples), matching the `/8`-of-luma
-                        // == `/4`-of-chroma scale the existing `bx0`/`by0`
-                        // computation below already relies on.
-                        self.meta.mark_chroma_edges(
-                            cpx_x / 4,
-                            cpx_y / 4,
-                            (cpx_x + cw).div_ceil(4),
-                            (cpx_y + ch).div_ceil(4),
-                        );
-                        let blk_u = TxBlockCtx {
-                            plane: 1,
-                            tx_size: c_tx,
-                            x4: cpx_x / 4,
-                            y4: cpx_y / 4,
-                            max_x4: self.uv_max_x4,
-                            max_y4: self.uv_max_y4,
-                            // Same fix as the luma case above: the coded block's
-                            // chroma plane-residual size (`chroma_bw`/`chroma_bh`,
-                            // already `Block_Width`/`Height[get_plane_residual_
-                            // size(MiSize, 1)]`), not this transform block's own
-                            // `cw`/`ch`.
-                            block_w: chroma_bw,
-                            block_h: chroma_bh,
-                            intra_dir: uv_mode,
-                            uv_mode,
-                            qindex_positive: !self.lossless,
-                            reduced_tx_set: self.reduced_tx_set,
-                            lossless: self.lossless,
-                            is_inter: false,
-                            coincident_luma_tx_type: av1::DCT_DCT,
-                        };
-                        let blk_v = TxBlockCtx { plane: 2, ..blk_u };
-                        let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
-                            luma: &*y_plane,
-                            luma_stride: self.y_stride,
-                            sub_x: self.subsampling_x,
-                            sub_y: self.subsampling_y,
-                            max_luma_w,
-                            max_luma_h,
-                            luma_w: self.tile_w,
-                            luma_h: self.tile_h,
-                            overhang: &self.luma_overhang,
-                            alpha: au,
-                        });
-                        let cfl_v = cfl_alpha.map(|(_, av)| CflParams {
-                            luma: &*y_plane,
-                            luma_stride: self.y_stride,
-                            sub_x: self.subsampling_x,
-                            sub_y: self.subsampling_y,
-                            max_luma_w,
-                            max_luma_h,
-                            luma_w: self.tile_w,
-                            luma_h: self.tile_h,
-                            overhang: &self.luma_overhang,
-                            alpha: av,
-                        });
-                        let palette_u = (!palette.colors_u.is_empty()).then(|| PaletteBlockInfo {
-                            colors: &palette.colors_u,
-                            color_map: &palette.map_uv,
-                            map_stride: palette.stride_uv,
-                            off_x: tx,
-                            off_y: ty,
-                        });
-                        let palette_v = (!palette.colors_v.is_empty()).then(|| PaletteBlockInfo {
-                            colors: &palette.colors_v,
-                            color_map: &palette.map_uv,
-                            map_stride: palette.stride_uv,
-                            off_x: tx,
-                            off_y: ty,
-                        });
-                        reconstruct_tx_block(
-                            &mut self.dec,
-                            &mut self.coeff_cdfs,
-                            &mut self.coeff_ctxs,
-                            &blk_u,
-                            u_plane,
-                            self.uv_stride,
-                            self.tile_cw,
-                            self.tile_ch,
-                            cpx_x,
-                            cpx_y,
-                            c_tx,
-                            u_qindex_dc,
-                            u_qindex_ac,
-                            uv_mode,
-                            skip,
-                            None,
-                            self.enable_intra_edge_filter,
-                            filter_type_uv,
-                            cfl_u,
-                            angle_delta_uv,
-                            palette_u,
-                            {
-                                let (sr, sc) = bd_index(1, cpx_x, cpx_y);
-                                BlockDecodedCtx {
-                                    grid: &mut bd_u[..],
-                                    sub_r: sr,
-                                    sub_c: sc,
-                                    step_x: cw >> 2,
-                                    step_y: ch >> 2,
-                                    overhang: None,
-                                }
-                            },
-                            self.bit_depth,
-                        )?;
-                        reconstruct_tx_block(
-                            &mut self.dec,
-                            &mut self.coeff_cdfs,
-                            &mut self.coeff_ctxs,
-                            &blk_v,
-                            v_plane,
-                            self.uv_stride,
-                            self.tile_cw,
-                            self.tile_ch,
-                            cpx_x,
-                            cpx_y,
-                            c_tx,
-                            v_qindex_dc,
-                            v_qindex_ac,
-                            uv_mode,
-                            skip,
-                            None,
-                            self.enable_intra_edge_filter,
-                            filter_type_uv,
-                            cfl_v,
-                            angle_delta_uv,
-                            palette_v,
-                            {
-                                let (sr, sc) = bd_index(2, cpx_x, cpx_y);
-                                BlockDecodedCtx {
-                                    grid: &mut bd_v[..],
-                                    sub_r: sr,
-                                    sub_c: sc,
-                                    step_x: cw >> 2,
-                                    step_y: ch >> 2,
-                                    overhang: None,
-                                }
-                            },
-                            self.bit_depth,
-                        )?;
                     }
                 }
                 // Record chroma tx/skip metadata for the same 8×8-luma grid region.
@@ -2426,221 +2439,237 @@ impl<'a> TileDecodeState<'a> {
                 col: mv.col >> sub_x,
             };
 
-            for ty in (0..chroma_bh).step_by(ch) {
-                for tx in (0..chroma_bw).step_by(cw) {
-                    let cpx_x = base_cpx_x + tx;
-                    let cpx_y = base_cpx_y + ty;
-                    if cpx_x >= tile_cw || cpx_y >= tile_ch {
-                        continue;
-                    }
-                    // See the keyframe path's identical call for why this
-                    // must be per-transform-sub-block.
-                    self.meta.mark_chroma_edges(
-                        cpx_x / 4,
-                        cpx_y / 4,
-                        (cpx_x + cw).div_ceil(4),
-                        (cpx_y + ch).div_ceil(4),
-                    );
-
-                    let src_cx = (cpx_x as i32 + cmv_dx) as usize;
-                    let src_cy = (cpx_y as i32 + cmv_dy) as usize;
-
-                    // Chroma's tx_type is always *derived*, never separately
-                    // read (`read_coeffs` only calls `read_.*transform_
-                    // type` for `plane == 0`), so `qindex_positive` here
-                    // only affects `compute_tx_type`'s output, not entropy
-                    // sync. `is_inter: true` routes chroma through
-                    // `get_uv_inter_txtp` (§7.11.3.1) instead of the intra
-                    // `uv_mode`-based `MODE_TO_TXFM` lookup, fed the real
-                    // coincident luma leaf's decoded type (`luma_tx_types`,
-                    // filled above as each luma leaf was read) — looked up
-                    // at this chroma block's own top-left corner subsampled
-                    // back to luma mi coordinates, matching spec `TxTypes[
-                    // y][x]`'s sampling point. A previous version always
-                    // fed a `DCT_DCT` placeholder here: harmless for
-                    // entropy sync (chroma never reads `tx_type` bits) but
-                    // wrong for `compute_tx_type`'s own output and, through
-                    // it, the `TX_CLASS`-derived `is_1d` context bit
-                    // `read_eob` uses for its *very next* symbol read —
-                    // desyncing chroma's coefficient decode for any block
-                    // whose real luma type wasn't `DCT_DCT` (confirmed via
-                    // a dav1d trace on a real `testsrc2` IBC block: dav1d's
-                    // `SKIPCTX_EOB` showed `is_1d=1`, the placeholder
-                    // produced `is_1d=0`).
-                    let luma_col = mi_col + ((tx << sub_x) / MI_SIZE).min(bw - 1);
-                    let luma_row = mi_row + ((ty << sub_y) / MI_SIZE).min(bh - 1);
-                    let coincident_luma_tx_type =
-                        luma_tx_types[(luma_row - mi_row) * bw + (luma_col - mi_col)];
-                    let blk_u = TxBlockCtx {
-                        plane: 1,
-                        tx_size: c_tx,
-                        x4: cpx_x / 4,
-                        y4: cpx_y / 4,
-                        max_x4: self.uv_max_x4,
-                        max_y4: self.uv_max_y4,
-                        block_w: chroma_bw,
-                        block_h: chroma_bh,
-                        intra_dir: DC_PRED as usize,
-                        uv_mode: DC_PRED as usize,
-                        qindex_positive: !self.lossless,
-                        reduced_tx_set: self.reduced_tx_set,
-                        lossless: self.lossless,
-                        is_inter: true,
-                        coincident_luma_tx_type,
-                    };
-                    let blk_v = TxBlockCtx { plane: 2, ..blk_u };
-
-                    let mut res_u = vec![0i32; cw * ch];
-                    let mut res_v = vec![0i32; cw * ch];
-                    if !skip {
-                        let cu = read_coeffs(
-                            &mut self.dec,
-                            &mut self.coeff_cdfs,
-                            &mut self.coeff_ctxs,
-                            &blk_u,
-                        )?;
-                        if cu.eob > 0 {
-                            let dq = dequantize_coeffs(
-                                &cu.quant,
-                                c_tx,
-                                u_qindex_dc,
-                                u_qindex_ac,
-                                self.bit_depth,
-                            );
-                            inverse_transform(
-                                &dq,
-                                cu.tx_type,
-                                c_tx,
-                                self.lossless,
-                                self.bit_depth,
-                                &mut res_u,
-                            );
+            // Spec `residual()`: U's transform blocks before V's (see keyframe path).
+            for chroma_pass in 0..2usize {
+                for ty in (0..chroma_bh).step_by(ch) {
+                    for tx in (0..chroma_bw).step_by(cw) {
+                        let cpx_x = base_cpx_x + tx;
+                        let cpx_y = base_cpx_y + ty;
+                        if cpx_x >= tile_cw || cpx_y >= tile_ch {
+                            continue;
                         }
-                        if std::env::var("KINETIX_AV1_DBG_IBC_UV").is_ok() {
-                            eprintln!(
-                                "DBG IBC_UV mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) \
+                        // See the keyframe path's identical call for why this
+                        // must be per-transform-sub-block.
+                        self.meta.mark_chroma_edges(
+                            cpx_x / 4,
+                            cpx_y / 4,
+                            (cpx_x + cw).div_ceil(4),
+                            (cpx_y + ch).div_ceil(4),
+                        );
+
+                        let src_cx = (cpx_x as i32 + cmv_dx) as usize;
+                        let src_cy = (cpx_y as i32 + cmv_dy) as usize;
+
+                        // Chroma's tx_type is always *derived*, never separately
+                        // read (`read_coeffs` only calls `read_.*transform_
+                        // type` for `plane == 0`), so `qindex_positive` here
+                        // only affects `compute_tx_type`'s output, not entropy
+                        // sync. `is_inter: true` routes chroma through
+                        // `get_uv_inter_txtp` (§7.11.3.1) instead of the intra
+                        // `uv_mode`-based `MODE_TO_TXFM` lookup, fed the real
+                        // coincident luma leaf's decoded type (`luma_tx_types`,
+                        // filled above as each luma leaf was read) — looked up
+                        // at this chroma block's own top-left corner subsampled
+                        // back to luma mi coordinates, matching spec `TxTypes[
+                        // y][x]`'s sampling point. A previous version always
+                        // fed a `DCT_DCT` placeholder here: harmless for
+                        // entropy sync (chroma never reads `tx_type` bits) but
+                        // wrong for `compute_tx_type`'s own output and, through
+                        // it, the `TX_CLASS`-derived `is_1d` context bit
+                        // `read_eob` uses for its *very next* symbol read —
+                        // desyncing chroma's coefficient decode for any block
+                        // whose real luma type wasn't `DCT_DCT` (confirmed via
+                        // a dav1d trace on a real `testsrc2` IBC block: dav1d's
+                        // `SKIPCTX_EOB` showed `is_1d=1`, the placeholder
+                        // produced `is_1d=0`).
+                        let luma_col = mi_col + ((tx << sub_x) / MI_SIZE).min(bw - 1);
+                        let luma_row = mi_row + ((ty << sub_y) / MI_SIZE).min(bh - 1);
+                        let coincident_luma_tx_type =
+                            luma_tx_types[(luma_row - mi_row) * bw + (luma_col - mi_col)];
+                        let blk_u = TxBlockCtx {
+                            plane: 1,
+                            tx_size: c_tx,
+                            x4: cpx_x / 4,
+                            y4: cpx_y / 4,
+                            max_x4: self.uv_max_x4,
+                            max_y4: self.uv_max_y4,
+                            block_w: chroma_bw,
+                            block_h: chroma_bh,
+                            intra_dir: DC_PRED as usize,
+                            uv_mode: DC_PRED as usize,
+                            qindex_positive: !self.lossless,
+                            reduced_tx_set: self.reduced_tx_set,
+                            lossless: self.lossless,
+                            is_inter: true,
+                            coincident_luma_tx_type,
+                        };
+                        let blk_v = TxBlockCtx { plane: 2, ..blk_u };
+
+                        let mut res_u = vec![0i32; cw * ch];
+                        let mut res_v = vec![0i32; cw * ch];
+                        if !skip {
+                            if chroma_pass == 0 {
+                                let cu = read_coeffs(
+                                    &mut self.dec,
+                                    &mut self.coeff_cdfs,
+                                    &mut self.coeff_ctxs,
+                                    &blk_u,
+                                )?;
+                                if cu.eob > 0 {
+                                    let dq = dequantize_coeffs(
+                                        &cu.quant,
+                                        c_tx,
+                                        u_qindex_dc,
+                                        u_qindex_ac,
+                                        self.bit_depth,
+                                    );
+                                    inverse_transform(
+                                        &dq,
+                                        cu.tx_type,
+                                        c_tx,
+                                        self.lossless,
+                                        self.bit_depth,
+                                        &mut res_u,
+                                    );
+                                }
+                                if std::env::var("KINETIX_AV1_DBG_IBC_UV").is_ok() {
+                                    eprintln!(
+                                        "DBG IBC_UV mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) \
                                  src_c=({src_cx},{src_cy}) c_tx={c_tx} cu.txtp={} cu.eob={} \
                                  cu.q0={} res_u0={} coincident_luma={coincident_luma_tx_type}",
-                                cu.tx_type,
-                                cu.eob,
-                                cu.quant.first().copied().unwrap_or(0),
-                                res_u[0]
-                            );
+                                        cu.tx_type,
+                                        cu.eob,
+                                        cu.quant.first().copied().unwrap_or(0),
+                                        res_u[0]
+                                    );
+                                }
+                            }
+                            if chroma_pass == 1 {
+                                let cv = read_coeffs(
+                                    &mut self.dec,
+                                    &mut self.coeff_cdfs,
+                                    &mut self.coeff_ctxs,
+                                    &blk_v,
+                                )?;
+                                if cv.eob > 0 {
+                                    let dq = dequantize_coeffs(
+                                        &cv.quant,
+                                        c_tx,
+                                        v_qindex_dc,
+                                        v_qindex_ac,
+                                        self.bit_depth,
+                                    );
+                                    inverse_transform(
+                                        &dq,
+                                        cv.tx_type,
+                                        c_tx,
+                                        self.lossless,
+                                        self.bit_depth,
+                                        &mut res_v,
+                                    );
+                                }
+                            }
+                        } else if chroma_pass == 0 {
+                            // See the luma branch above / `clear_coeff_context`'s
+                            // doc comment.
+                            clear_coeff_context(&mut self.coeff_ctxs, &blk_u, cw / 4, ch / 4);
+                        } else {
+                            clear_coeff_context(&mut self.coeff_ctxs, &blk_v, cw / 4, ch / 4);
                         }
-                        let cv = read_coeffs(
-                            &mut self.dec,
-                            &mut self.coeff_cdfs,
-                            &mut self.coeff_ctxs,
-                            &blk_v,
-                        )?;
-                        if cv.eob > 0 {
-                            let dq = dequantize_coeffs(
-                                &cv.quant,
-                                c_tx,
-                                v_qindex_dc,
-                                v_qindex_ac,
-                                self.bit_depth,
-                            );
-                            inverse_transform(
-                                &dq,
-                                cv.tx_type,
-                                c_tx,
-                                self.lossless,
-                                self.bit_depth,
-                                &mut res_v,
-                            );
-                        }
-                    } else {
-                        // See the luma branch above / `clear_coeff_context`'s
-                        // doc comment.
-                        clear_coeff_context(&mut self.coeff_ctxs, &blk_u, cw / 4, ch / 4);
-                        clear_coeff_context(&mut self.coeff_ctxs, &blk_v, cw / 4, ch / 4);
-                    }
 
-                    // Bilinear sub-pel IBC prediction (dav1d intrabc chroma
-                    // path) into per-plane block buffers, then add residual.
-                    let mut pred_u = vec![0 as Px; cw * ch];
-                    let mut pred_v = vec![0 as Px; cw * ch];
-                    crate::inter::motion_compensate(
-                        &mut pred_u,
-                        cw,
-                        u_plane,
-                        uv_stride,
-                        tile_cw,
-                        tile_ch,
-                        cpx_x,
-                        cpx_y,
-                        cw,
-                        ch,
-                        c_mv,
-                        crate::inter::INTERP_BILINEAR,
-                        crate::inter::INTERP_BILINEAR,
-                        3,
-                        3,
-                        self.bit_depth,
-                    );
-                    crate::inter::motion_compensate(
-                        &mut pred_v,
-                        cw,
-                        v_plane,
-                        uv_stride,
-                        tile_cw,
-                        tile_ch,
-                        cpx_x,
-                        cpx_y,
-                        cw,
-                        ch,
-                        c_mv,
-                        crate::inter::INTERP_BILINEAR,
-                        crate::inter::INTERP_BILINEAR,
-                        3,
-                        3,
-                        self.bit_depth,
-                    );
-                    for dy in 0..ch {
-                        let wy = cpx_y + dy;
-                        if wy >= tile_ch {
-                            break;
+                        // Bilinear sub-pel IBC prediction (dav1d intrabc chroma
+                        // path) into per-plane block buffers, then add residual.
+                        let mut pred_u = vec![0 as Px; cw * ch];
+                        let mut pred_v = vec![0 as Px; cw * ch];
+                        if chroma_pass == 0 {
+                            crate::inter::motion_compensate(
+                                &mut pred_u,
+                                cw,
+                                u_plane,
+                                uv_stride,
+                                tile_cw,
+                                tile_ch,
+                                cpx_x,
+                                cpx_y,
+                                cw,
+                                ch,
+                                c_mv,
+                                crate::inter::INTERP_BILINEAR,
+                                crate::inter::INTERP_BILINEAR,
+                                3,
+                                3,
+                                self.bit_depth,
+                            );
                         }
-                        for dx in 0..cw {
-                            let wx = cpx_x + dx;
-                            if wx >= tile_cw {
+                        if chroma_pass == 1 {
+                            crate::inter::motion_compensate(
+                                &mut pred_v,
+                                cw,
+                                v_plane,
+                                uv_stride,
+                                tile_cw,
+                                tile_ch,
+                                cpx_x,
+                                cpx_y,
+                                cw,
+                                ch,
+                                c_mv,
+                                crate::inter::INTERP_BILINEAR,
+                                crate::inter::INTERP_BILINEAR,
+                                3,
+                                3,
+                                self.bit_depth,
+                            );
+                        }
+                        for dy in 0..ch {
+                            let wy = cpx_y + dy;
+                            if wy >= tile_ch {
                                 break;
                             }
-                            if let Some(slot) = u_plane.get_mut(wy * uv_stride + wx) {
-                                *slot = (pred_u[dy * cw + dx] as i32 + res_u[dy * cw + dx])
-                                    .clamp(0, pix_max)
-                                    as Px;
-                            }
-                            if let Some(slot) = v_plane.get_mut(wy * uv_stride + wx) {
-                                *slot = (pred_v[dy * cw + dx] as i32 + res_v[dy * cw + dx])
-                                    .clamp(0, pix_max)
-                                    as Px;
+                            for dx in 0..cw {
+                                let wx = cpx_x + dx;
+                                if wx >= tile_cw {
+                                    break;
+                                }
+                                if chroma_pass == 0 {
+                                    if let Some(slot) = u_plane.get_mut(wy * uv_stride + wx) {
+                                        *slot = (pred_u[dy * cw + dx] as i32 + res_u[dy * cw + dx])
+                                            .clamp(0, pix_max)
+                                            as Px;
+                                    }
+                                }
+                                if chroma_pass == 1 {
+                                    if let Some(slot) = v_plane.get_mut(wy * uv_stride + wx) {
+                                        *slot = (pred_v[dy * cw + dx] as i32 + res_v[dy * cw + dx])
+                                            .clamp(0, pix_max)
+                                            as Px;
+                                    }
+                                }
                             }
                         }
-                    }
 
-                    let (sr, sc) = bd_index(1, cpx_x, cpx_y);
-                    let step_c = (cw >> 2).max(1);
-                    let step_r = (ch >> 2).max(1);
-                    BlockDecodedCtx {
-                        grid: &mut bd_u[..],
-                        sub_r: sr,
-                        sub_c: sc,
-                        step_x: step_c,
-                        step_y: step_r,
-                        overhang: None,
+                        let (sr, sc) = bd_index(1, cpx_x, cpx_y);
+                        let step_c = (cw >> 2).max(1);
+                        let step_r = (ch >> 2).max(1);
+                        BlockDecodedCtx {
+                            grid: &mut bd_u[..],
+                            sub_r: sr,
+                            sub_c: sc,
+                            step_x: step_c,
+                            step_y: step_r,
+                            overhang: None,
+                        }
+                        .mark();
+                        BlockDecodedCtx {
+                            grid: &mut bd_v[..],
+                            sub_r: sr,
+                            sub_c: sc,
+                            step_x: step_c,
+                            step_y: step_r,
+                            overhang: None,
+                        }
+                        .mark();
                     }
-                    .mark();
-                    BlockDecodedCtx {
-                        grid: &mut bd_v[..],
-                        sub_r: sr,
-                        sub_c: sc,
-                        step_x: step_c,
-                        step_y: step_r,
-                        overhang: None,
-                    }
-                    .mark();
                 }
             }
 

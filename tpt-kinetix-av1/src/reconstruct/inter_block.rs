@@ -4342,228 +4342,235 @@ impl<'a> TileDecodeState<'a> {
                 let chunk_cpx_x1 = (((chunk_x + 1) * 16 * MI_SIZE) >> sub_x).min(chroma_bw);
                 let chunk_cpx_y0 = (chunk_y * 16 * MI_SIZE) >> sub_y;
                 let chunk_cpx_y1 = (((chunk_y + 1) * 16 * MI_SIZE) >> sub_y).min(chroma_bh);
-                let mut ty = chunk_cpx_y0;
-                while ty < chunk_cpx_y1 {
-                    let mut tx = chunk_cpx_x0;
-                    while tx < chunk_cpx_x1 {
-                        let cpx_x = base_cpx_x + tx;
-                        let cpx_y = base_cpx_y + ty;
-                        if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
-                            tx += cw;
-                            continue;
-                        }
-                        // AV1 §7.14.1: chroma deblock edges are at luma block
-                        // boundaries, regardless of whether this block owns chroma
-                        // samples (has_chroma). A block at even (mi_col, mi_row) with
-                        // 4×4 luma size has_chroma=false but still creates a real
-                        // luma-grid boundary that the chroma deblock must filter.
-                        self.meta.mark_chroma_edges_sel(
-                            cpx_x / 4,
-                            cpx_y / 4,
-                            (cpx_x + cw).div_ceil(4),
-                            (cpx_y + ch).div_ceil(4),
-                            !skip || tx == 0,
-                            !skip || ty == 0,
-                        );
-                        if !has_chroma {
-                            // No chroma of its own (§7.3.1): skip coefficient reading
-                            // and reconstruction, but edge geometry above is still needed.
-                            tx += cw;
-                            continue;
-                        }
-                        for (plane, dst, stride, w, h) in [
-                            (
-                                1usize,
-                                &mut *self.u_plane,
-                                self.uv_stride,
-                                self.tile_cw,
-                                self.tile_ch,
-                            ),
-                            (
-                                2usize,
-                                &mut *self.v_plane,
-                                self.uv_stride,
-                                self.tile_cw,
-                                self.tile_ch,
-                            ),
-                        ] {
-                            let mut residual = vec![0i32; cw * ch];
-                            if !has_residual {
-                                // A skipped block reads no chroma coeffs but must
-                                // still reset the neighbour context — the luma path
-                                // above already does this (`clear_coeff_context`);
-                                // this branch was missing here, so a skip inter
-                                // block left the chroma `above_level`/`left_level`/
-                                // `*_dc` arrays holding whatever a previous block (or
-                                // an earlier frame, since the arrays persist across
-                                // `decode()` calls) had written, corrupting
-                                // `all_zero_ctx` for the next real chroma read at
-                                // that position (first observed on a hierarchical-GOP
-                                // stream: a skip block leaving `left=11` stale, then
-                                // desyncing the very next coded TX_8X4 chroma block).
-                                let clear_blk = TxBlockCtx {
-                                    plane,
-                                    tx_size: c_tx,
-                                    x4: cpx_x / 4,
-                                    y4: cpx_y / 4,
-                                    max_x4: self.uv_max_x4,
-                                    max_y4: self.uv_max_y4,
-                                    block_w: 0,
-                                    block_h: 0,
-                                    intra_dir: 0,
-                                    uv_mode: 0,
-                                    qindex_positive: !self.lossless,
-                                    reduced_tx_set: self.reduced_tx_set,
-                                    lossless: self.lossless,
-                                    is_inter: true,
-                                    coincident_luma_tx_type: av1::DCT_DCT,
-                                };
-                                clear_coeff_context(
-                                    &mut self.coeff_ctxs,
-                                    &clear_blk,
-                                    cw / 4,
-                                    ch / 4,
-                                );
+                for chroma_pass in 0..2usize {
+                    let mut ty = chunk_cpx_y0;
+                    while ty < chunk_cpx_y1 {
+                        let mut tx = chunk_cpx_x0;
+                        while tx < chunk_cpx_x1 {
+                            let cpx_x = base_cpx_x + tx;
+                            let cpx_y = base_cpx_y + ty;
+                            if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                                tx += cw;
+                                continue;
                             }
-                            if has_residual {
-                                let blk = TxBlockCtx {
-                                    plane,
-                                    tx_size: c_tx,
-                                    x4: cpx_x / 4,
-                                    y4: cpx_y / 4,
-                                    max_x4: self.uv_max_x4,
-                                    max_y4: self.uv_max_y4,
-                                    // See the luma fix above: the coded block's
-                                    // chroma-plane size, not this transform block's
-                                    // own `cw`/`ch`. This inter chroma path already
-                                    // approximates the true `get_plane_residual_size`
-                                    // (see the `c_tx` heuristic above it), so this
-                                    // matches that same approximation rather than the
-                                    // exact spec table.
-                                    block_w: (bw * MI_SIZE) >> subsampling_x,
-                                    block_h: (bh * MI_SIZE) >> subsampling_y,
-                                    intra_dir: 0,
-                                    uv_mode: 0,
-                                    qindex_positive: !self.lossless,
-                                    reduced_tx_set: self.reduced_tx_set,
-                                    lossless: self.lossless,
-                                    is_inter: true,
-                                    // The real co-located luma leaf's decoded type —
-                                    // `get_uv_inter_txtp` needs it to pick the chroma
-                                    // transform family, and `read_eob`'s is_1d CDF
-                                    // context depends on it (a DCT_DCT placeholder
-                                    // here desynced the chroma read on every inter
-                                    // block whose luma leaf used a 1-D/identity type).
-                                    // §5.11.36/§7.12.3: the chroma tx type derives from
-                                    // the co-located luma leaf's decoded type (see
-                                    // `co_located_luma_type`); the miss fallback is this
-                                    // block's OWN first leaf read so far — `.first()` is
-                                    // load-bearing here, do not change to DCT_DCT or
-                                    // `.last()` (both measurably regressed the corpus,
-                                    // see that fn's docs).
-                                    coincident_luma_tx_type: co_located_luma_type(
-                                        &luma_leaf_types,
-                                        luma_leaf_types
-                                            .first()
-                                            .map(|&(_, _, _, _, t)| t)
-                                            .unwrap_or(av1::DCT_DCT),
-                                        mi_col,
-                                        mi_row,
-                                        sub_x,
-                                        sub_y,
-                                        cpx_x,
-                                        cpx_y,
-                                    ),
-                                };
-                                let coeffs = read_coeffs(
-                                    &mut self.dec,
-                                    &mut self.coeff_cdfs,
-                                    &mut self.coeff_ctxs,
-                                    &blk,
-                                )?;
-                                if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
-                                    eprintln!(
+                            // AV1 §7.14.1: chroma deblock edges are at luma block
+                            // boundaries, regardless of whether this block owns chroma
+                            // samples (has_chroma). A block at even (mi_col, mi_row) with
+                            // 4×4 luma size has_chroma=false but still creates a real
+                            // luma-grid boundary that the chroma deblock must filter.
+                            self.meta.mark_chroma_edges_sel(
+                                cpx_x / 4,
+                                cpx_y / 4,
+                                (cpx_x + cw).div_ceil(4),
+                                (cpx_y + ch).div_ceil(4),
+                                !skip || tx == 0,
+                                !skip || ty == 0,
+                            );
+                            if !has_chroma {
+                                // No chroma of its own (§7.3.1): skip coefficient reading
+                                // and reconstruction, but edge geometry above is still needed.
+                                tx += cw;
+                                continue;
+                            }
+                            for (plane, dst, stride, w, h) in [
+                                (
+                                    1usize,
+                                    &mut *self.u_plane,
+                                    self.uv_stride,
+                                    self.tile_cw,
+                                    self.tile_ch,
+                                ),
+                                (
+                                    2usize,
+                                    &mut *self.v_plane,
+                                    self.uv_stride,
+                                    self.tile_cw,
+                                    self.tile_ch,
+                                ),
+                            ] {
+                                // Spec `residual()` order: all of U's transform blocks in
+                                // the chunk, then all of V's (see the intra path).
+                                if plane != chroma_pass + 1 {
+                                    continue;
+                                }
+                                let mut residual = vec![0i32; cw * ch];
+                                if !has_residual {
+                                    // A skipped block reads no chroma coeffs but must
+                                    // still reset the neighbour context — the luma path
+                                    // above already does this (`clear_coeff_context`);
+                                    // this branch was missing here, so a skip inter
+                                    // block left the chroma `above_level`/`left_level`/
+                                    // `*_dc` arrays holding whatever a previous block (or
+                                    // an earlier frame, since the arrays persist across
+                                    // `decode()` calls) had written, corrupting
+                                    // `all_zero_ctx` for the next real chroma read at
+                                    // that position (first observed on a hierarchical-GOP
+                                    // stream: a skip block leaving `left=11` stale, then
+                                    // desyncing the very next coded TX_8X4 chroma block).
+                                    let clear_blk = TxBlockCtx {
+                                        plane,
+                                        tx_size: c_tx,
+                                        x4: cpx_x / 4,
+                                        y4: cpx_y / 4,
+                                        max_x4: self.uv_max_x4,
+                                        max_y4: self.uv_max_y4,
+                                        block_w: 0,
+                                        block_h: 0,
+                                        intra_dir: 0,
+                                        uv_mode: 0,
+                                        qindex_positive: !self.lossless,
+                                        reduced_tx_set: self.reduced_tx_set,
+                                        lossless: self.lossless,
+                                        is_inter: true,
+                                        coincident_luma_tx_type: av1::DCT_DCT,
+                                    };
+                                    clear_coeff_context(
+                                        &mut self.coeff_ctxs,
+                                        &clear_blk,
+                                        cw / 4,
+                                        ch / 4,
+                                    );
+                                }
+                                if has_residual {
+                                    let blk = TxBlockCtx {
+                                        plane,
+                                        tx_size: c_tx,
+                                        x4: cpx_x / 4,
+                                        y4: cpx_y / 4,
+                                        max_x4: self.uv_max_x4,
+                                        max_y4: self.uv_max_y4,
+                                        // See the luma fix above: the coded block's
+                                        // chroma-plane size, not this transform block's
+                                        // own `cw`/`ch`. This inter chroma path already
+                                        // approximates the true `get_plane_residual_size`
+                                        // (see the `c_tx` heuristic above it), so this
+                                        // matches that same approximation rather than the
+                                        // exact spec table.
+                                        block_w: (bw * MI_SIZE) >> subsampling_x,
+                                        block_h: (bh * MI_SIZE) >> subsampling_y,
+                                        intra_dir: 0,
+                                        uv_mode: 0,
+                                        qindex_positive: !self.lossless,
+                                        reduced_tx_set: self.reduced_tx_set,
+                                        lossless: self.lossless,
+                                        is_inter: true,
+                                        // The real co-located luma leaf's decoded type —
+                                        // `get_uv_inter_txtp` needs it to pick the chroma
+                                        // transform family, and `read_eob`'s is_1d CDF
+                                        // context depends on it (a DCT_DCT placeholder
+                                        // here desynced the chroma read on every inter
+                                        // block whose luma leaf used a 1-D/identity type).
+                                        // §5.11.36/§7.12.3: the chroma tx type derives from
+                                        // the co-located luma leaf's decoded type (see
+                                        // `co_located_luma_type`); the miss fallback is this
+                                        // block's OWN first leaf read so far — `.first()` is
+                                        // load-bearing here, do not change to DCT_DCT or
+                                        // `.last()` (both measurably regressed the corpus,
+                                        // see that fn's docs).
+                                        coincident_luma_tx_type: co_located_luma_type(
+                                            &luma_leaf_types,
+                                            luma_leaf_types
+                                                .first()
+                                                .map(|&(_, _, _, _, t)| t)
+                                                .unwrap_or(av1::DCT_DCT),
+                                            mi_col,
+                                            mi_row,
+                                            sub_x,
+                                            sub_y,
+                                            cpx_x,
+                                            cpx_y,
+                                        ),
+                                    };
+                                    let coeffs = read_coeffs(
+                                        &mut self.dec,
+                                        &mut self.coeff_cdfs,
+                                        &mut self.coeff_ctxs,
+                                        &blk,
+                                    )?;
+                                    if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                                        eprintln!(
                                 "DBG uv-cf-blk seq={} mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} cw={cw} ch={ch} txtp={} eob={} rng={}",
                                 crate::debug_frame_seq::current(),
                                 coeffs.tx_type,
                                 coeffs.eob,
                                 self.dec.raw_state().0
                             );
-                                }
-                                if coeffs.eob > 0 {
-                                    let (qindex_dc, qindex_ac) = if plane == 1 {
-                                        (u_qindex_dc, u_qindex_ac)
-                                    } else {
-                                        (v_qindex_dc, v_qindex_ac)
-                                    };
-                                    let dequant = dequantize_coeffs(
-                                        &coeffs.quant,
-                                        c_tx,
-                                        qindex_dc,
-                                        qindex_ac,
-                                        self.bit_depth,
-                                    );
-                                    inverse_transform(
-                                        &dequant,
-                                        coeffs.tx_type,
-                                        c_tx,
-                                        self.lossless,
-                                        self.bit_depth,
-                                        &mut residual,
-                                    );
-                                    if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
-                                        eprintln!(
+                                    }
+                                    if coeffs.eob > 0 {
+                                        let (qindex_dc, qindex_ac) = if plane == 1 {
+                                            (u_qindex_dc, u_qindex_ac)
+                                        } else {
+                                            (v_qindex_dc, v_qindex_ac)
+                                        };
+                                        let dequant = dequantize_coeffs(
+                                            &coeffs.quant,
+                                            c_tx,
+                                            qindex_dc,
+                                            qindex_ac,
+                                            self.bit_depth,
+                                        );
+                                        inverse_transform(
+                                            &dequant,
+                                            coeffs.tx_type,
+                                            c_tx,
+                                            self.lossless,
+                                            self.bit_depth,
+                                            &mut residual,
+                                        );
+                                        if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
+                                            eprintln!(
                                     "RESDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} txtp={} residual={:?}",
                                     coeffs.tx_type,
                                     &residual[..(cw * ch).min(64)]
                                 );
-                                        eprintln!(
+                                            eprintln!(
                                     "COEFFDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} eob={} dequant={:?}",
                                     coeffs.eob,
                                     &dequant[..(cw * ch).min(64)]
                                 );
+                                        }
                                     }
                                 }
-                            }
-                            for dy in 0..ch {
-                                let sy = cpx_y + dy;
-                                if sy >= h {
-                                    break;
-                                }
-                                for dx in 0..cw {
-                                    let sx = cpx_x + dx;
-                                    if sx >= w {
+                                for dy in 0..ch {
+                                    let sy = cpx_y + dy;
+                                    if sy >= h {
                                         break;
                                     }
-                                    if let Some(slot) = dst.get_mut(sy * stride + sx) {
-                                        *slot = ((*slot as i32 + residual[dy * cw + dx])
-                                            .clamp(0, pix_max))
-                                            as Px;
+                                    for dx in 0..cw {
+                                        let sx = cpx_x + dx;
+                                        if sx >= w {
+                                            break;
+                                        }
+                                        if let Some(slot) = dst.get_mut(sy * stride + sx) {
+                                            *slot = ((*slot as i32 + residual[dy * cw + dx])
+                                                .clamp(0, pix_max))
+                                                as Px;
+                                        }
                                     }
                                 }
+                                if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok()
+                                    && mi_col == 4
+                                    && mi_row == 20
+                                    && cpx_x == 8
+                                    && cpx_y == 40
+                                    && plane == 1
+                                {
+                                    eprintln!(
+                                        "POSTADD u rows40-43 cols8-15: {:?}",
+                                        (0..4)
+                                            .map(|r| {
+                                                (0..8)
+                                                    .map(|c| dst[(40 + r) * stride + 8 + c])
+                                                    .collect::<Vec<Px>>()
+                                            })
+                                            .collect::<Vec<Vec<Px>>>()
+                                    );
+                                }
                             }
-                            if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok()
-                                && mi_col == 4
-                                && mi_row == 20
-                                && cpx_x == 8
-                                && cpx_y == 40
-                                && plane == 1
-                            {
-                                eprintln!(
-                                    "POSTADD u rows40-43 cols8-15: {:?}",
-                                    (0..4)
-                                        .map(|r| {
-                                            (0..8)
-                                                .map(|c| dst[(40 + r) * stride + 8 + c])
-                                                .collect::<Vec<Px>>()
-                                        })
-                                        .collect::<Vec<Vec<Px>>>()
-                                );
-                            }
+                            tx += cw;
                         }
-                        tx += cw;
+                        ty += ch;
                     }
-                    ty += ch;
                 }
             }
         }
