@@ -527,10 +527,10 @@ impl<'a> TileDecodeState<'a> {
                         0,
                     );
                     self.meta.record_lf_level_chroma(
-                        px_x / 8,
-                        px_y / 8,
-                        (px_x + luma_tx_w).div_ceil(8),
-                        (px_y + luma_tx_h).div_ceil(8),
+                        self.meta.ccx(px_x),
+                        self.meta.ccy(px_y),
+                        self.meta.ccx_end(px_x + luma_tx_w),
+                        self.meta.ccy_end(px_y + luma_tx_h),
                         lu as u8,
                         lv as u8,
                     );
@@ -936,8 +936,8 @@ impl<'a> TileDecodeState<'a> {
                 // Record chroma tx/skip metadata for the same 8×8-luma grid region.
                 let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
                 let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
-                for by in by0..by1.min(self.meta.h8) {
-                    for bx in bx0..bx1.min(self.meta.w8) {
+                for by in self.meta.ccy(blk_px_y)..self.meta.ccy_end(blk_px_y + bh * MI_SIZE).min(self.meta.ch4) {
+                    for bx in self.meta.ccx(blk_px_x)..self.meta.ccx_end(blk_px_x + bw * MI_SIZE).min(self.meta.cw4) {
                         self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
                     }
                 }
@@ -2369,10 +2369,6 @@ impl<'a> TileDecodeState<'a> {
         // loop-filter metadata below.
         let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
         let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
-        let bx0 = blk_px_x / 8;
-        let by0 = blk_px_y / 8;
-        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
-        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
 
         // ── Chroma transform blocks ───────────────────────────────────────────
         if !self.monochrome
@@ -2640,8 +2636,8 @@ impl<'a> TileDecodeState<'a> {
 
             let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
             let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
-            for by in by0..by1.min(self.meta.h8) {
-                for bx in bx0..bx1.min(self.meta.w8) {
+            for by in self.meta.ccy(blk_px_y)..self.meta.ccy_end(blk_px_y + bh * MI_SIZE).min(self.meta.ch4) {
+                for bx in self.meta.ccx(blk_px_x)..self.meta.ccx_end(blk_px_x + bw * MI_SIZE).min(self.meta.cw4) {
                     self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
                 }
             }

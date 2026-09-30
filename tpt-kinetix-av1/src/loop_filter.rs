@@ -140,6 +140,9 @@ pub struct FrameMeta {
     pub cw4: usize,
     /// Number of chroma 4×4 cells vertically. See `cw4`.
     pub ch4: usize,
+    /// Chroma subsampling this meta was built for (see [`FrameMeta::new_ss`]).
+    pub ss_x: u8,
+    pub ss_y: u8,
     /// Same role as `luma_tx_w`, at 4×4-luma-cell resolution.
     pub luma_tx_w4: Vec<u8>,
     /// Same role as `luma_tx_h`, at 4×4-luma-cell resolution.
@@ -230,9 +233,21 @@ pub enum LrUnitData {
 
 impl FrameMeta {
     pub fn new(width: usize, height: usize) -> Self {
+        Self::new_ss(width, height, 1, 1)
+    }
+
+    /// [`new`](Self::new) for an arbitrary chroma subsampling. The chroma
+    /// grids (`u_*`/`v_*`/`chroma_edge_*`/`lf_level_*`) are indexed in
+    /// 4×4-*chroma*-sample cells: `cw4 = ceil(width / (4 << ss_x))` by
+    /// `ch4 = ceil(height / (4 << ss_y))`. For 4:2:0 that is exactly the
+    /// 8×8-luma grid; for 4:2:2 / 4:4:4 it is finer along the unsubsampled axis.
+    pub fn new_ss(width: usize, height: usize, ss_x: usize, ss_y: usize) -> Self {
         let w8 = width.div_ceil(8);
         let h8 = height.div_ceil(8);
         let len = w8 * h8;
+        let cw4 = width.div_ceil(4 << ss_x);
+        let ch4 = height.div_ceil(4 << ss_y);
+        let clen = cw4 * ch4;
         let w4 = width.div_ceil(4);
         let h4 = height.div_ceil(4);
         let len4 = w4 * h4;
@@ -242,31 +257,25 @@ impl FrameMeta {
             luma_tx_w: vec![0u8; len],
             luma_tx_h: vec![0u8; len],
             luma_skip: vec![true; len],
-            u_tx_w: vec![0u8; len],
-            u_tx_h: vec![0u8; len],
-            u_skip: vec![true; len],
-            v_tx_w: vec![0u8; len],
-            v_tx_h: vec![0u8; len],
-            v_skip: vec![true; len],
+            u_tx_w: vec![0u8; clen],
+            u_tx_h: vec![0u8; clen],
+            u_skip: vec![true; clen],
+            v_tx_w: vec![0u8; clen],
+            v_tx_h: vec![0u8; clen],
+            v_skip: vec![true; clen],
             luma_edge_left: vec![false; len],
             luma_edge_top: vec![false; len],
-            chroma_edge_left: vec![false; len],
-            chroma_edge_top: vec![false; len],
-            lf_level_u4: {
-                let cw = w4.div_ceil(2);
-                let ch = h4.div_ceil(2);
-                vec![0u8; cw * ch]
-            },
-            lf_level_v4: {
-                let cw = w4.div_ceil(2);
-                let ch = h4.div_ceil(2);
-                vec![0u8; cw * ch]
-            },
+            chroma_edge_left: vec![false; clen],
+            chroma_edge_top: vec![false; clen],
+            lf_level_u4: vec![0u8; clen],
+            lf_level_v4: vec![0u8; clen],
             delta_lf: vec![[0i8; 4]; len],
             w4,
             h4,
-            cw4: w4.div_ceil(2),
-            ch4: h4.div_ceil(2),
+            cw4,
+            ch4,
+            ss_x: ss_x as u8,
+            ss_y: ss_y as u8,
             luma_tx_w4: vec![0u8; len4],
             luma_tx_h4: vec![0u8; len4],
             luma_edge_left4: vec![false; len4],
@@ -277,6 +286,27 @@ impl FrameMeta {
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
         }
+    }
+
+    /// First chroma 4×4 cell column covering luma-pixel column `px`.
+    #[inline]
+    pub fn ccx(&self, px: usize) -> usize {
+        px / (4 << self.ss_x)
+    }
+    /// One past the last chroma cell column covering luma end-column `px_end`.
+    #[inline]
+    pub fn ccx_end(&self, px_end: usize) -> usize {
+        px_end.div_ceil(4 << self.ss_x)
+    }
+    /// Row counterpart of [`ccx`](Self::ccx).
+    #[inline]
+    pub fn ccy(&self, px: usize) -> usize {
+        px / (4 << self.ss_y)
+    }
+    /// Row counterpart of [`ccx_end`](Self::ccx_end).
+    #[inline]
+    pub fn ccy_end(&self, px_end: usize) -> usize {
+        px_end.div_ceil(4 << self.ss_y)
     }
 
     #[inline]
@@ -381,10 +411,10 @@ impl FrameMeta {
     /// See `record_luma`'s doc comment — pair with
     /// [`mark_chroma_edges`](Self::mark_chroma_edges).
     pub fn record_chroma(&mut self, bx: usize, by: usize, tx_w: u8, tx_h: u8, skip: bool) {
-        if bx >= self.w8 || by >= self.h8 {
+        if bx >= self.cw4 || by >= self.ch4 {
             return;
         }
-        let i = self.idx(bx, by);
+        let i = by * self.cw4 + bx;
         self.u_tx_w[i] = self.u_tx_w[i].max(tx_w);
         self.u_tx_h[i] = self.u_tx_h[i].max(tx_h);
         self.v_tx_w[i] = self.v_tx_w[i].max(tx_w);
@@ -450,8 +480,8 @@ impl FrameMeta {
         left: bool,
         top: bool,
     ) {
-        let by1c = by1.min(self.h8);
-        let bx1c = bx1.min(self.w8);
+        let by1c = by1.min(self.ch4);
+        let bx1c = bx1.min(self.cw4);
         if std::env::var("KINETIX_AV1_DBG_CHROMA_EDGE_MARK").is_ok()
             && bx0 <= 16
             && 16 < bx1
@@ -461,15 +491,15 @@ impl FrameMeta {
                 "mark_chroma_edges bx0={bx0} by0={by0} bx1={bx1} by1={by1} bx1c={bx1c} by1c={by1c}"
             );
         }
-        if left && bx0 < self.w8 {
+        if left && bx0 < self.cw4 {
             for by in by0..by1c {
-                let i = self.idx(bx0, by);
+                let i = by * self.cw4 + bx0;
                 self.chroma_edge_left[i] = true;
             }
         }
-        if top && by0 < self.h8 {
+        if top && by0 < self.ch4 {
             for bx in bx0..bx1c {
-                let i = self.idx(bx, by0);
+                let i = by0 * self.cw4 + bx;
                 self.chroma_edge_top[i] = true;
             }
         }
@@ -592,21 +622,32 @@ impl FrameMeta {
                     src.luma_tx_h[i],
                     src.luma_skip[i],
                 );
-                self.record_chroma(dbx, dby, src.u_tx_w[i], src.u_tx_h[i], src.u_skip[i]);
                 self.record_delta_lf(dbx, dby, dbx + 1, dby + 1, src.delta_lf[i]);
                 let di = self.idx(dbx, dby);
                 self.luma_edge_left[di] |= src.luma_edge_left[i];
                 self.luma_edge_top[di] |= src.luma_edge_top[i];
-                self.chroma_edge_left[di] |= src.chroma_edge_left[i];
-                self.chroma_edge_top[di] |= src.chroma_edge_top[i];
-                // Merge chroma deblock-level cache (cw4 × ch4, same resolution as
-                // lf_level_u4/v4; cw4 == w8 for superblock-aligned grids).
-                if dbx < self.cw4 && dby < self.ch4 {
-                    let ci = by * src.cw4 + bx;
-                    let cdi = dby * self.cw4 + dbx;
-                    self.lf_level_u4[cdi] = src.lf_level_u4[ci];
-                    self.lf_level_v4[cdi] = src.lf_level_v4[ci];
+            }
+        }
+        // Chroma grids are in 4×4-chroma-sample cells; the tile offset (in
+        // 8×8-luma blocks) converts to `(ox * 2) >> ss_x` cells.
+        let cox = (ox * 2) >> self.ss_x;
+        let coy = (oy * 2) >> self.ss_y;
+        for by in 0..src.ch4 {
+            for bx in 0..src.cw4 {
+                let dbx = cox + bx;
+                let dby = coy + by;
+                if dbx >= self.cw4 || dby >= self.ch4 {
+                    continue;
                 }
+                let ci = by * src.cw4 + bx;
+                let cdi = dby * self.cw4 + dbx;
+                self.record_chroma(dbx, dby, src.u_tx_w[ci], src.u_tx_h[ci], src.u_skip[ci]);
+                // `record_chroma` mirrors U into V; V may differ only in skip.
+                self.v_skip[cdi] = self.v_skip[cdi] && src.v_skip[ci];
+                self.chroma_edge_left[cdi] |= src.chroma_edge_left[ci];
+                self.chroma_edge_top[cdi] |= src.chroma_edge_top[ci];
+                self.lf_level_u4[cdi] = src.lf_level_u4[ci];
+                self.lf_level_v4[cdi] = src.lf_level_v4[ci];
             }
         }
         for by in 0..src.h4 {
@@ -983,6 +1024,9 @@ fn deblock_plane(
     // empty for the luma pass (which derives levels per edge instead).
     lf_level_cache: &[u8],
     lf_cache_stride: usize,
+    // Chroma vertical subsampling (0 for luma): a superblock row spans
+    // `64 (or 128) >> ss_y` samples, i.e. that many / 4 grid rows.
+    ss_y: usize,
 ) {
     // dav1d interleaves the two passes per superblock row (cols, rows,
     // next sbrow's cols, ...) rather than running all columns then all
@@ -1007,11 +1051,7 @@ fn deblock_plane(
         .and_then(|s| s.trim().parse::<u64>().ok())
         == Some(crate::debug_frame_seq::current());
     let luma_sb_step4 = if fh.use_128x128_superblock { 32 } else { 16 };
-    let sb_step4 = if plane_index == 0 {
-        luma_sb_step4
-    } else {
-        luma_sb_step4 / 2
-    };
+    let sb_step4 = luma_sb_step4 >> ss_y;
     for band in 0..grid_h.div_ceil(sb_step4) {
         let v0 = band * sb_step4;
         let v1 = (v0 + sb_step4).min(grid_h);
@@ -2271,6 +2311,7 @@ pub fn apply_post_filters(
             fh,
             &[],
             0,
+            0,
         );
     }
     let sub_x = subsampling_x as usize;
@@ -2307,12 +2348,13 @@ pub fn apply_post_filters(
             &meta.lf_mode4,
             meta.w4,
             1,
-            meta.w8,
-            meta.h8,
-            meta.w8,
+            meta.cw4,
+            meta.ch4,
+            meta.cw4,
             fh,
             &meta.lf_level_u4,
             meta.cw4,
+            sub_y,
         );
     }
     let dbg_cpxy = std::env::var("KINETIX_AV1_DBG_CPXY").ok().and_then(|s| {
@@ -2348,12 +2390,13 @@ pub fn apply_post_filters(
             &meta.lf_mode4,
             meta.w4,
             1,
-            meta.w8,
-            meta.h8,
-            meta.w8,
+            meta.cw4,
+            meta.ch4,
+            meta.cw4,
             fh,
             &meta.lf_level_v4,
             meta.cw4,
+            sub_y,
         );
     }
     dump_cpxy("post-deblock-V", v_plane, uv_w);

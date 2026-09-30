@@ -2368,7 +2368,7 @@ pub fn reconstruct_av1_frame(
             let mut ty: Vec<Px> = vec![mid; tw * th];
             let mut tu: Vec<Px> = vec![mid; tuw * tuh];
             let mut tv: Vec<Px> = vec![mid; tuw * tuh];
-            let mut meta = FrameMeta::new(tw, th);
+            let mut meta = FrameMeta::new_ss(tw, th, ss_x as usize, ss_y as usize);
             let mut mf_cells: Vec<MotionFieldCell> = Vec::new();
 
             if std::env::var("KINETIX_AV1_SEQWALK").is_ok() {
@@ -2482,7 +2482,7 @@ pub fn reconstruct_av1_frame(
     // blit is a straight copy (no visible-area clipping — padding rows stay).
     let mut full_mf_cells = vec![MotionFieldCell::default(); mi_cols * mi_rows];
     let mut frame_cdf_context: Option<FrameCdfContext> = None;
-    let mut frame_meta = FrameMeta::new(grid_w, grid_h);
+    let mut frame_meta = FrameMeta::new_ss(grid_w, grid_h, ss_x as usize, ss_y as usize);
     // §6.8.2: the saved context comes from the `contextUpdateTileId` tile —
     // not necessarily tile 0 — when that tile's group was delivered.
     let cdf_tile = tile_payloads
