@@ -15144,3 +15144,51 @@ plane needs. Proper fix = give chroma its own w x h metadata grid parameterised 
 and pass step_x/step_y to `deblock_plane`; not a local patch.
 The CDEF 1700-byte part is separate (`CDEF_UV_DIR[1][0]` matches the spec table; look at
 `cdef_plane_chroma` 4x8 block handling / skip-gate index `luma_skip` for sub_y=0 next).
+
+## Session 2026-09-30 #12 -- 4:2:2 and 4:4:4 now bit-exact vs libdav1d (8-bit)
+
+Continues #11. Result: a 18-case libaom sweep (testsrc/testsrc2/mandelbrot, 6 sizes, 4 frames,
+cpu-used 1) is bit-exact for 4:2:0, **4:2:2 and 4:4:4**, plus odd-dimension (333x211), 257x129,
+130x66, 96x100 at cpu-used 0 and 4. `tests/libaom_crosscheck.rs` gained 4:2:2/4:4:4 cases.
+`pixel_exact` is unchanged (still false for AV1 as a whole); 10/12-bit 4:2:2/4:4:4 is still open.
+
+Bugs found and fixed, in the order they were reached (each was masked by the previous one):
+
+1. **Chroma deblock metadata was 4:2:0-shaped** (`FrameMeta` chroma grids indexed in 8x8-luma
+   cells). Now indexed in 4x4 *chroma* cells (`cw4 x ch4`, `FrameMeta::new_ss`); identical for
+   4:2:0. `deblock_plane` gained `ss_y` for the superblock band height.
+2. **`apply_post_filters` was called with hard-coded `true, true` subsampling** (mod.rs). Every
+   post-filter treated a 4:2:2/4:4:4 frame as 4:2:0 (uv_h = height/2 -> the lower half of chroma
+   was never deblocked). This, not CDEF/LR, was the whole "±1..3 residue" of #10/#11.
+3. LR visible extents (`vis_cw`/`vis_ch`) and the superres chroma strides assumed `div_ceil(2)`.
+4. `RefSlot::plane` returned `width/2 x height/2` for chroma -> 4:4:4 inter prediction read the
+   reference at the wrong stride. Now carries `uv_width`/`uv_height`.
+5. Sub-8x8 chroma MC (`sub8x8_leaf`) was gated on `is_420`; generalised to dav1d's
+   `bw4 == ss_hor || bh4 == ss_ver` (4:2:2 width-4 leaves share chroma with the left neighbour).
+6. Inter-intra wedge chroma mask was the 4:2:0 table (index-out-of-bounds panic on 4:4:4);
+   `wedge_mask_ss` derives it for any subsampling.
+7. **Chroma transform blocks were coded interleaved (U0,V0,U1,V1,...)**; spec `residual()` codes
+   all of a chunk's U blocks then all of V's. Invisible in 4:2:0 (one chroma tx per <=64 chunk)
+   but desyncs every 4:2:2 32x64 / 4:4:4 64x64 block. Fixed in the intra, inter and IBC paths
+   with an outer `chroma_pass` loop. This was the real cause of the "luma wrong in 4:4:4
+   keyframes" reports (an entropy desync, not a prediction bug).
+8. Chroma deblock passes were bounded by the padded grid; dav1d bounds them to the visible
+   4-sample units `((ceil(w/4) + ss) >> ss)`. Equal for 4:2:0, wrong by one cell for 4:4:4
+   (an edge at x=548 on a 548-wide frame modified visible samples 546/547).
+9. `crop_planes` used `width >> ss_x` for chroma width; odd widths need `ceil`.
+
+How it was found (reusable): `scripts/build-patched-dav1d.ps1` is broken on this box (it tries
+`Launch-VsDevShell` -> `vswhere` failure, and it `rm -rf`s `build/` first; the checked-in
+`%LOCALAPPDATA%\Temp\tpt-kinetix-dav1d\dav1d` tree is also flattened/corrupt). What works:
+fresh `git clone` of dav1d at the pinned commit into the scratchpad, `git apply
+scripts/dav1d-blockdump.patch`, then `cmd /c "vcvars64.bat && meson setup build --buildtype release
+-Denable_asm=false -Denable_tools=true -Denable_tests=false && ninja -C build"`, and copy
+`build/src/libdav1d.dll` next to `build/tools/dav1d.exe`. Feed it `ffmpeg -c copy -f obu`. Its stdout
+has per-syntax-element `r=<rng>` checkpoints; Kinetix's `KINETIX_AV1_TRACE=1` prints the same `r=`
+values, so a 40-line script that walks both lists and reports the first Kinetix `r` with no match
+within a small lookahead finds the first desynced symbol in seconds (Kinetix's `PALUV` line logs
+before the colours are read, so drop it from the comparison).
+
+Still open: 10/12-bit 4:2:2/4:4:4 (needs new `PixelFormat` variants in `tpt-kinetix-core`, a
+workspace-breaking change; today the decoder silently emits 8-bit-sized buffers for them);
+film grain on odd-width frames (skipped by design); FATE samples not on disk.

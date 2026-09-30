@@ -2824,7 +2824,7 @@ pub(crate) fn crop_planes(
         _ => (0, 0),
     };
     let uw = uv_grid_w;
-    let cw = width >> ss_x;
+    let cw = width.div_ceil(1 << ss_x);
     let ch = height.div_ceil(1 + ss_y);
     // Emit only the rows/columns the plane actually holds. The stride passed in
     // is authoritative, but a stream whose geometry disagrees with its
