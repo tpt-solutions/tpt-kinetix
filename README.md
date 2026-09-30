@@ -40,6 +40,13 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 > `KinetixError::NotPixelExact` when a stream hits an unsupported feature
 > (multi-slice or non-4:2:0/>8-bit H.264; non-profile-0 VP9). Call `capabilities()` (or
 > `tpt-kinetix probe`) to check at runtime.
+>
+> The original-format codecs (`lean`, `vision`, `screen`, `realtime`, `volumetric`, `lossless`)
+> have no independent reference decoder, so all except `lossless` report `pixel_exact: false`.
+> They instead report `deterministic: true`: exact encoded bytes and decoded output are pinned
+> by committed golden vectors (a `golden_vector_pins_bitstream_and_output` test in each crate).
+> `face` is synthesized by design and reports neither. `lossless` is `pixel_exact` because it
+> is integer-reversible and round-trips exactly.
 
 > ⚖️ **We will not be releasing H.264.** H.264/AVC is patent-encumbered for
 > both encode and decode, and this project ships source only and obtains no

@@ -436,6 +436,7 @@ impl H264Decoder {
         DecoderCapabilities {
             codec: "H.264",
             pixel_exact: true,
+            deterministic: true,
             supports_cabac: true,
             supports_cavlc: true,
             supports_intra_prediction: true,

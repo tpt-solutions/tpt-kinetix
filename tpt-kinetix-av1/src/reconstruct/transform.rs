@@ -531,7 +531,6 @@ pub(super) fn inverse_transform(
     bit_depth: u32,
     dst: &mut [i32],
 ) {
-    let _g = crate::dbg_env::Timer::new(2);
     if lossless && tx_size == TX_4X4 {
         let mut c = [0i32; 16];
         let nn = 16.min(dequant.len());
@@ -586,6 +585,11 @@ pub(super) fn inverse_transform(
                 0
             };
         }
+        // Every 1-D inverse transform is linear with no additive offset, so an
+        // all-zero row maps to an all-zero row (`residual` is already zero).
+        if t[..w].iter().all(|&v| v == 0) {
+            continue;
+        }
         if needs_rescale {
             for v in t.iter_mut().take(w) {
                 *v = round2(*v * 2896, 12);
@@ -613,6 +617,10 @@ pub(super) fn inverse_transform(
     for j in 0..w {
         for i in 0..h {
             t[i] = residual[i * w + j];
+        }
+        // Same zero-in/zero-out shortcut as the row pass.
+        if t[..h].iter().all(|&v| v == 0) {
+            continue;
         }
         match col_kind {
             AxisTransform::Dct => inverse_dct(&mut t, log2h, col_clamp_range),

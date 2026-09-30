@@ -1,13 +1,12 @@
 //! Decoder capability introspection.
 //!
-//! Several Kinetix decoders are still under construction and do **not** yet
-//! produce fully pixel-exact output (for example, the H.264 decoder is
-//! bit-exact for CAVLC/CABAC I/P/B slices but not yet for the 8×8 transform,
-//! interlaced coding, or non-16-aligned dimensions; the AV1 decoder is still
-//! under reconstruction). To avoid silently returning wrong pixel data as if it
-//! were correct, every decoder exposes a [`DecoderCapabilities`] value so that
-//! callers, the CLI, and tests can detect an incomplete decode path
-//! *programmatically* rather than by reading source comments.
+//! Some Kinetix decoders are original formats with no reference decoder, and
+//! others only cover a subset of their standard (for example, H.264 strict mode
+//! rejects multi-slice pictures and non-4:2:0 chroma). To avoid silently
+//! returning unverified pixel data as if it were correct, every decoder exposes
+//! a [`DecoderCapabilities`] value so that callers, the CLI, and tests can detect
+//! an unverified decode path *programmatically* rather than by reading source
+//! comments.
 //!
 //! # Examples
 //!
@@ -17,6 +16,7 @@
 //! let caps = DecoderCapabilities {
 //!     codec: "H.264",
 //!     pixel_exact: false,
+//!     deterministic: false,
 //!     supports_cabac: false,
 //!     supports_cavlc: true,
 //!     supports_intra_prediction: false,
@@ -47,6 +47,15 @@ pub struct DecoderCapabilities {
     /// should surface a warning or refuse to use them for anything that needs
     /// correct pixels.
     pub pixel_exact: bool,
+
+    /// `true` when decoding is fully deterministic and its exact output (and, for
+    /// original codecs, the exact encoded bytes) is pinned by committed golden
+    /// vectors, so any change is caught in CI.
+    ///
+    /// This is weaker than [`pixel_exact`](Self::pixel_exact): it says the output is
+    /// stable, not that it matches an independent reference decoder. Original
+    /// codecs with no reference oracle set this instead of `pixel_exact`.
+    pub deterministic: bool,
 
     /// Whether CABAC entropy decoding is implemented.
     pub supports_cabac: bool,
@@ -80,9 +89,10 @@ impl fmt::Display for DecoderCapabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} decoder: pixel_exact={} (cabac={}, cavlc={}, intra={}, inter={}, deblock={}) — {}",
+            "{} decoder: pixel_exact={} deterministic={} (cabac={}, cavlc={}, intra={}, inter={}, deblock={}) — {}",
             self.codec,
             self.pixel_exact,
+            self.deterministic,
             self.supports_cabac,
             self.supports_cavlc,
             self.supports_intra_prediction,

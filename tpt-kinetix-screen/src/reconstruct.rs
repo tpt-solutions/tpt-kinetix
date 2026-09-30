@@ -576,4 +576,69 @@ mod tests {
             }
         }
     }
+
+    /// FNV-1a 64-bit, used to pin golden vectors without storing large blobs.
+    fn fnv1a(chunks: &[&[u8]]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for c in chunks {
+            for &b in *c {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h
+    }
+
+    /// Deterministic synthetic 32x32 4:2:0 content: gradient + LCG noise.
+    fn golden_source(seed: u32) -> FrameBuffer {
+        let mut state = seed;
+        let mut next = move || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        };
+        let luma: Vec<u8> = (0..32 * 32)
+            .map(|i| ((i % 32) * 4 + (i / 32) * 2) as u8 / 2 + next() / 4)
+            .collect();
+        let cb: Vec<u8> = (0..16 * 16)
+            .map(|i| 96 + (i % 16) as u8 * 3 + next() / 16)
+            .collect();
+        let cr: Vec<u8> = (0..16 * 16)
+            .map(|i| 160 - (i / 16) as u8 * 3 + next() / 16)
+            .collect();
+        FrameBuffer::from_yuv420(32, 32, luma, cb, cr).unwrap()
+    }
+
+    /// Golden vector: pins the exact encoded bytes and decoded pixels for a frame
+    /// mixing flat regions, a glyph-like pattern, and noisy natural content. Any
+    /// change here is a bitstream/output change and must be deliberate: update
+    /// the constants and note it in the changelog.
+    #[test]
+    fn golden_vector_pins_bitstream_and_output() {
+        let seq = test_seq();
+        let mut frame = test_frame();
+        frame.width = 32;
+        frame.height = 32;
+        let noisy = golden_source(7);
+        let mut src = noisy.clone();
+        // Top-left 16x16 flat, top-right 16x16 two-colour "glyph" stripes,
+        // bottom half stays noisy (natural).
+        for y in 0..16 {
+            for x in 0..32 {
+                src.luma[y * 32 + x] = if x < 16 {
+                    100
+                } else if (x / 2 + y / 2) % 2 == 0 {
+                    20
+                } else {
+                    230
+                };
+            }
+        }
+        let payload = encode_frame(&seq, &frame, &src, None).unwrap();
+        let dec = decode_frame_payload(&seq, &frame, None, &payload).unwrap();
+        let got = [fnv1a(&[&payload]), fnv1a(&[&dec.luma, &dec.cb, &dec.cr])];
+        eprintln!("GOLDEN {got:#x?}");
+        assert_eq!(got, GOLDEN);
+    }
+
+    const GOLDEN: [u64; 2] = [0xac3c4c201f90b810, 0x1337d32471fa5525];
 }

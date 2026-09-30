@@ -4,7 +4,7 @@
 > the `release-plz.toml` publish list). Mode classification, flat-fill run-length, the
 > glyph dictionary + palette, and the NATURAL (Walsh-Hadamard + intra) fallback are
 > implemented and run end-to-end through `reconstruct`/`decoder`. It is an original
-> format with no external oracle, so `capabilities().pixel_exact` is `false`. Not done:
+> format with no external oracle, so `capabilities().pixel_exact` is `false` (`deterministic: true`, pinned by a golden vector). Not done:
 > the efficiency benchmark harness (DECISION 4) and classifier tuning, and there is no
 > fuzz target yet. The `DECISION:` blocks below record the design rationale.
 >

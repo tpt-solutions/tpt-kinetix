@@ -1694,9 +1694,13 @@ dependencies = [
  "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
+ "tpt-kinetix-face",
  "tpt-kinetix-lean",
+ "tpt-kinetix-lossless",
  "tpt-kinetix-realtime",
+ "tpt-kinetix-screen",
  "tpt-kinetix-vision",
+ "tpt-kinetix-volumetric",
  "tpt-kinetix-vp9",
 ]
 

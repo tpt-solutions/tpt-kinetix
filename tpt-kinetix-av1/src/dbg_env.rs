@@ -34,17 +34,3 @@ pub fn var(key: &str) -> Result<String, std::env::VarError> {
         Err(std::env::VarError::NotPresent)
     }
 }
-
-pub static T_NS: [std::sync::atomic::AtomicU64; 5] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
-pub struct Timer(usize, std::time::Instant);
-impl Timer {
-    pub fn new(i: usize) -> Self {
-        Timer(i, std::time::Instant::now())
-    }
-}
-impl Drop for Timer {
-    fn drop(&mut self) {
-        T_NS[self.0].fetch_add(self.1.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-}

@@ -5,7 +5,7 @@
 > framing, intra-refresh masking, FEC, decoder concealment, intra (14 modes) +
 > unidirectional-P prediction, the transform bank, in-loop deblock, `deadline_ms`
 > rate-control hook and foveation, all running end-to-end. It is an original format with no
-> external oracle, so `capabilities().pixel_exact` is `false`. The packet-loss-vs-quality
+> external oracle, so `capabilities().pixel_exact` is `false` (`deterministic: true`, pinned by a golden vector). The packet-loss-vs-quality
 > harness (DECISION 5) and a fuzz target are not present. The `DECISION:` blocks below
 > record the design rationale.
 >

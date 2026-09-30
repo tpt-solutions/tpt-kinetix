@@ -130,7 +130,7 @@ impl VisionDecoderImpl {
     /// Report what this decoder can and cannot do.
     pub fn capabilities(&self) -> DecoderCapabilities {
         DecoderCapabilities {
-            codec: "vision", pixel_exact: false, supports_cabac: false, supports_cavlc: false,
+            codec: "vision", pixel_exact: false, deterministic: true, supports_cabac: false, supports_cavlc: false,
             supports_intra_prediction: true, supports_inter_prediction: true, supports_deblocking: true,
             notes: "dual-path decode (tensor fast-path + pixel slow-path); original codec, no reference oracle",
         }

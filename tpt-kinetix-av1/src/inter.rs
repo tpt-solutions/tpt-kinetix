@@ -211,6 +211,7 @@ fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
 /// contiguous buffer, clamping every coordinate to the plane exactly as the
 /// per-tap `clamp` in the filters used to. Doing the clamp once per sample
 /// here lets the filter loops below run without bounds clamps.
+#[allow(clippy::too_many_arguments)]
 fn gather_patch(
     refp: &[Px],
     ref_stride: usize,
@@ -282,6 +283,7 @@ fn filter_rows_v(
 ) {
     for y in 0..bh {
         let r: [&[i32]; 8] = std::array::from_fn(|i| &src[(y + i) * bw..(y + i + 1) * bw]);
+        #[allow(clippy::needless_range_loop)] // `x` indexes eight row slices at once
         for x in 0..bw {
             let s = r[0][x] * k[0]
                 + r[1][x] * k[1]
@@ -343,7 +345,6 @@ pub fn motion_compensate(
     vbits: u32,
     bit_depth: u32,
 ) {
-    let _g = crate::dbg_env::Timer::new(1);
     let ib = intermediate_bits(bit_depth);
     let pix_max = (1i32 << bit_depth) - 1;
     let dx = mv.col & ((1 << hbits) - 1);
@@ -506,7 +507,6 @@ pub fn motion_compensate_prep(
     vbits: u32,
     bit_depth: u32,
 ) -> Vec<i32> {
-    let _g = crate::dbg_env::Timer::new(1);
     let ib = intermediate_bits(bit_depth);
     let dx = mv.col & ((1 << hbits) - 1);
     let dy = mv.row & ((1 << vbits) - 1);
@@ -676,7 +676,6 @@ pub fn motion_compensate_scaled(
     sc: &RefScale,
     bit_depth: u32,
 ) {
-    let _g = crate::dbg_env::Timer::new(1);
     let out = scaled_predict(
         refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits, vbits,
         sc, false, bit_depth,
@@ -707,7 +706,6 @@ pub fn motion_compensate_prep_scaled(
     sc: &RefScale,
     bit_depth: u32,
 ) -> Vec<i32> {
-    let _g = crate::dbg_env::Timer::new(1);
     scaled_predict(
         refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits, vbits,
         sc, true, bit_depth,

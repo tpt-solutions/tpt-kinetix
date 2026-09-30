@@ -2,9 +2,14 @@
 
 > **Status:** Design decisions **all resolved**, and v1 is **implemented**
 > (`tpt-kinetix-volumetric`: header, context-modeled octree geometry, lift/RAHT attributes,
-> in-crate encoder; `PointCloud` lives in `tpt-kinetix-core`). The decoder is not yet
-> validated bit-exact against the TMC13 oracle, so `capabilities().pixel_exact` is `false`
-> and strict mode returns `NotPixelExact`. The crate is a workspace member with a fuzz
+> in-crate encoder; `PointCloud` lives in `tpt-kinetix-core`). The coding tools are
+> simplified G-PCC-faithful designs, **not byte-compatible with TMC13** (`tmc3`), so
+> `capabilities().pixel_exact` is `false` and strict mode returns `NotPixelExact`. A
+> geometry-only cross-check against `tmc3` exists in `tpt-kinetix-test-utils`; it was run
+> on 2026-09-30 against a Debug build of `tmc3` and passed (512-point lattice), but it only
+> proves lossless lattice reconstruction, not bitstream compatibility. Encoded bytes and
+> decoded output are pinned by a golden vector (`deterministic: true`). Making the decoder pixel-exact means reimplementing G-PCC's actual entropy/attribute
+> tools, not just running the comparison. The crate is a workspace member with a fuzz
 > target but is not in the `release-plz.toml` publish list. Dynamic (inter-frame) mode is
 > unimplemented. The original eight `DECISION:`
 > blocks were resolved 2026-08-13; **DECISION 9** (compression-efficiency
@@ -467,7 +472,7 @@ explicit, scoped decision rather than an unexamined assumption.
 
 ## Implementation order (post-design resolution)
 
-Steps 1-6 are done and step 8 (fuzz target) exists; step 7 (TMC13 bit-exact conformance)
+Steps 1-6 are done and step 8 (fuzz target) exists; step 7 (TMC13 conformance; requires byte-compatible tools)
 and step 9 (dynamic mode) are open.
 
 1. Add `tpt-kinetix-volumetric` to the workspace `Cargo.toml` members (design-phase only — **not** added to the `release-plz.toml` publish list yet, matching `tpt-kinetix-vision`/`lean`/`screen`).

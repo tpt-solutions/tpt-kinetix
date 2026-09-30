@@ -31,3 +31,8 @@ tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-av1 = { workspace = true }
 tpt-kinetix-lean = { workspace = true }
 tpt-kinetix-vision = { workspace = true }
+tpt-kinetix-screen = { workspace = true }
+tpt-kinetix-realtime = { workspace = true }
+tpt-kinetix-lossless = { workspace = true }
+tpt-kinetix-face = { workspace = true }
+tpt-kinetix-volumetric = { workspace = true }

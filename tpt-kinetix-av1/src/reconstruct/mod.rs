@@ -1857,7 +1857,6 @@ pub fn decode_tile_group(
     meta: &mut FrameMeta,
     cdf_context: Option<&FrameCdfContext>,
 ) -> Result<FrameCdfContext, KinetixError> {
-    let _g = crate::dbg_env::Timer::new(3);
     let use_128 = _use_128x128_sb;
     let sb_size = if use_128 { 128 } else { 64 };
     let sb_mi = sb_size / MI_SIZE;

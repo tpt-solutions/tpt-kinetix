@@ -57,6 +57,7 @@ impl LeanDecoder {
         DecoderCapabilities {
             codec: "Lean",
             pixel_exact: false,
+            deterministic: true,
             supports_cabac: false,
             supports_cavlc: false,
             supports_intra_prediction: true,

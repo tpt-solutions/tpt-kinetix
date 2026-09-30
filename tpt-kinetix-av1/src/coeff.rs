@@ -519,7 +519,6 @@ pub fn read_coeffs(
     ctxs: &mut CoeffContexts,
     blk: &TxBlockCtx,
 ) -> Result<CoeffBlock, KinetixError> {
-    let _g = crate::dbg_env::Timer::new(0);
     let tx_size = blk.tx_size;
     if tx_size >= TX_WIDTH.len() {
         return Err(KinetixError::Parse(format!(

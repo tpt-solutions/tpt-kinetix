@@ -125,15 +125,5 @@ fn main() {
             pixels as f64 / secs / 1e6,
         );
     }
-    for (i, n) in ["coeffs", "mc", "inv_tx", "tile_group(total, thread-summed)"]
-        .iter()
-        .enumerate()
-    {
-        println!(
-            "T {n}: {:.1} ms",
-            tpt_kinetix_av1::dbg_env::T_NS[i].load(std::sync::atomic::Ordering::Relaxed) as f64
-                / 1e6
-        );
-    }
     println!("* dav1d column is whole ffmpeg process wall time (includes ~50-100 ms startup), so it overstates dav1d on small clips");
 }

@@ -198,6 +198,7 @@ impl FaceDecoder {
         DecoderCapabilities {
             codec: "face",
             pixel_exact: false,
+            deterministic: false,
             supports_cabac: false,
             supports_cavlc: false,
             supports_intra_prediction: false,

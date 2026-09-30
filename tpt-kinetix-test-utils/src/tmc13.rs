@@ -20,6 +20,13 @@
 //! lattice losslessly (the `tpt-kinetix-volumetric` conformance test
 //! `volumetric_geometry_cross_checks_tmc3_bit_exact` drives it).
 //!
+//! The geometry cross-check was run on 2026-09-30 against `tmc3 release-v23.0-rc2` built
+//! from https://github.com/MPEGGroup/mpeg-pcc-tmc13 (cmake needs
+//! `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`; use a **Debug** build under mingw, because the
+//! optimized build segfaults on a plain run) and passed. Note this only demonstrates that
+//! both codecs preserve the lattice losslessly; it says nothing about bitstream
+//! compatibility, and `tmc3` cannot decode our streams.
+//!
 //! A **full** cross-check — including attribute (color) payloads — still
 //! requires the v1 codec's coding tools to be byte-compatible with `tmc3`. The
 //! current v1 codec implements simplified, self-consistent G-PCC-faithful tools,
@@ -32,11 +39,20 @@ use std::{
     process::{Command, Stdio},
 };
 
-use crate::reference::{binary_available, RefDecodeError};
+use crate::reference::RefDecodeError;
 
 /// Returns `true` if the `tmc3` reference binary is callable on this machine.
+///
+/// `tmc3` exits non-zero for `-version`/`--help`, so availability means only that the
+/// process could be spawned at all.
 pub fn tmc13_available() -> bool {
-    binary_available("tmc3")
+    Command::new("tmc3")
+        .arg("--help=0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .status()
+        .is_ok()
 }
 
 /// Write an ASCII PLY point cloud (geometry only) for consumption by `tmc3`.

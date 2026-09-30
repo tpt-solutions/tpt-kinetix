@@ -1032,4 +1032,80 @@ mod tests {
         assert_eq!(decoded.cb, cb);
         assert_eq!(decoded.cr, cr);
     }
+
+    /// FNV-1a 64-bit, used to pin golden vectors without storing large blobs.
+    fn fnv1a(chunks: &[&[u8]]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for c in chunks {
+            for &b in *c {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h
+    }
+
+    /// Deterministic synthetic 32x32 4:2:0 content: gradient + LCG noise.
+    fn golden_source(seed: u32) -> FrameBuffer {
+        let mut state = seed;
+        let mut next = move || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        };
+        let luma: Vec<u8> = (0..32 * 32)
+            .map(|i| ((i % 32) * 4 + (i / 32) * 2) as u8 / 2 + next() / 4)
+            .collect();
+        let cb: Vec<u8> = (0..16 * 16)
+            .map(|i| 96 + (i % 16) as u8 * 3 + next() / 16)
+            .collect();
+        let cr: Vec<u8> = (0..16 * 16)
+            .map(|i| 160 - (i / 16) as u8 * 3 + next() / 16)
+            .collect();
+        FrameBuffer::from_yuv420(32, 32, luma, cb, cr).unwrap()
+    }
+
+    /// Golden vector: pins the exact encoded bytes and decoded pixels (lossy QP,
+    /// key + inter). Any change here is a bitstream/output change and must be
+    /// deliberate: update the constants and note it in the changelog.
+    #[test]
+    fn golden_vector_pins_bitstream_and_output() {
+        let s = seq();
+        let key = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 32,
+            height: 32,
+            base_qp: 12,
+            ref_frame_count: 0,
+            payload_len: 0,
+        };
+        let inter = FrameHeader {
+            frame_type: FrameType::Inter,
+            width: 32,
+            height: 32,
+            base_qp: 12,
+            ref_frame_count: 1,
+            payload_len: 0,
+        };
+        let src0 = golden_source(1);
+        let src1 = golden_source(2);
+        let key_payload = encode_frame(&s, &key, &src0, None).unwrap();
+        let key_dec = decode_frame_payload(&s, &key, None, &key_payload).unwrap();
+        let inter_payload = encode_frame(&s, &inter, &src1, Some(&key_dec)).unwrap();
+        let inter_dec = decode_frame_payload(&s, &inter, Some(&key_dec), &inter_payload).unwrap();
+        let got = [
+            fnv1a(&[&key_payload]),
+            fnv1a(&[&key_dec.luma, &key_dec.cb, &key_dec.cr]),
+            fnv1a(&[&inter_payload]),
+            fnv1a(&[&inter_dec.luma, &inter_dec.cb, &inter_dec.cr]),
+        ];
+        eprintln!("GOLDEN {got:#x?}");
+        assert_eq!(got, GOLDEN);
+    }
+
+    const GOLDEN: [u64; 4] = [
+        0xf7cab705bedd8db5,
+        0x740512f05fec7f5f,
+        0xa72b86dd13a79cf8,
+        0xf7284f3fbb505436,
+    ];
 }

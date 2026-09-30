@@ -9,8 +9,13 @@
 use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::capabilities::DecoderCapabilities;
+use tpt_kinetix_face::FaceDecoder;
 use tpt_kinetix_lean::LeanDecoder;
+use tpt_kinetix_lossless::LosslessDecoder;
+use tpt_kinetix_realtime::RealtimeDecoder;
+use tpt_kinetix_screen::ScreenDecoder;
 use tpt_kinetix_vision::VisionDecoderImpl;
+use tpt_kinetix_volumetric::VolumetricDecoderImpl;
 use tpt_kinetix_vp9::Vp9Decoder;
 
 fn main() {
@@ -22,11 +27,16 @@ fn main() {
         ("av1", Av1Decoder::new().capabilities()),
         ("lean", LeanDecoder::new().capabilities()),
         ("vision", VisionDecoderImpl::new().capabilities()),
+        ("screen", ScreenDecoder::new().capabilities()),
+        ("realtime", RealtimeDecoder::new().capabilities()),
+        ("lossless", LosslessDecoder::new().capabilities()),
+        ("face", FaceDecoder::new().capabilities()),
+        ("volumetric", VolumetricDecoderImpl::new().capabilities()),
     ];
 
     let mut any_incomplete = false;
     for (name, caps) in &decoders {
-        println!("{name:<6} {caps}");
+        println!("{name:<10} {caps}");
         if caps.is_incomplete() {
             any_incomplete = true;
         }

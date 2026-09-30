@@ -73,6 +73,7 @@ impl Vp9Decoder {
         DecoderCapabilities {
             codec: "vp9",
             pixel_exact: true,
+            deterministic: true,
             supports_cabac: false,
             supports_cavlc: false,
             supports_intra_prediction: true,

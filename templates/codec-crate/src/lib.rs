@@ -43,6 +43,7 @@ impl {{codec_cap}}Decoder {
         DecoderCapabilities {
             codec: "{{codec_name}}",
             pixel_exact: false,
+            deterministic: false,
             supports_cabac: false,
             supports_cavlc: false,
             supports_intra_prediction: false,

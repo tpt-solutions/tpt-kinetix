@@ -12,9 +12,10 @@
 //! v1 targets a **static single cloud** and codes geometry with a **context-
 //! modeled occupancy octree** and attributes with **region-adaptive predictive
 //! (lift)** (default) or **RAHT** (selectable). Both lossless and lossy
-//! attribute coding are supported. The coding tools are transcribed from MPEG-I
-//! G-PCC (TMC13) and wrapped in Kinetix framing (`magic b"VOLU"`), so the
-//! reference software is a bit-exact conformance oracle.
+//! attribute coding are supported. The coding tools are simplified, G-PCC-
+//! faithful designs (not byte-compatible with MPEG-I G-PCC / TMC13) wrapped in
+//! Kinetix framing (`magic b"VOLU"`). TMC13 is used as a geometry cross-check
+//! oracle; full bit-exact conformance would require byte-compatible tools.
 //!
 //! # Status
 //!
@@ -115,6 +116,7 @@ impl VolumetricDecoderImpl {
         DecoderCapabilities {
             codec: "volumetric",
             pixel_exact: false,
+            deterministic: true,
             supports_cabac: false,
             supports_cavlc: false,
             supports_intra_prediction: false,

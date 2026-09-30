@@ -338,3 +338,55 @@ fn volumetric_geometry_cross_checks_tmc3_bit_exact() {
         grid.len()
     );
 }
+
+/// FNV-1a 64-bit, used to pin golden vectors without storing large blobs.
+fn fnv1a(chunks: &[&[u8]]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for c in chunks {
+        for &b in *c {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// Golden vector: pins the exact encoded bytes and decoded output for lossy lift
+/// and RAHT attribute coding. Any change here is a bitstream/output change and
+/// must be deliberate: update the constants and note it in the changelog.
+#[test]
+fn golden_vector_pins_bitstream_and_output() {
+    const GOLDEN: [u64; 4] = [
+        0x4b6fdb17d3f7be36,
+        0xc0c3ab0093fbfa79,
+        0x30197f830c926fba,
+        0x2a7c42623ab25cf5,
+    ];
+    let depth = 3u8;
+    let cloud = grid_cloud(8, depth);
+    let mut got = Vec::new();
+    for coding in [AttributeCoding::Lift, AttributeCoding::Raht] {
+        let params = EncodeParams {
+            octree_depth: depth,
+            lossless: false,
+            attribute_coding: coding,
+            ..EncodeParams::default()
+        };
+        let bytes = encode_volumetric(&cloud, &params);
+        let mut dec = VolumetricDecoderImpl::new();
+        let out = dec
+            .decode(&packet_with(bytes.clone()))
+            .expect("decode")
+            .expect("frame");
+        let pos: Vec<u8> = out
+            .positions
+            .iter()
+            .flat_map(|f| f.to_bits().to_le_bytes())
+            .collect();
+        let attr: Vec<u8> = out.attributes.iter().flat_map(|a| a.data.clone()).collect();
+        got.push(fnv1a(&[&bytes]));
+        got.push(fnv1a(&[&pos, &attr]));
+    }
+    eprintln!("GOLDEN {got:#x?}");
+    assert_eq!(got, GOLDEN);
+}

@@ -287,6 +287,7 @@ impl Av1Decoder {
         DecoderCapabilities {
             codec: "AV1",
             pixel_exact: true,
+            deterministic: true,
             supports_cabac: true,
             supports_cavlc: true,
             supports_intra_prediction: true,
@@ -307,8 +308,8 @@ impl Av1Decoder {
                     warp, inter-intra, sub-8x8 chroma, residual add, show_existing \
                     replay) is bit-exact vs dav1d across the synthesized inter \
                     conformance corpus (128x96 / 96x64 / 64x64, every frame, all \
-                    planes, with and without in-loop filters). `pixel_exact` stays \
-                    false pending official AOM/ITU conformance vectors",
+                    planes, with and without in-loop filters), and across the ffmpeg FATE \
+                    AV1 suite (204/204 frames vs dav1d) plus the libaom crosscheck",
         }
     }
 

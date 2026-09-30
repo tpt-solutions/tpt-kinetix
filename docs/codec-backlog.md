@@ -43,7 +43,7 @@ would design itself, in the same category as `tpt-kinetix-lean` (see
 crates (`vision`, `realtime`, `lossless`, `screen`, `face`, `volumetric`); the
 implementation status is given in each design doc. All except `lossless` report
 `pixel_exact: false` because they are original formats with no external reference oracle
-(volumetric's TMC13 oracle validation is still pending).
+(volumetric uses simplified G-PCC-faithful tools that are not byte-compatible with TMC13, so its oracle validation is a re-implementation task, not just a test run).
 
 Each trades general-purpose compression ratio for being much better suited
 to one specific use case than AV1/HEVC/VVC, which are optimized for a human

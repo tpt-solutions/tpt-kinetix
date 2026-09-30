@@ -255,6 +255,7 @@ impl LosslessDecoder {
         DecoderCapabilities {
             codec: "lossless",
             pixel_exact: true,
+            deterministic: true,
             supports_cabac: false,
             supports_cavlc: false,
             supports_intra_prediction: true,
