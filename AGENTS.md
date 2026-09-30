@@ -88,10 +88,13 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
 - **Shared version:** all published crates use one version number (monorepo style); a breaking
   change to any public API bumps every crate. `release-plz.toml` opens one release PR and
   publishes in dependency order (core → codecs/demux/mux → pipeline → stream → cli).
-- `tpt-kinetix-test-utils` is **never published** (`release = false`).
-- `tpt-kinetix-lean` is absent from `release-plz.toml`; `tpt-kinetix-vision` is explicitly
-  published in `release-plz.toml` but not shown in the README architecture map. Verify before
-  assuming a change to either will be released.
+- `tpt-kinetix-test-utils` is **never published** (`publish = false` in its `Cargo.toml`,
+  `release = false` + `publish = false` in `release-plz.toml`).
+- Every crate carries its own `README.md`, `CHANGELOG.md`, `description`, `categories` and
+  `keywords` in `Cargo.toml` — including `out-kinetix-h264` and `tpt-kinetix-test-utils`.
+  `release-plz.toml` has a `[[package]]` block for all 19 workspace crates.
+- `out-kinetix-h264` is `publish = false` in `release-plz.toml`; it is the only
+  unpublished crate besides `tpt-kinetix-test-utils`.
 - `tpt-kinetix-demux` and `tpt-kinetix-core` build for `wasm32-unknown-unknown`
   (the in-browser `web-demo`).
 

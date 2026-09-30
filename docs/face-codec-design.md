@@ -1,9 +1,11 @@
 # `tpt-kinetix-face` — Design Draft
 
-> **Status:** Design phase — **all 8 design decisions resolved** (see checklist).
-> The bitstream, representation, synthesizer, encoder, metric, budget, sibling-crate
-> relationship, and honesty contract are settled; the crate is ready to be scaffolded
-> from `templates/codec-crate/` once the open questions below are answered.
+> **Status:** **all 8 design decisions resolved** (see checklist) and the crate is scaffolded
+> (`tpt-kinetix-face`, in the `release-plz.toml` publish list, with a fuzz target). The
+> decode pipeline works end-to-end (headers, rANS parameter vectors, fixed placeholder 3DMM
+> basis, deterministic rasterizer). Output is synthesized, so `pixel_exact` is `false` by
+> design. Still open: a production 3DMM basis (open question 1), the landmark companion
+> path, the encoder front-end, and the fidelity benchmark harness.
 > This crate is an *original* bitstream design (like `tpt-kinetix-lean` and
 > `tpt-kinetix-vision`), not a port of an existing standard.
 >

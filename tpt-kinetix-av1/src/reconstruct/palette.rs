@@ -461,7 +461,7 @@ impl<'a> TileDecodeState<'a> {
             let pal_y = self
                 .mode_cdfs
                 .read_has_palette_y(&mut self.dec, bsize_ctx, ctx);
-            if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_B0").is_ok() {
                 eprintln!(
                     "DBG b0 has_palette_y={pal_y} bsize_ctx={bsize_ctx} ctx={ctx} rng={}",
                     self.dec.raw_state().0
@@ -470,11 +470,11 @@ impl<'a> TileDecodeState<'a> {
             if pal_y {
                 let size = 2 + self.mode_cdfs.read_palette_size_y(&mut self.dec, bsize_ctx);
                 let cache = self.get_palette_cache(0, mi_row, mi_col);
-                let pal_dbg = std::env::var("KINETIX_AV1_DBG_PAL").is_ok()
-                    && (std::env::var("KINETIX_AV1_DBG_PAL_ALL").is_ok()
+                let pal_dbg = crate::dbg_env::var("KINETIX_AV1_DBG_PAL").is_ok()
+                    && (crate::dbg_env::var("KINETIX_AV1_DBG_PAL_ALL").is_ok()
                         || (mi_row == 8 && (mi_col == 20 || mi_col == 24)));
                 colors_y = self.read_palette_colors_yu(size, &cache, false, pal_dbg);
-                if std::env::var("KINETIX_AV1_DBG_PAL").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_DBG_PAL").is_ok() {
                     eprintln!(
                         "DBG palette Y mi=({mi_row},{mi_col}) size={size} cache={cache:?} colors={colors_y:?}"
                     );
@@ -490,7 +490,7 @@ impl<'a> TileDecodeState<'a> {
                 let size = 2 + self
                     .mode_cdfs
                     .read_palette_size_uv(&mut self.dec, bsize_ctx);
-                if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
                     eprintln!(
                         "KTRACE PALUV bx={mi_col} by={mi_row} size={size} r={}",
                         self.dec.raw_state().0
@@ -499,7 +499,7 @@ impl<'a> TileDecodeState<'a> {
                 let cache = self.get_palette_cache(1, mi_row, mi_col);
                 colors_u = self.read_palette_colors_yu(size, &cache, true, false);
                 colors_v = self.read_palette_colors_v(size);
-                if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
                     eprintln!(
                         "KTRACE PALUVC bx={mi_col} by={mi_row} colors_u={colors_u:?} r={}",
                         self.dec.raw_state().0
@@ -572,7 +572,7 @@ impl<'a> TileDecodeState<'a> {
                         self.mode_cdfs
                             .read_palette_color_idx_y(&mut self.dec, n, ctx)
                     };
-                    if std::env::var("KINETIX_DBG_PALIDX").is_ok() {
+                    if crate::dbg_env::var("KINETIX_DBG_PALIDX").is_ok() {
                         eprintln!(
                             "PALIDX i={i} j={c} ctx={ctx} idx={} sym={sym} r={}",
                             color_order[sym],
@@ -602,7 +602,7 @@ impl<'a> TileDecodeState<'a> {
                 dst[..block_width].copy_from_slice(edge_row);
             }
         }
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             let uv = if is_uv { "uv" } else { "y" };
             eprintln!(
                 "KTRACE COLORMAP {uv} mi=({mi_col},{mi_row}) n={n} r={}",

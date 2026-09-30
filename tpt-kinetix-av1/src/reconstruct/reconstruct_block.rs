@@ -79,20 +79,25 @@ pub(super) fn reconstruct_tx_block(
     let tx_h = av1::TX_HEIGHT[internal_tx_size];
     let num_coeffs = tx_w * tx_h;
 
-    let dbg_uv =
-        px_y < 8 && px_x < 12 && blk.plane != 0 && std::env::var("KINETIX_AV1_DBG_UV").is_ok();
+    let dbg_uv = px_y < 8
+        && px_x < 12
+        && blk.plane != 0
+        && crate::dbg_env::var("KINETIX_AV1_DBG_UV").is_ok();
     // `KINETIX_AV1_DBG_PX=x,y` targets one exact tx block (any plane/pos).
-    let dbg_px = std::env::var("KINETIX_AV1_DBG_PX").ok().and_then(|s| {
-        let mut it = s.split(',');
-        Some((
-            it.next()?.trim().parse::<usize>().ok()?,
-            it.next()?.trim().parse::<usize>().ok()?,
-        ))
-    }) == Some((px_x, px_y));
+    let dbg_px = crate::dbg_env::var("KINETIX_AV1_DBG_PX")
+        .ok()
+        .and_then(|s| {
+            let mut it = s.split(',');
+            Some((
+                it.next()?.trim().parse::<usize>().ok()?,
+                it.next()?.trim().parse::<usize>().ok()?,
+            ))
+        })
+        == Some((px_x, px_y));
     let dbg = (px_y < 32
         && (px_x < 4 || (16..64).contains(&px_x))
         && blk.plane == 0
-        && std::env::var("KINETIX_AV1_DBG").is_ok())
+        && crate::dbg_env::var("KINETIX_AV1_DBG").is_ok())
         || dbg_uv
         || dbg_px;
     if dbg_uv {
@@ -134,7 +139,7 @@ pub(super) fn reconstruct_tx_block(
         let pre_ctx_snap = capture.then(|| ctxs.ctx_snapshot(blk.plane));
         let pre_cdf_snap = capture.then(|| cdfs.cdf_snapshot());
         let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
                 "KTRACE CF plane={mark_plane} px=({px_x},{px_y}) tx={tx_w}x{tx_h} txtp={} eob={} r={}",
                 coeffs.tx_type,
@@ -190,7 +195,7 @@ pub(super) fn reconstruct_tx_block(
                     "DBG residual[0..8]={:?}",
                     &residual[..residual.len().min(8)]
                 );
-                if std::env::var("KINETIX_AV1_DBG_FULL").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_DBG_FULL").is_ok() {
                     eprintln!("DBG full quant={:?}", coeffs.quant);
                     eprintln!("DBG full residual={residual:?}");
                 }
@@ -241,14 +246,16 @@ pub(super) fn reconstruct_tx_block(
     // actually sampled, and the resulting prediction. The `dbg`/`dbg_px` gates
     // above are hardcoded to a stale region, so a wrong prediction elsewhere
     // prints nothing at all.
-    let txb_target = std::env::var("KINETIX_AV1_DBG_TXB").ok().and_then(|s| {
-        s.split_once(',').and_then(|(a, b)| {
-            Some((
-                a.trim().parse::<usize>().ok()?,
-                b.trim().parse::<usize>().ok()?,
-            ))
-        })
-    });
+    let txb_target = crate::dbg_env::var("KINETIX_AV1_DBG_TXB")
+        .ok()
+        .and_then(|s| {
+            s.split_once(',').and_then(|(a, b)| {
+                Some((
+                    a.trim().parse::<usize>().ok()?,
+                    b.trim().parse::<usize>().ok()?,
+                ))
+            })
+        });
     let txb_hit = match txb_target {
         Some((tx, ty)) => {
             blk.plane == 0

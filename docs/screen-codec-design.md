@@ -1,8 +1,12 @@
 # `tpt-kinetix-screen` — Design Draft
 
-> **Status:** Draft with decision points flagged. Nothing is implemented yet.
-> Every `DECISION:` block below lists the alternatives and a recommendation.
-> Resolve all of them before scaffolding begins.
+> **Status:** Design doc; the crate exists (`tpt-kinetix-screen`, workspace member, not in
+> the `release-plz.toml` publish list). Mode classification, flat-fill run-length, the
+> glyph dictionary + palette, and the NATURAL (Walsh-Hadamard + intra) fallback are
+> implemented and run end-to-end through `reconstruct`/`decoder`. It is an original
+> format with no external oracle, so `capabilities().pixel_exact` is `false`. Not done:
+> the efficiency benchmark harness (DECISION 4) and classifier tuning, and there is no
+> fuzz target yet. The `DECISION:` blocks below record the design rationale.
 >
 > This doc is the home for the `tpt-kinetix-screen` design-phase checklist in
 > `todo.md` (Phase 14). Each checklist item maps to a `DECISION:` block here.
@@ -476,6 +480,8 @@ entropy/transform primitives.
 ---
 
 ## Implementation order (post-design resolution)
+
+Steps 1-6 are done in the crate; steps 7-8 (benchmark harness, tuning) are still open.
 
 1. Resolve DECISIONs 1–6 (this doc).
 2. Scaffold `tpt-kinetix-screen` crate from `templates/codec-crate/`.

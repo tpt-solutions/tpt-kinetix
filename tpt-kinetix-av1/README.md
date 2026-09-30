@@ -21,18 +21,13 @@ architecture diagram, and quickstart guide.
 - `Av1Decoder` parses OBUs and reconstructs real intra and inter frames through
   the AV1 symbol decoder, partition/mode syntax, transforms, deblocking, CDEF,
   loop restoration, reference management, and temporal MV reconstruction.
-- The local synthetic intra corpus is 6/6 byte-exact against dav1d. The synthetic
-  inter corpus has four of five entries byte-exact; the last differs by one V
-  sample in one frame.
-- The decoder is **not yet pixel-exact** on the official FFmpeg FATE AV1 set:
-  the current run passes 1/198 comparable frames. Decoder-model, film-grain, and
-  Annex-B samples are classified as expected-unsupported by the harness. The
-  closest official keyframe (`frames_refs_short_signaling` frame 0) now reaches
-  ~67 dB luma PSNR against dav1d after fixing the CDEF strength-table read
-  order; the residual is a genuine reconstruction gap, not a header desync. See
-  `todo-av1.md` for the remaining official-vector gaps.
-- `capabilities().pixel_exact` remains `false`; strict mode returns
-  `KinetixError::NotPixelExact` rather than claiming conformance.
+- Bit-exact against dav1d on the official FFmpeg FATE AV1 set (204/204 frames,
+  including film grain, 10-bit and 4:2:2/4:4:4 streams), on the local synthetic
+  intra/inter corpora, and on a libaom-encode crosscheck
+  (`tests/libaom_crosscheck.rs`). Reproduce the FATE number with
+  `KINETIX_AV1_FATE_DIR=<dir> cargo run --release -p tpt-kinetix-av1 --example av1_fate_score`.
+- `capabilities().pixel_exact` is `true`. See `docs/CONFORMANCE.md` at the
+  workspace root for the generated results table.
 
 ### Fuzzing
 

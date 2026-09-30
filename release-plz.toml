@@ -62,6 +62,34 @@ publish = true
 name = "tpt-kinetix-lossless"
 publish = true
 
+[[package]]
+name = "tpt-kinetix-volumetric"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-bitstream"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-lean"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-realtime"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-screen"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-vp9"
+publish = true
+
+[[package]]
+name = "tpt-kinetix-cli"
+publish = true
+
 # Internal test helpers are never published.
 [[package]]
 name = "tpt-kinetix-test-utils"

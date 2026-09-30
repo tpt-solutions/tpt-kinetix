@@ -74,3 +74,6 @@ dav1d_grid*.dump
 
 # Claude Code agent worktree scratch space (not repo content)
 /.claude/
+
+# AV1 FATE fixtures (fetched with `just fetch-av1-fate`)
+/fixtures/av1-fate/

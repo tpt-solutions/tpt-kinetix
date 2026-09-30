@@ -25,7 +25,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | MPEG-TS demux | ✅ Works | ⚖️ Royalty-free. PAT/PMT parsing, PES depacketization with PTS/DTS, PCR tracking; unlocks HLS/broadcast input. H.264 comes out Annex-B framed; round-trips through the HLS `TsMuxer` and matches `ffprobe` on real clips (`tpt-kinetix-demux`) |
 | MP4 mux | ✅ Works | Single H.264 track, round-trips through the demuxer (`tpt-kinetix-mux`) |
 | H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 26 curated clips decode byte-exact vs the standard's reference YUV; remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, some hierarchical-B GOPs, real PAFF pixels, 4:2:2/4:4:4) are tracked, not yet fixed |
-| AV1 decode | 🟡 Not pixel-exact | Intra and inter reconstruction, transforms, deblock/CDEF/restoration, reference management, and temporal MV reconstruction are implemented. The local synthetic intra corpus is 6/6 byte-exact vs dav1d and the synthetic inter corpus is 4/5 entries exact, but the official FFmpeg FATE AV1 set currently passes only 1/198 comparable frames (its closest keyframe reaches ~67 dB luma PSNR vs dav1d after the CDEF strength-table read-order fix); `pixel_exact` remains false pending official-vector closure (`todo-av1.md`). |
+| AV1 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Intra and inter reconstruction, all transforms, deblock/CDEF/loop restoration, film grain, 4:2:0/4:2:2/4:4:4 and 8/10/12-bit. The official FFmpeg FATE AV1 set decodes 204/204 frames byte-exact vs libdav1d (`cargo run --release -p tpt-kinetix-av1 --example av1_fate_score`), and a libaom-encode → Kinetix-vs-dav1d crosscheck (`tpt-kinetix-av1/tests/libaom_crosscheck.rs`) covers far more than FATE does. `capabilities().pixel_exact == true`; results are tabulated in [docs/CONFORMANCE.md](docs/CONFORMANCE.md). |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
 | VP9 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Profile-0 (8-bit 4:2:0) decode implemented end-to-end (reconstruction, reference management, loop filtering, superframes). The whole ffmpeg conformance corpus — 13 clips covering lossless/lossy, content, intra-only, inter, odd size 125x67, and multitile — decodes byte-exact vs `ffmpeg -c:v vp9` on every plane, and the test asserts it (`capabilities().pixel_exact == true`; `tpt-kinetix-vp9`, see `todo-vp9.md`). Wired into the pipeline (`Vp9DecodeStage`) and the CLI (`probe` reports decoder status; VP9-input transcode to AV1 takes this royalty-free path). |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
@@ -33,19 +33,28 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
 | CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4 and MPEG-TS input, format-sniffed). `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path (VP9 is the only supported transcode input). `stream` is still a stub. |
 
-> ⚠️ **Decode correctness:** The H.264 and VP9 decoders report
+> ⚠️ **Decode correctness:** The H.264, VP9 and AV1 decoders report
 > `pixel_exact: true` for their supported subsets (H.264: CAVLC/CABAC
 > I/P/B progressive and interlaced (PAFF/MBAFF) including the High-profile
-> 8×8 transform; VP9: profile 0 8-bit 4:2:0). Strict mode still returns
+> 8×8 transform; VP9: profile 0 8-bit 4:2:0; AV1: all profiles in the FATE set). Strict mode still returns
 > `KinetixError::NotPixelExact` when a stream hits an unsupported feature
-> (multi-slice or non-4:2:0/>8-bit H.264; non-profile-0 VP9). The AV1
-> decoder is not yet pixel-exact. Call `capabilities()` (or
+> (multi-slice or non-4:2:0/>8-bit H.264; non-profile-0 VP9). Call `capabilities()` (or
 > `tpt-kinetix probe`) to check at runtime.
 
-> ⚖️ **Patents:** H.264 (`out-kinetix-h264`) is patent-encumbered, so it is
-> unfinished, unpublished and not used by the CLI or pipeline. This
-> project ships source only and obtains no patent
-> licenses. See [PATENTS.md](PATENTS.md) for the full posture.
+> ⚖️ **We will not be releasing H.264.** H.264/AVC is patent-encumbered for
+> both encode and decode, and this project ships source only and obtains no
+> patent licenses. The decoder (`out-kinetix-h264`) exists in this repository
+> for local and reference work, but it is `publish = false`, is not on
+> crates.io, and is not used by the CLI or the pipeline. Everything that is
+> published is royalty-free (AV1, VP9, and the containers). If you need H.264,
+> use a codec library you have licensed separately. See
+> [PATENTS.md](PATENTS.md) for the full posture.
+
+> 🔊 **Audio lives elsewhere.** Kinetix handles video and containers only. Audio
+> codecs (AAC, Opus, MP3, and others) are developed in our sister project,
+> [**tpt-cadence**](https://github.com/tpt-solutions/tpt-cadence), which is
+> the place to look for audio decode/encode. Please don't open audio-codec
+> requests against this repo.
 
 ---
 
@@ -229,7 +238,7 @@ coherent and avoids mixed-version combinations.
 Crates must be published to crates.io in dependency order to satisfy the registry resolver:
 
 1. `tpt-kinetix-core`
-2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `out-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
+2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-av1`, `tpt-kinetix-vp9`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
 3. `tpt-kinetix-pipeline` *(depends on the codec/demux crates above)*
 4. `tpt-kinetix-stream` *(independent of pipeline, but published after for consistency)*
 5. `tpt-kinetix-cli` *(depends on `tpt-kinetix-pipeline` and `tpt-kinetix-stream`)*
@@ -240,7 +249,7 @@ Before running `cargo publish` for the first time, **manually reserve each crate
 crates.io by publishing a minimal `0.0.1` placeholder, or by logging in and creating the crate
 entry. This prevents name squatting. The names to reserve are:
 
-`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-mux`, `out-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg`,
+`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-av1`, `tpt-kinetix-vp9`, `tpt-kinetix-kg`,
 `tpt-kinetix-pipeline`, `tpt-kinetix-stream`, `tpt-kinetix-cli`
 
 ---
@@ -249,7 +258,7 @@ entry. This prevents name squatting. The names to reserve are:
 
 - **Phase 9 (stretch)**: See [`docs/adding-a-codec.md`](docs/adding-a-codec.md) for the process of adding new codecs via the KG pipeline.
 - **Future codecs**: See [`docs/codec-backlog.md`](docs/codec-backlog.md) for the prioritised list.
-- **Codec evaluations**: [`docs/codec-evaluations/aac.md`](docs/codec-evaluations/aac.md), [`docs/codec-evaluations/hevc.md`](docs/codec-evaluations/hevc.md)
+- **Codec evaluations**: [`docs/codec-evaluations/hevc.md`](docs/codec-evaluations/hevc.md) (HEVC is out of scope: patent-encumbered, like H.264). Audio codecs are handled by [tpt-cadence](https://github.com/tpt-solutions/tpt-cadence), not here.
 
 ---
 

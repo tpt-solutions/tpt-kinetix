@@ -171,9 +171,20 @@ jobs:
             -p tpt-kinetix-test-utils
       - name: Print decoder capabilities
         run: cargo run -p tpt-kinetix-test-utils --example codec_status
-      # Non-blocking until h264/av1 CABAC paths reach pixel-exact; flip this to
-      # a hard `run:` (and drop `continue-on-error`) once capabilities report
-      # pixel_exact for those decoders.
-      - name: Assert pixel-exact (strict, currently non-blocking)
+      # Non-blocking: the experimental `lean` and `vision` decoders are
+      # (intentionally) not pixel-exact, so strict mode fails on them. The
+      # published codecs are gated by the conformance report below.
+      - name: Assert pixel-exact (strict, non-blocking)
         continue-on-error: true
         run: cargo run -p tpt-kinetix-test-utils --example codec_status -- --strict
+      - name: Fetch AV1 FATE samples
+        run: bash tools/fetch-av1-fate.sh
+      - name: Generate conformance report
+        env:
+          KINETIX_AV1_FATE_DIR: fixtures/av1-fate
+        run: cargo run --release -p tpt-kinetix-test-utils --example conformance_report -- --out conformance-out
+      - name: Upload conformance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report
+          path: conformance-out

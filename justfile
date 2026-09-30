@@ -164,3 +164,13 @@ bench:
 # Run the benches and print a consolidated timing report.
 bench-report:
     cargo run -p tpt-kinetix-test-utils --example bench_report -- --release
+
+# Fetch the FFmpeg FATE AV1 samples (small) into fixtures/av1-fate/.
+fetch-av1-fate:
+    bash tools/fetch-av1-fate.sh
+
+# Run every conformance suite and regenerate docs/CONFORMANCE.md, conformance.json
+# and docs/badges/*.json. Needs ffmpeg (libdav1d, libvpx, libaom), plus
+# `just fetch-av1-fate` and `just fetch-h264-conformance` for full coverage.
+conformance-report:
+    KINETIX_AV1_FATE_DIR="${KINETIX_AV1_FATE_DIR:-fixtures/av1-fate}" cargo run --release -p tpt-kinetix-test-utils --example conformance_report

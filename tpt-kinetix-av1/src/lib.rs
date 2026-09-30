@@ -43,6 +43,7 @@
 pub mod cdf_tables_gen;
 pub mod coeff;
 pub mod coeff_tables;
+pub mod dbg_env;
 pub mod debug_frame_seq;
 pub mod decoder;
 pub mod encoder;

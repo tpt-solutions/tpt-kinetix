@@ -531,6 +531,7 @@ pub(super) fn inverse_transform(
     bit_depth: u32,
     dst: &mut [i32],
 ) {
+    let _g = crate::dbg_env::Timer::new(2);
     if lossless && tx_size == TX_4X4 {
         let mut c = [0i32; 16];
         let nn = 16.min(dequant.len());

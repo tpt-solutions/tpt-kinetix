@@ -1,6 +1,6 @@
 # Codec Evaluation: AAC Audio Decode/Encode
 
-**Status**: ✅ Implemented (AAC-LC) — fully native decoder in `tpt-kinetix-aac` (no third-party dependency)  
+**Status**: ➡️ Moved — the native AAC-LC decoder was removed from this repo and now lives in the separate `tpt-cadence` repo (all audio codecs belong there). This evaluation is retained for reference; crate/path names below refer to the removed `tpt-kinetix-aac`.  
 **Last updated**: Phase 18 (Phase 7 complete - symphonia removed)
 
 ---

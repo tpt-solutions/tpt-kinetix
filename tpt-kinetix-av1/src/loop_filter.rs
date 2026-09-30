@@ -8,12 +8,8 @@
 //! Loop restoration supports RESTORE_WIENER (7-tap separable Wiener filter)
 //! and RESTORE_SGRPROJ (self-guided projection filter).
 //!
-//! # Honesty note
-//!
-//! Pixel-exact AV1 decode additionally requires inter prediction (Phase E) and
-//! the full transform-size set, both of which are still outstanding in this
-//! decoder. These filters are therefore *wired and exercised* but the decoder
-//! does not yet claim `pixel_exact` — see [`crate::decoder`].
+//! These filters are exercised by the FATE and libaom crosscheck suites and are
+//! bit-exact against dav1d; see [`crate::decoder`].
 
 use tpt_kinetix_core::error::KinetixError;
 
@@ -400,7 +396,7 @@ impl FrameMeta {
             return;
         }
         let i = self.idx(bx, by);
-        if std::env::var("KINETIX_AV1_DBG_CDEF7346").is_ok() && bx == 16 && by == 11 {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_CDEF7346").is_ok() && bx == 16 && by == 11 {
             eprintln!(
                 "record_luma bx={bx} by={by} i={i} skip={skip} old_skip={}",
                 self.luma_skip[i]
@@ -486,7 +482,7 @@ impl FrameMeta {
     ) {
         let by1c = by1.min(self.ch4);
         let bx1c = bx1.min(self.cw4);
-        if std::env::var("KINETIX_AV1_DBG_CHROMA_EDGE_MARK").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_CHROMA_EDGE_MARK").is_ok()
             && bx0 <= 16
             && 16 < bx1
             && by0 == 11
@@ -564,7 +560,7 @@ impl FrameMeta {
     ) {
         let by1c = by1.min(self.ch4);
         let bx1c = bx1.min(self.cw4);
-        if std::env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
             && ((bx0 <= 12 && 12 < bx1c && by0 <= 9 && 9 < by1c)
                 || (bx0 <= 16 && 16 < bx1c && by0 <= 11 && 11 < by1c))
         {
@@ -598,7 +594,7 @@ impl FrameMeta {
     ) {
         let by1c = by1.min(self.h4);
         let bx1c = bx1.min(self.w4);
-        if std::env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
             && bx0 <= 24
             && 24 < bx1c
             && by0 <= 18
@@ -1087,7 +1083,7 @@ fn deblock_plane(
     if plane_index > 0 && fh.loop_filter_level[plane_index + 1] == 0 {
         return;
     }
-    let olf_dbg = std::env::var("KINETIX_AV1_DBG_OLF")
+    let olf_dbg = crate::dbg_env::var("KINETIX_AV1_DBG_OLF")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         == Some(crate::debug_frame_seq::current());
@@ -1118,7 +1114,7 @@ fn deblock_plane(
         // filter at all.
         for by in v0..v1 {
             for bx in 1..grid_w.min(col_limit) {
-                if std::env::var("KINETIX_AV1_DBG_CHROMA_VEDGE").is_ok()
+                if crate::dbg_env::var("KINETIX_AV1_DBG_CHROMA_VEDGE").is_ok()
                     && plane_index > 0
                     && by == 11
                     && (bx == 16 || bx == 17)
@@ -1195,7 +1191,7 @@ fn deblock_plane(
                 }
                 let y0 = by * step;
                 let bh = step.min(height.saturating_sub(y0));
-                let lfdbg = std::env::var("KINETIX_AV1_DBG_LFEDGE").is_ok()
+                let lfdbg = crate::dbg_env::var("KINETIX_AV1_DBG_LFEDGE").is_ok()
                     && crate::debug_frame_seq::current() == 1;
                 let lf_pre = if lfdbg {
                     Some(
@@ -1210,7 +1206,7 @@ fn deblock_plane(
                 } else {
                     None
                 };
-                if std::env::var("KINETIX_AV1_DBG_VPROBE").is_ok() && plane_index == 0 {
+                if crate::dbg_env::var("KINETIX_AV1_DBG_VPROBE").is_ok() && plane_index == 0 {
                     let lfx = bx << lf_shift;
                     let lfy = by << lf_shift;
                     let li2 = lfy * lf_grid_w + lfx;
@@ -1224,7 +1220,7 @@ fn deblock_plane(
                         fh.loop_filter_level,
                     );
                 }
-                if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
+                if crate::dbg_env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
                     && plane_index == 0
                     && edge == 28
                     && y0 <= 71
@@ -1257,11 +1253,17 @@ fn deblock_plane(
                         );
                     }
                 }
+                // The filter reads at most 7 taps before and 6 after the edge
+                // and only rewrites those, so an 8-sample window on each side
+                // (clamped to the plane like the full line was) is
+                // bit-identical to filtering the whole row.
+                let lo = edge.saturating_sub(8);
+                let hi = (edge + 8).min(width);
                 for y in y0..y0 + bh {
-                    let line: Vec<i32> = (0..width).map(|x| plane[y * stride + x] as i32).collect();
+                    let line: Vec<i32> = (lo..hi).map(|x| plane[y * stride + x] as i32).collect();
                     let filtered = filter_line_1d(
                         &line,
-                        edge,
+                        edge - lo,
                         lp.limit,
                         lp.blimit,
                         lp.thresh,
@@ -1269,8 +1271,8 @@ fn deblock_plane(
                         plane_index == 0,
                         fh.bit_depth as u32,
                     );
-                    for x in 0..width {
-                        plane[y * stride + x] = filtered[x] as Px;
+                    for x in lo..hi {
+                        plane[y * stride + x] = filtered[x - lo] as Px;
                     }
                 }
                 if let Some(pre) = lf_pre {
@@ -1302,7 +1304,7 @@ fn deblock_plane(
         // content transition into the flat region next to it.
         for by in h0..h1 {
             for bx in 0..grid_w.min(col_limit) {
-                if std::env::var("KINETIX_AV1_DBG_CHROMA_HEDGE").is_ok()
+                if crate::dbg_env::var("KINETIX_AV1_DBG_CHROMA_HEDGE").is_ok()
                     && plane_index > 0
                     && by == 11
                     && bx == 16
@@ -1374,7 +1376,7 @@ fn deblock_plane(
                 }
                 let x0 = bx * step;
                 let bw = step.min(width.saturating_sub(x0));
-                let lfdbg_h = std::env::var("KINETIX_AV1_DBG_LFEDGE").is_ok()
+                let lfdbg_h = crate::dbg_env::var("KINETIX_AV1_DBG_LFEDGE").is_ok()
                     && crate::debug_frame_seq::current() == 1;
                 let lf_pre_h = if lfdbg_h {
                     Some(
@@ -1393,8 +1395,8 @@ fn deblock_plane(
                 // `KINETIX_AV1_DBG_HEDGES=<edge_y>` prints lvl/filter params for
                 // every grid column along that edge (plane 0 only).
                 if plane_index == 0
-                    && std::env::var("KINETIX_AV1_DBG_HEDGES").is_ok()
-                    && std::env::var("KINETIX_AV1_DBG_HEDGES")
+                    && crate::dbg_env::var("KINETIX_AV1_DBG_HEDGES").is_ok()
+                    && crate::dbg_env::var("KINETIX_AV1_DBG_HEDGES")
                         .ok()
                         .and_then(|s| s.trim().parse::<usize>().ok())
                         == Some(edge)
@@ -1407,7 +1409,7 @@ fn deblock_plane(
                     lp.thresh,
                 );
                 }
-                if std::env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
+                if crate::dbg_env::var("KINETIX_AV1_DBG_DEBLOCK").is_ok()
                     && plane_index == 0
                     && x0 <= 28
                     && 28 < x0 + bw
@@ -1440,12 +1442,14 @@ fn deblock_plane(
                         );
                     }
                 }
+                // Same 8-sample window as the vertical pass (see above).
+                let lo = edge.saturating_sub(8);
+                let hi = (edge + 8).min(height);
                 for x in x0..x0 + bw {
-                    let line: Vec<i32> =
-                        (0..height).map(|y| plane[y * stride + x] as i32).collect();
+                    let line: Vec<i32> = (lo..hi).map(|y| plane[y * stride + x] as i32).collect();
                     let filtered = filter_line_1d(
                         &line,
-                        edge,
+                        edge - lo,
                         lp.limit,
                         lp.blimit,
                         lp.thresh,
@@ -1453,8 +1457,8 @@ fn deblock_plane(
                         plane_index == 0,
                         fh.bit_depth as u32,
                     );
-                    for y in 0..height {
-                        plane[y * stride + x] = filtered[y] as Px;
+                    for y in lo..hi {
+                        plane[y * stride + x] = filtered[y - lo] as Px;
                     }
                 }
                 if let Some(pre) = lf_pre_h {
@@ -1597,7 +1601,7 @@ fn cdef_direction(
         }
     }
     let var = (best_cost - cost[(y_dir + 4) & 7]) >> 10;
-    if std::env::var("KINETIX_AV1_DBG_CDEFDIR").is_ok() && x0 == 464 && y0 == 184 {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_CDEFDIR").is_ok() && x0 == 464 && y0 == 184 {
         eprintln!("KCDEFDIR x0={x0} y0={y0} costs={:?} y_dir={y_dir}", cost);
     }
     (y_dir, var)
@@ -1638,7 +1642,7 @@ fn cdef_filter_block(
     // row 1 ([3,3]) when odd. No XOR with direction.
     let taps = ((pri_str >> coeff_shift) & 1) as usize;
     let src_rows = src.len().div_ceil(src_stride);
-    let dbg_cdef = std::env::var("KINETIX_AV1_DBG_CDEF67_44").is_ok();
+    let dbg_cdef = crate::dbg_env::var("KINETIX_AV1_DBG_CDEF67_44").is_ok();
     for i in 0..h {
         for j in 0..w {
             let abs_x = x0 + j;
@@ -1822,13 +1826,15 @@ fn wiener_filter_plane(
     let clip_limit = 1i32 << (bit_depth + 1 + 7 - round_bits_h);
     let round_bits_v = 11 - if bit_depth == 12 { 2 } else { 0 };
     let round_offset_v = 1i32 << (bit_depth + round_bits_v - 1);
-    let wiener_dbg = std::env::var("KINETIX_AV1_DBG_WPX").ok().and_then(|s| {
-        let (a, b) = s.split_once(',')?;
-        Some((
-            a.trim().parse::<usize>().ok()?,
-            b.trim().parse::<usize>().ok()?,
-        ))
-    });
+    let wiener_dbg = crate::dbg_env::var("KINETIX_AV1_DBG_WPX")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((
+                a.trim().parse::<usize>().ok()?,
+                b.trim().parse::<usize>().ok()?,
+            ))
+        });
     if wiener_dbg.is_some() {
         eprintln!(
             "WPX unit=({ux0},{uy0}) taps_h={half_h:?} taps_v={half_v:?} uw={uw} uh={uh} seg_h={uh}"
@@ -2043,13 +2049,15 @@ fn sgrproj_filter_plane(
         for x in 0..uw {
             let sv = src_at(ux0 as isize + x as isize, uy0 as isize + y as isize);
             let correction = (xqd[0] * t0[y * uw + x] + w1 * t1[y * uw + x] + (1 << 10)) >> 11;
-            let sgr_dbg = std::env::var("KINETIX_AV1_DBG_SGRPX").ok().and_then(|s| {
-                let (a, b) = s.split_once(',')?;
-                Some((
-                    a.trim().parse::<usize>().ok()?,
-                    b.trim().parse::<usize>().ok()?,
-                ))
-            });
+            let sgr_dbg = crate::dbg_env::var("KINETIX_AV1_DBG_SGRPX")
+                .ok()
+                .and_then(|s| {
+                    let (a, b) = s.split_once(',')?;
+                    Some((
+                        a.trim().parse::<usize>().ok()?,
+                        b.trim().parse::<usize>().ok()?,
+                    ))
+                });
             if sgr_dbg == Some((ux0 + x, uy0 + y)) {
                 eprintln!(
                     "SGR n={} ({},{}) sv={sv} t0={} t1={} xqd={xqd:?} w1={w1} correction={correction} set={set} uw={uw} uh={uh} ux0={ux0} uy0={uy0} seg=(uy0={uy0})",
@@ -2107,7 +2115,7 @@ fn apply_loop_restoration_plane(
     };
     let boundary_owned = replicate_edge(boundary_src);
     let boundary_src: &[Px] = &boundary_owned;
-    if std::env::var("KINETIX_AV1_DBG_LRMAP").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_LRMAP").is_ok() {
         let mut kinds = std::collections::HashMap::new();
         for ((pl, ur, uc), u) in lr_units {
             if *pl == plane_idx {
@@ -2262,9 +2270,9 @@ pub fn apply_post_filters(
     // Stream bit depth drives every filter's output clamp (`pix_max`).
     let bit_depth = fh.bit_depth as u32;
     let pix_max: i32 = (1i32 << bit_depth) - 1;
-    let dbg = std::env::var("KINETIX_AV1_DBG").is_ok() && width == 64 && height == 64;
-    let skip_deblock = std::env::var("KINETIX_AV1_NODEBLOCK").is_ok();
-    let skip_cdef = std::env::var("KINETIX_AV1_NOCDEF").is_ok();
+    let dbg = crate::dbg_env::var("KINETIX_AV1_DBG").is_ok() && width == 64 && height == 64;
+    let skip_deblock = crate::dbg_env::var("KINETIX_AV1_NODEBLOCK").is_ok();
+    let skip_cdef = crate::dbg_env::var("KINETIX_AV1_NOCDEF").is_ok();
     let dump_row = |label: &str, plane: &[Px], y: usize| {
         let row: Vec<u8> = (32..64).map(|x| plane[y * width + x] as u8).collect();
         eprintln!("{label} y={y}: {row:?}");
@@ -2275,12 +2283,12 @@ pub fn apply_post_filters(
     // `KINETIX_AV1_DBG_PXY_FRAME=n` restricts the trace to one frame —
     // without it the dump fires for every frame and the values from an
     // earlier frame get mistaken for the one under investigation.
-    let dbg_pxy_frame = std::env::var("KINETIX_AV1_DBG_PXY_FRAME")
+    let dbg_pxy_frame = crate::dbg_env::var("KINETIX_AV1_DBG_PXY_FRAME")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());
     let dbg_pxy = dbg_pxy_frame
         .filter(|f| crate::debug_frame_seq::current() == *f)
-        .and_then(|_| std::env::var("KINETIX_AV1_DBG_PXY").ok())
+        .and_then(|_| crate::dbg_env::var("KINETIX_AV1_DBG_PXY").ok())
         .and_then(|s| {
             let (a, b) = s.split_once(',')?;
             Some((
@@ -2317,7 +2325,7 @@ pub fn apply_post_filters(
     // and dav1d's level/mask arrays stop at `h4`. Filtering the padding rows
     // anyway desyncs the stored reference planes (references include the
     // post-filtered grid), which then desyncs the next frame's MC.
-    if std::env::var("KINETIX_AV1_DBG_LFEDGE").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_LFEDGE").is_ok() {
         eprintln!(
             "LFPAR fr={} levels={:?} sharp={} deltas_en={} ref_deltas={:?} mode_deltas={:?}",
             crate::debug_frame_seq::current(),
@@ -2359,7 +2367,7 @@ pub fn apply_post_filters(
         );
     }
     let sub_x = subsampling_x as usize;
-    if std::env::var("KINETIX_AV1_DUMP_POSTDEBLOCK").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DUMP_POSTDEBLOCK").is_ok() {
         let mut fp = std::fs::File::create("k_postdeb.bin").ok();
         if let Some(fp) = fp.as_mut() {
             use std::io::Write;
@@ -2407,13 +2415,15 @@ pub fn apply_post_filters(
             sub_y,
         );
     }
-    let dbg_cpxy = std::env::var("KINETIX_AV1_DBG_CPXY").ok().and_then(|s| {
-        let (a, b) = s.split_once(',')?;
-        Some((
-            a.trim().parse::<usize>().ok()?,
-            b.trim().parse::<usize>().ok()?,
-        ))
-    });
+    let dbg_cpxy = crate::dbg_env::var("KINETIX_AV1_DBG_CPXY")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((
+                a.trim().parse::<usize>().ok()?,
+                b.trim().parse::<usize>().ok()?,
+            ))
+        });
     let dump_cpxy = |label: &str, plane: &[Px], stride: usize| {
         if let Some((x, y)) = dbg_cpxy {
             if x < stride && y * stride + x < plane.len() {
@@ -2502,138 +2512,149 @@ pub fn apply_post_filters(
         let cdef_write_uv_h = uv_h;
         let cdef_luma_dir_h = height;
         let src_y = y_plane.to_vec();
-        let mut uy = 0;
-        while uy < height {
-            let mut ux = 0;
-            while ux < width {
-                let mi_r = (tile_y0 + uy) >> 2;
-                let mi_c = (tile_x0 + ux) >> 2;
-                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
-                let y_packed = fh.cdef_y_strength.get(idx).copied().unwrap_or(0);
-                let pri = (y_packed & 0x0F) as i32;
-                let sec = [0i32, 1, 2, 4][((y_packed >> 4) & 3) as usize];
-                let damping = fh.cdef_damping as i32;
-                let uh = 64.min(height - uy);
-                let uw = 64.min(width - ux);
-                // dav1d's CDEF processes the full 8×8 units over the whole
-                // mi-grid extent (direction search AND writes): the bottom
-                // units at frame rows 296-303 read the real grid rows
-                // 300-303 for their direction search, and their filtered
-                // output covers the padding rows too. Clipping to the
-                // visible height left those units unfiltered/clamped,
-                // diverging from dav1d at the frame bottom.
-                cdef_plane_luma(
-                    y_plane,
-                    &src_y,
-                    width,
-                    height,
-                    pri,
-                    sec,
-                    damping,
-                    uy,
-                    ux,
-                    uh,
-                    uw,
-                    &meta.luma_skip,
-                    meta.w8,
-                    bit_depth,
-                );
-                ux += 64;
+        let luma_job = || {
+            let mut uy = 0;
+            while uy < height {
+                let mut ux = 0;
+                while ux < width {
+                    let mi_r = (tile_y0 + uy) >> 2;
+                    let mi_c = (tile_x0 + ux) >> 2;
+                    let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                    let y_packed = fh.cdef_y_strength.get(idx).copied().unwrap_or(0);
+                    let pri = (y_packed & 0x0F) as i32;
+                    let sec = [0i32, 1, 2, 4][((y_packed >> 4) & 3) as usize];
+                    let damping = fh.cdef_damping as i32;
+                    let uh = 64.min(height - uy);
+                    let uw = 64.min(width - ux);
+                    // dav1d's CDEF processes the full 8×8 units over the whole
+                    // mi-grid extent (direction search AND writes): the bottom
+                    // units at frame rows 296-303 read the real grid rows
+                    // 300-303 for their direction search, and their filtered
+                    // output covers the padding rows too. Clipping to the
+                    // visible height left those units unfiltered/clamped,
+                    // diverging from dav1d at the frame bottom.
+                    cdef_plane_luma(
+                        y_plane,
+                        &src_y,
+                        width,
+                        height,
+                        pri,
+                        sec,
+                        damping,
+                        uy,
+                        ux,
+                        uh,
+                        uw,
+                        &meta.luma_skip,
+                        meta.w8,
+                        bit_depth,
+                    );
+                    ux += 64;
+                }
+                uy += 64;
             }
-            uy += 64;
-        }
+        };
 
-        let src_u = u_plane.to_vec();
         let uv_step_x = 64 >> sub_x;
         let uv_step_y = 64 >> sub_y;
-        let mut uy = 0;
-        while uy < uv_h {
-            let mut ux = 0;
-            while ux < uv_w {
-                let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
-                let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
-                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
-                let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
-                let uv_pri = (uv_packed & 0x0F) as i32;
-                let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
-                // AV1 §7.15.3: the chroma planes filter with `CdefDamping - 1`
-                // (dav1d `cdef_apply_tmpl.c` passes `damping - 1` for pl>0).
-                let uv_damping = fh.cdef_damping as i32 - 1;
-                let uh = uv_step_y.min(uv_h - uy);
-                let uw = uv_step_x.min(uv_w - ux);
-                cdef_plane_chroma(
-                    u_plane,
-                    &src_u,
-                    uv_w,
-                    cdef_write_uv_h,
-                    &src_y,
-                    width,
-                    cdef_luma_dir_h,
-                    sub_x,
-                    sub_y,
-                    uv_pri,
-                    uv_sec,
-                    uv_damping,
-                    uy,
-                    ux,
-                    uh,
-                    uw,
-                    &meta.luma_skip,
-                    meta.w8,
-                    fh.order_hint,
-                    fh.show_frame,
-                    'U',
-                    bit_depth,
-                );
-                ux += uv_step_x;
+        let src_u = u_plane.to_vec();
+        let u_job = || {
+            let mut uy = 0;
+            while uy < uv_h {
+                let mut ux = 0;
+                while ux < uv_w {
+                    let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
+                    let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
+                    let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                    let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
+                    let uv_pri = (uv_packed & 0x0F) as i32;
+                    let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
+                    // AV1 §7.15.3: the chroma planes filter with `CdefDamping - 1`
+                    // (dav1d `cdef_apply_tmpl.c` passes `damping - 1` for pl>0).
+                    let uv_damping = fh.cdef_damping as i32 - 1;
+                    let uh = uv_step_y.min(uv_h - uy);
+                    let uw = uv_step_x.min(uv_w - ux);
+                    cdef_plane_chroma(
+                        u_plane,
+                        &src_u,
+                        uv_w,
+                        cdef_write_uv_h,
+                        &src_y,
+                        width,
+                        cdef_luma_dir_h,
+                        sub_x,
+                        sub_y,
+                        uv_pri,
+                        uv_sec,
+                        uv_damping,
+                        uy,
+                        ux,
+                        uh,
+                        uw,
+                        &meta.luma_skip,
+                        meta.w8,
+                        fh.order_hint,
+                        fh.show_frame,
+                        'U',
+                        bit_depth,
+                    );
+                    ux += uv_step_x;
+                }
+                uy += uv_step_y;
             }
-            uy += uv_step_y;
-        }
+        };
 
         let src_v = v_plane.to_vec();
-        let mut uy = 0;
-        while uy < uv_h {
-            let mut ux = 0;
-            while ux < uv_w {
-                let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
-                let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
-                let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
-                let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
-                let uv_pri = (uv_packed & 0x0F) as i32;
-                let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
-                // AV1 §7.15.3: the chroma planes filter with `CdefDamping - 1`
-                // (dav1d `cdef_apply_tmpl.c` passes `damping - 1` for pl>0).
-                let uv_damping = fh.cdef_damping as i32 - 1;
-                let uh = uv_step_y.min(uv_h - uy);
-                let uw = uv_step_x.min(uv_w - ux);
-                cdef_plane_chroma(
-                    v_plane,
-                    &src_v,
-                    uv_w,
-                    cdef_write_uv_h,
-                    &src_y,
-                    width,
-                    cdef_luma_dir_h,
-                    sub_x,
-                    sub_y,
-                    uv_pri,
-                    uv_sec,
-                    uv_damping,
-                    uy,
-                    ux,
-                    uh,
-                    uw,
-                    &meta.luma_skip,
-                    meta.w8,
-                    fh.order_hint,
-                    fh.show_frame,
-                    'V',
-                    bit_depth,
-                );
-                ux += uv_step_x;
+        let v_job = || {
+            let mut uy = 0;
+            while uy < uv_h {
+                let mut ux = 0;
+                while ux < uv_w {
+                    let mi_r = (tile_y0 + (uy << sub_y)) >> 2;
+                    let mi_c = (tile_x0 + (ux << sub_x)) >> 2;
+                    let idx = cdef_idx.get(&(mi_r, mi_c)).copied().unwrap_or(0) as usize;
+                    let uv_packed = fh.cdef_uv_strength.get(idx).copied().unwrap_or(0);
+                    let uv_pri = (uv_packed & 0x0F) as i32;
+                    let uv_sec = [0i32, 1, 2, 4][((uv_packed >> 4) & 3) as usize];
+                    // AV1 §7.15.3: the chroma planes filter with `CdefDamping - 1`
+                    // (dav1d `cdef_apply_tmpl.c` passes `damping - 1` for pl>0).
+                    let uv_damping = fh.cdef_damping as i32 - 1;
+                    let uh = uv_step_y.min(uv_h - uy);
+                    let uw = uv_step_x.min(uv_w - ux);
+                    cdef_plane_chroma(
+                        v_plane,
+                        &src_v,
+                        uv_w,
+                        cdef_write_uv_h,
+                        &src_y,
+                        width,
+                        cdef_luma_dir_h,
+                        sub_x,
+                        sub_y,
+                        uv_pri,
+                        uv_sec,
+                        uv_damping,
+                        uy,
+                        ux,
+                        uh,
+                        uw,
+                        &meta.luma_skip,
+                        meta.w8,
+                        fh.order_hint,
+                        fh.show_frame,
+                        'V',
+                        bit_depth,
+                    );
+                    ux += uv_step_x;
+                }
+                uy += uv_step_y;
             }
-            uy += uv_step_y;
-        }
+        };
+        // Luma, U and V read only the shared pre-CDEF luma snapshot `src_y`
+        // and their own pre-CDEF copy, and write disjoint planes.
+        rayon::join(luma_job, || {
+            rayon::join(u_job, v_job);
+        });
     }
 
     dump_cpxy("post-cdef-V", v_plane, uv_w);
@@ -2725,7 +2746,7 @@ pub fn apply_post_filters(
             grid_ch,
             pix_max,
         );
-        if fh.uses_lr && std::env::var("KINETIX_AV1_NOLR").is_err() {
+        if fh.uses_lr && crate::dbg_env::var("KINETIX_AV1_NOLR").is_err() {
             apply_loop_restoration_plane(
                 &mut yu,
                 ustride,
@@ -2786,14 +2807,14 @@ pub fn apply_post_filters(
     // imprecision, confirmed via an `--inloopfilters norestoration` A/B
     // check), i.e. restoration itself is now correct to the precision its
     // input allows. No corpus clip regressed.
-    if std::env::var("KINETIX_AV1_DBG_LRMAP").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_LRMAP").is_ok() {
         eprintln!(
             "DBG LRPOST w={width} h={height} uses_lr={} types={:?} unit={:?} lr_units_n={} lr_pre_n={}",
             fh.uses_lr, fh.frame_restoration_type, fh.lr_unit_size, meta.lr_units.len(),
             lr_pre_u.len()
         );
     }
-    if fh.uses_lr && std::env::var("KINETIX_AV1_NOLR").is_err() {
+    if fh.uses_lr && crate::dbg_env::var("KINETIX_AV1_NOLR").is_err() {
         // LR clips at the VISIBLE frame height (dav1d `lr_sbrow`: `row_h =
         // imin(next_row_y - offset, h)` with `h` = visible chroma/luma
         // height) — unlike deblock/CDEF, which run over the whole mi grid.
@@ -2963,7 +2984,7 @@ fn cdef_plane_luma(
                 0
             };
             let dir = if pri_str == 0 { 0 } else { yd };
-            if let Ok(t) = std::env::var("KINETIX_AV1_DBG_CDEFPX") {
+            if let Ok(t) = crate::dbg_env::var("KINETIX_AV1_DBG_CDEFPX") {
                 let mut it = t.split(',');
                 if let (Some(cx), Some(cr)) = (it.next(), it.next()) {
                     if x0 == cx.trim().parse::<usize>().unwrap_or(usize::MAX)
@@ -2993,7 +3014,7 @@ fn cdef_plane_luma(
                 dir,
                 bit_depth,
             );
-            if std::env::var("KINETIX_AV1_DBG_CDEFPX").is_ok() && x0 == 600 && y0 == 296 {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_CDEFPX").is_ok() && x0 == 600 && y0 == 296 {
                 eprintln!(
                     "KCDEFPOST post_rows={:?}",
                     (0..8)
@@ -3061,7 +3082,7 @@ fn cdef_plane_chroma(
             let luma_y0 = y0 << sub_y;
             let skip_idx = (luma_y0 / 8) * w8 + luma_x0 / 8;
             let skip_val = luma_skip.get(skip_idx).copied().unwrap_or(false);
-            if std::env::var("KINETIX_AV1_DBG_CDEF7346").is_ok()
+            if crate::dbg_env::var("KINETIX_AV1_DBG_CDEF7346").is_ok()
                 && plane_label == 'V'
                 && x0 <= 67
                 && x0 + 4 > 67
@@ -3089,7 +3110,7 @@ fn cdef_plane_chroma(
             } else {
                 CDEF_UV_DIR[sub_x][sub_y][yd]
             };
-            if std::env::var("KINETIX_DBG_CDEFUV").is_ok()
+            if crate::dbg_env::var("KINETIX_DBG_CDEFUV").is_ok()
                 && (order_hint == 1 && shown
                     || ((luma_x0 == 96 && luma_y0 == 64) || (luma_x0 == 96 && luma_y0 == 72)))
             {
@@ -3128,7 +3149,7 @@ fn cdef_plane_chroma(
                 eprintln!("CDEFUV post (4x4 chroma): {}", dump44(plane));
                 continue;
             }
-            if std::env::var("KINETIX_DBG_TAP67").is_ok()
+            if crate::dbg_env::var("KINETIX_DBG_TAP67").is_ok()
                 && (plane_label == 'V' || plane_label == 'U')
                 && order_hint == 7
                 && shown
@@ -3148,7 +3169,7 @@ fn cdef_plane_chroma(
             }
             let ww = w_block.min(width - x0);
             let hh = h_block.min(height - y0);
-            if std::env::var("KINETIX_AV1_DBG_OCDEF")
+            if crate::dbg_env::var("KINETIX_AV1_DBG_OCDEF")
                 .ok()
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 == Some(crate::debug_frame_seq::current())
@@ -3161,7 +3182,7 @@ fn cdef_plane_chroma(
                 plane, width, src, width, x0, y0, ww, hh, sub_x, sub_y, p, sec_str, damping, dir,
                 bit_depth,
             );
-            if std::env::var("KINETIX_AV1_DBG_CDEF7346").is_ok() && plane_label == 'V' {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_CDEF7346").is_ok() && plane_label == 'V' {
                 if x0 <= 67 && x0 + ww > 67 && y0 <= 46 && y0 + hh > 46 {
                     let pre46 = src[46 * width + 67];
                     let post46 = plane[46 * width + 67];

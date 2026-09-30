@@ -1,8 +1,13 @@
 # `tpt-kinetix-realtime` — Design Draft
 
-> **Status:** Draft with decision points flagged. Nothing is implemented yet.
-> Every `DECISION:` block lists the alternatives and a recommendation.
-> Resolve all of them before scaffolding begins.
+> **Status:** Design doc; the crate exists (`tpt-kinetix-realtime`, workspace member, not in
+> the `release-plz.toml` publish list). Implemented: profile-aware headers, slice-grid
+> framing, intra-refresh masking, FEC, decoder concealment, intra (14 modes) +
+> unidirectional-P prediction, the transform bank, in-loop deblock, `deadline_ms`
+> rate-control hook and foveation, all running end-to-end. It is an original format with no
+> external oracle, so `capabilities().pixel_exact` is `false`. The packet-loss-vs-quality
+> harness (DECISION 5) and a fuzz target are not present. The `DECISION:` blocks below
+> record the design rationale.
 >
 > **Profile decision (resolved, 2026-08-13):** `tpt-kinetix-realtime` v1 is
 > **profile-agnostic**. The bitstream is designed around the shared realtime
@@ -284,6 +289,9 @@ recover via FEC (DECISION 1).
 ---
 
 ## Implementation order (post-design resolution)
+
+Steps 1-8 and 10 are implemented (`tpt-kinetix-bitstream` was extracted); step 9 (loss/stall
+harness) is open.
 
 1. Extract `tpt-kinetix-bitstream` from lean (DECISION 7) — `BitReader`,
    rANS, partition/transform, deblock.

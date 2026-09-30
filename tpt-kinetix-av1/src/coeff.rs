@@ -519,6 +519,7 @@ pub fn read_coeffs(
     ctxs: &mut CoeffContexts,
     blk: &TxBlockCtx,
 ) -> Result<CoeffBlock, KinetixError> {
+    let _g = crate::dbg_env::Timer::new(0);
     let tx_size = blk.tx_size;
     if tx_size >= TX_WIDTH.len() {
         return Err(KinetixError::Parse(format!(
@@ -552,7 +553,7 @@ pub fn read_coeffs(
     let mut tx_type = DCT_DCT;
 
     let skip_ctx = all_zero_ctx(blk, ctxs, w4, h4);
-    if std::env::var("KINETIX_AV1_DBG_ALLZERO").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_ALLZERO").is_ok() {
         eprintln!(
             "DBG allzero plane={} x4={} y4={} tx_sz_ctx={tx_sz_ctx} skip_ctx={skip_ctx} cdf={:?} rng={} val={}",
             blk.plane, blk.x4, blk.y4, cdfs.txb_skip[tx_sz_ctx][skip_ctx], dec.raw_state().0, dec.raw_state().1
@@ -581,7 +582,7 @@ pub fn read_coeffs(
             ))
         })?;
 
-        let dbg_c27 = std::env::var("KINETIX_AV1_DBG_C27").is_ok()
+        let dbg_c27 = crate::dbg_env::var("KINETIX_AV1_DBG_C27").is_ok()
             && blk.plane == 2
             && blk.x4 == 8
             && blk.y4 == 5;
@@ -615,7 +616,7 @@ pub fn read_coeffs(
         // because dav1d's `is_1d` flag is derived from it via
         // `dav1d_tx_type_class`, and the corrected trace shows `is_1d=1`
         // on the target block.
-        if std::env::var("KINETIX_AV1_DBG_EOB").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_EOB").is_ok()
             && blk.x4 == dbg_x4()
             && blk.y4 == dbg_y4()
             && usize::from(blk.plane > 0) == dbg_plane()
@@ -657,7 +658,7 @@ pub fn read_coeffs(
                 dec.read_symbol(&mut cdfs.coeff_base_eob[tx_sz_ctx][ptype][ctx]) as u32 + 1
             } else {
                 let ctx = coeff_base_ctx(tx_size, tx_type, &quant, pos, c, false);
-                if c == 0 && std::env::var("KINETIX_AV1_DBG").is_ok() {
+                if c == 0 && crate::dbg_env::var("KINETIX_AV1_DBG").is_ok() {
                     eprintln!(
                         "DBG DC coeff_base ctx={ctx} tx_sz_ctx={tx_sz_ctx} ptype={ptype} cdf={:?}",
                         cdfs.coeff_base[tx_sz_ctx][ptype][ctx]
@@ -867,7 +868,7 @@ fn compute_tx_type(blk: &TxBlockCtx, tx_size: usize, luma_tx_type: usize) -> usi
 /// caller-supplied frame number is only an echo of what was asked for and
 /// silently mis-attributes hits when the probe fires in several frames.
 fn dbg_target() -> Option<(usize, usize, usize)> {
-    let v = std::env::var("KINETIX_AV1_DBG_EOB").ok()?;
+    let v = crate::dbg_env::var("KINETIX_AV1_DBG_EOB").ok()?;
     let mut it = v.split(',');
     let plane = it.next()?.trim().parse().ok()?;
     let x4 = it.next()?.trim().parse().ok()?;
@@ -1029,7 +1030,7 @@ fn all_zero_ctx(blk: &TxBlockCtx, ctxs: &CoeffContexts, w4: usize, h4: usize) ->
         if blk.block_w * blk.block_h > w * h {
             ctx += 3;
         }
-        if std::env::var("KINETIX_AV1_DBG_CHROMA_CTX").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_CHROMA_CTX").is_ok() {
             eprintln!(
                 "DBG chroma allzero_ctx plane={plane} x4={} y4={} w4={w4} h4={h4} above={above} \
                  left={left} block_w={} block_h={} w={w} h={h} ctx={ctx}",

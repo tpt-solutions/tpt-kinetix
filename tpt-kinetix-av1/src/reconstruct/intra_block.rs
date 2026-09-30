@@ -10,7 +10,7 @@ impl<'a> TileDecodeState<'a> {
         let _bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let _bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
 
-        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_SB1").is_ok()
             && (mi_row == 8 || (16..=18).contains(&mi_row))
             && mi_col <= 2
         {
@@ -62,7 +62,7 @@ impl<'a> TileDecodeState<'a> {
             self.intra_segment_id(mi_row, mi_col, skip);
         }
         self.store_segment_id(mi_row, mi_col, bsize);
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
                 "KTRACE SKIP bx={mi_col} by={mi_row} skip={skip} r={}",
                 self.dec.raw_state().0
@@ -86,14 +86,14 @@ impl<'a> TileDecodeState<'a> {
         // corruption.
         if self.allow_intrabc {
             let use_intrabc = self.mode_cdfs.read_use_intrabc(&mut self.dec);
-            if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
                 eprintln!(
                     "KTRACE IBCFLAG bx={mi_col} by={mi_row} use={use_intrabc} r={}",
                     self.dec.raw_state().0
                 );
             }
             if use_intrabc {
-                if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_DBG_IBC").is_ok() {
                     eprintln!(
                         "DBG IBC mi=({mi_col},{mi_row}) bsize={bsize} skip={skip} bit_pos={}",
                         self.dec.bit_position()
@@ -117,7 +117,7 @@ impl<'a> TileDecodeState<'a> {
                 let ibc_pred = self.ibc_mv_pred(mi_row, mi_col, bsize);
                 let delta = crate::inter::read_mv_ibc(&mut self.dec, &mut self.map_inter_cdfs)?;
                 let mv = crate::inter::Mv::new(ibc_pred.row + delta.row, ibc_pred.col + delta.col);
-                if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_DBG_IBC").is_ok() {
                     eprintln!(
                         "DBG IBC after_mv: pred=({},{}) delta=({},{}) final=({},{}) bit_pos={}",
                         ibc_pred.row,
@@ -151,13 +151,13 @@ impl<'a> TileDecodeState<'a> {
             INTRA_MODE_CONTEXT[above_mode],
             INTRA_MODE_CONTEXT[left_mode],
         );
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
                 "KTRACE YMODE bx={mi_col} by={mi_row} ym={y_mode} r={}",
                 self.dec.raw_state().0
             );
         }
-        if std::env::var("KINETIX_AV1_DBG_YMODE").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_YMODE").is_ok()
             && (mi_row <= 20 || ((8..=10).contains(&mi_row) && mi_col <= 2))
         {
             eprintln!(
@@ -202,7 +202,7 @@ impl<'a> TileDecodeState<'a> {
         } else {
             DC_PRED as usize
         };
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() && has_chroma {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() && has_chroma {
             eprintln!(
                 "KTRACE UVMODE bx={mi_col} by={mi_row} uvm={uv_mode} r={}",
                 self.dec.raw_state().0
@@ -215,7 +215,7 @@ impl<'a> TileDecodeState<'a> {
         // order.
         let cfl_alpha = if has_chroma && uv_mode == UV_CFL_PRED {
             let a = self.mode_cdfs.read_cfl_alphas(&mut self.dec);
-            if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
                 eprintln!(
                     "KTRACE CFLALPHA mi=({mi_col},{mi_row}) a={a:?} r={}",
                     self.dec.raw_state().0
@@ -297,7 +297,7 @@ impl<'a> TileDecodeState<'a> {
         // dav1d debug build (`BLOCK` line + per-coeff `KTRACE CF` lines in
         // `reconstruct_block.rs`), for diffing the entropy decode against the
         // reference decoder block-by-block.
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             let hc = has_chroma;
             eprintln!(
                 "KTRACE BLOCK bx={mi_col} by={mi_row} bw4={} bh4={} skip={} ymode={y_mode}{} tx={luma_tx} r={}",
@@ -309,7 +309,7 @@ impl<'a> TileDecodeState<'a> {
             );
         }
 
-        if mi_row < 4 && std::env::var("KINETIX_AV1_DBG").is_ok() {
+        if mi_row < 4 && crate::dbg_env::var("KINETIX_AV1_DBG").is_ok() {
             eprintln!(
                 "DBG decode_intra_block mi=({mi_row},{mi_col}) bsize={bsize} y_mode={y_mode} uv_mode={uv_mode} skip={skip} luma_tx={luma_tx} filter_intra={filter_intra_mode:?} colors_y={:?} colors_u={:?}",
                 palette.colors_y, palette.colors_u
@@ -475,7 +475,7 @@ impl<'a> TileDecodeState<'a> {
                     }
                     let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
                     let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
-                    if std::env::var("KINETIX_AV1_DBG_SB1").is_ok()
+                    if crate::dbg_env::var("KINETIX_AV1_DBG_SB1").is_ok()
                         && (mi_row == 8 || mi_row == 16)
                         && mi_col == 0
                         && ty == 0
@@ -782,7 +782,7 @@ impl<'a> TileDecodeState<'a> {
                             }
                             let cpx_x = base_cpx_x + tx;
                             let cpx_y = base_cpx_y + ty;
-                            if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_INTRA_CXY") {
+                            if let Ok(spec) = crate::dbg_env::var("KINETIX_AV1_DBG_INTRA_CXY") {
                                 if let Some((sx, sy)) = spec.split_once(',') {
                                     if let (Ok(tx_), Ok(ty_)) =
                                         (sx.trim().parse::<usize>(), sy.trim().parse::<usize>())
@@ -1361,7 +1361,7 @@ impl<'a> TileDecodeState<'a> {
         tail.sort_by_key(|e| std::cmp::Reverse(e.1));
         stack.extend(tail);
 
-        if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_IBC").is_ok() {
             eprintln!(
                 "DBG IBC stack mi=({mi_col},{mi_row}) bsize={bsize} n_rows={n_rows} n_cols={n_cols} max_rows={max_rows} max_cols={max_cols} stack={:?}",
                 stack.iter().map(|e| (e.0.row, e.0.col, e.1)).collect::<Vec<_>>()
@@ -1389,7 +1389,7 @@ impl<'a> TileDecodeState<'a> {
     fn mvscan_target() -> Option<(i32, i32)> {
         static TARGET: std::sync::OnceLock<Option<(i32, i32)>> = std::sync::OnceLock::new();
         *TARGET.get_or_init(|| {
-            let v = std::env::var("KINETIX_AV1_DBG_MVSCAN").ok()?;
+            let v = crate::dbg_env::var("KINETIX_AV1_DBG_MVSCAN").ok()?;
             let mut it = v.trim().split(':');
             let by = it.next()?.trim().parse::<i32>().ok()?;
             let bx = it.next()?.trim().parse::<i32>().ok()?;
@@ -2557,7 +2557,7 @@ impl<'a> TileDecodeState<'a> {
                                         &mut res_u,
                                     );
                                 }
-                                if std::env::var("KINETIX_AV1_DBG_IBC_UV").is_ok() {
+                                if crate::dbg_env::var("KINETIX_AV1_DBG_IBC_UV").is_ok() {
                                     eprintln!(
                                         "DBG IBC_UV mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) \
                                  src_c=({src_cx},{src_cy}) c_tx={c_tx} cu.txtp={} cu.eob={} \

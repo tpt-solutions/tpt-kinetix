@@ -1,6 +1,12 @@
 # `tpt-kinetix-volumetric` — Design Draft
 
-> **Status:** Design decisions **all resolved**. The original eight `DECISION:`
+> **Status:** Design decisions **all resolved**, and v1 is **implemented**
+> (`tpt-kinetix-volumetric`: header, context-modeled octree geometry, lift/RAHT attributes,
+> in-crate encoder; `PointCloud` lives in `tpt-kinetix-core`). The decoder is not yet
+> validated bit-exact against the TMC13 oracle, so `capabilities().pixel_exact` is `false`
+> and strict mode returns `NotPixelExact`. The crate is a workspace member with a fuzz
+> target but is not in the `release-plz.toml` publish list. Dynamic (inter-frame) mode is
+> unimplemented. The original eight `DECISION:`
 > blocks were resolved 2026-08-13; **DECISION 9** (compression-efficiency
 > measurement / Draco + TMC13 baselines) and **DECISION 10** (explicit
 > shared-primitive reconciliation — the `todo.md` checklist item 6 "shares no
@@ -460,6 +466,9 @@ explicit, scoped decision rather than an unexamined assumption.
 ---
 
 ## Implementation order (post-design resolution)
+
+Steps 1-6 are done and step 8 (fuzz target) exists; step 7 (TMC13 bit-exact conformance)
+and step 9 (dynamic mode) are open.
 
 1. Add `tpt-kinetix-volumetric` to the workspace `Cargo.toml` members (design-phase only — **not** added to the `release-plz.toml` publish list yet, matching `tpt-kinetix-vision`/`lean`/`screen`).
 2. Add `PointCloud` output type to `tpt-kinetix-core`.

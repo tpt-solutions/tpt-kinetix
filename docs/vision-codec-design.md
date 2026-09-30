@@ -421,6 +421,9 @@ If/when `tpt-kinetix-bitstream` is created, the shared primitives would be:
 
 ## Implementation order (post-design resolution)
 
+Per the status note at the top: steps 1-5, 8 and 9 (luma-only or 4:2:0) are implemented; 6-7 (mAP harness /
+YOLOv8-n validation) and 10 (quant tuning) are open.
+
 1. Scaffold `tpt-kinetix-vision` crate from `templates/codec-crate/`
 2. Port `BitReader` + rANS primitives (copy from Lean initially, per DECISION 8)
 3. Implement sequence/frame header parsing

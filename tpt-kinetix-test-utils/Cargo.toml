@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Shared test helpers for the TPT Kinetix workspace"
+keywords = ["tpt-kinetix", "testing", "conformance", "multimedia"]
+categories = ["development::testing"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-test-utils"
 publish = false
 
 [dependencies]

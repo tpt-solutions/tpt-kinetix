@@ -1,12 +1,15 @@
 # `tpt-kinetix-lossless` — Design Draft
 
-> **Status:** Draft with decision points. Items 1, 2, 6 are **resolved**
-> (decided 2026-08-13). Items 3, 4, 5 carry a **recommendation** in this doc
-> and should be confirmed before scaffolding begins.
+> **Status:** The v1 predictive codec is **implemented** in `tpt-kinetix-lossless`:
+> `LosslessEncoder` / `LosslessDecoder`, FFV1-style median prediction, rANS residual coding
+> via `tpt-kinetix-bitstream`, per-plane CRC, and a reserved `transform_id` for a future
+> wavelet mode (rejected with `Unsupported` today). `capabilities().pixel_exact` is `true`.
+> The crate has a fuzz target and is in the `release-plz.toml` publish list. Items 1, 2, 6
+> were resolved 2026-08-13; items 3, 4, 5 carry a recommendation in this doc. The FFV1 /
+> lossless-HEVC ratio harness (implementation step 6) has not been built.
 >
 > This doc is the home for the `tpt-kinetix-lossless` design-phase checklist in
 > `todo.md` (Phase 14). Each checklist item maps to a `DECISION:` block below.
-> Nothing is implemented yet.
 
 ## Goal
 
@@ -195,6 +198,9 @@ the "third hand-rolled reader" consolidation the open question below anticipated
 ---
 
 ## Implementation order (post-design resolution)
+
+Steps 2-5 and the `transform_id` reservation of step 7 are done; step 6 (ratio harness) and
+the wavelet mode itself are open.
 
 1. Confirm DECISIONs 3, 4, 5 in this doc.
 2. Scaffold `tpt-kinetix-lossless` from `templates/codec-crate/`, add to

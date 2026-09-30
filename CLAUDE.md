@@ -10,7 +10,7 @@ now reports `pixel_exact: true` — CAVLC/CABAC I/P/B, PAFF field pictures, MBAF
 High-profile 8×8 transform (progressive) are all bit-exact vs ffmpeg with full deblocking. Strict
 mode returns `KinetixError::NotPixelExact` only for slices that still hit an unsupported feature
 (multi-slice pictures, non-4:2:0 chroma, >8-bit, B slices using temporal — not spatial —
-direct-mode motion). The AV1 decoder is still not pixel-exact.
+direct-mode motion). The AV1 decoder is pixel-exact (FATE 204/204 + libaom crosscheck; `docs/CONFORMANCE.md`).
 `DecoderCapabilities` (`capabilities()`) reports this at runtime. See README.md's status table
 for the current state of every crate before assuming something works. AAC support has been
 removed from this repo (now covered by a separate project) — don't re-add a `tpt-kinetix-aac` crate.
@@ -81,7 +81,7 @@ breaking change in any public API bumps all of them together):
   management (MMCO/dec_ref_pic_marking, POC-based B-slice list ordering). This is the crate under
   heaviest active development — check `todo.md` and the README LIMITATIONS section for current gaps.
 - `tpt-kinetix-av1` — AV1 OBU parser + `rav1e`-backed encoder (encode works); decoder does entropy
-  decoding (CDF-based symbol decoder in `entropy.rs`/`entropy_cdf.rs`) but is not yet pixel-exact.
+  decoding (CDF-based symbol decoder in `entropy.rs`/`entropy_cdf.rs`) and is pixel-exact vs dav1d.
 - `tpt-kinetix-kg` — knowledge-graph tooling that ingests FFmpeg C source / codec specs and generates
   Rust scaffolding for new codecs (`ingest` → `graph` → `analyze` → `codegen`, or `run` for all four).
   Used when starting a new codec crate; see CONTRIBUTING.md's "Adding a new codec" section.
@@ -128,6 +128,6 @@ MBAFF I/P/B frames are bit-exact vs ffmpeg with full deblocking. The High-profil
 `KinetixError::NotPixelExact` only when a slice actually falls back to the flat-grey scaffold
 (multi-slice pictures, non-4:2:0 chroma, >8-bit depth, B slices with `direct_spatial_mv_pred_flag
 == 0` — temporal direct mode, §8.4.1.2.3, is unimplemented; only spatial direct is). The AV1
-decoder is not yet pixel-exact.
+decoder is pixel-exact (FATE 204/204 frames vs dav1d, plus the libaom crosscheck).
 Don't assume a decoder path is correct without running `just conformance` — `capabilities()` is the
 source of truth, not README prose.

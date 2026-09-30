@@ -6,9 +6,10 @@
 
 ## Summary
 
-`tpt-kinetix-kg` is the knowledge-graph ingestion / codegen tooling that powers
-the H.264 and AV1 decoders in this workspace. Today it is used internally to
-turn FFmpeg C source into a Rust decoding scaffold (AST → bitstream parsing
+`tpt-kinetix-kg` is the knowledge-graph ingestion / codegen tooling that was used
+to bootstrap the H.264 decoder in this workspace (AV1 and VP9 were implemented from the
+specs). It also verifies spec tables against pinned FFmpeg source. It turns
+FFmpeg C source into a Rust decoding scaffold (AST → bitstream parsing
 tree → macroblock/state machine → `rayon`-parallel codec scaffolding).
 
 This document records the evaluation of whether to ship it publicly as a
@@ -21,8 +22,11 @@ standalone "bring your own codec" tool.
   transitions, data dependencies) and serialize it for inspection.
 - Identify independent decode units (e.g. slice-level independence) and emit
   `rayon` parallel-iterator injection points.
-- Emit decoder scaffolding (structs, state enums, parse-function stubs) from
-  the graph, run end-to-end via a CLI entry point.
+- Emit decoder scaffolding (parse-function stubs, macroblock-state enums, rayon
+  injection points) from the graph, run end-to-end via a CLI entry point.
+- Fetch pinned FFmpeg source, extract numeric tables, and cross-check
+  `// verify-tables:`-annotated Rust consts (`fetch-source`, `extract-tables`,
+  `verify-tables`; see `adding-a-codec.md` Step 9.5).
 
 ## Why it is worth publishing publicly
 
@@ -56,13 +60,13 @@ standalone "bring your own codec" tool.
 
 ## Recommendation
 
-Publish `tpt-kinetix-kg` as a **separate, clearly-labeled `0.1.0`** crate (its
-own `Cargo.toml`, README with a "scaffold, not a decoder" warning, and a
-runnable `ingest → graph → codegen` example). Keep it out of the main
-`cargo publish` workspace release sequence (it has no runtime dependency on the
-other `tpt-kinetix-*` crates), so it can iterate on its own cadence.
+Publish `tpt-kinetix-kg` as a clearly-labeled crate (README with a "scaffold, not a
+decoder" warning and a runnable `ingest → graph → codegen` example).
+
+*Status:* the original recommendation was to keep it on its own release cadence outside the
+workspace release sequence. In practice it is versioned with the monorepo and listed with
+`publish = true` in `release-plz.toml`. The `examples/ingest_ffmpeg_h264.rs` example exists.
 
 Follow-up actions (good first issues):
-- Add a `tpt-kinetix-kg/examples/ingest_ffmpeg_h264.rs` end-to-end example.
 - Add a README "Limitations" section mirroring the decoder capability caveats.
 - Document the license/provenance expectations for ingested C source.

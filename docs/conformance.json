@@ -1,0 +1,34 @@
+{
+  "commit": "65ea85c",
+  "generated": "2026-09-30",
+  "suites": [
+    {
+      "codec": "H.264",
+      "exact": 34,
+      "reference": "ITU-T reference YUV (normative)",
+      "suite": "ITU-T H.264.1 curated conformance clips",
+      "total": 34
+    },
+    {
+      "codec": "VP9",
+      "exact": 13,
+      "reference": "ffmpeg + libvpx-vp9 (ffmpeg version 2023-12-28-git-c1340f3439-full_build-www.gyan.dev)",
+      "suite": "Clip corpus (lossless/lossy, intra/inter, odd size, multitile)",
+      "total": 13
+    },
+    {
+      "codec": "AV1",
+      "exact": 204,
+      "reference": "libdav1d (via ffmpeg)",
+      "suite": "FFmpeg FATE AV1 samples (frames)",
+      "total": 204
+    },
+    {
+      "codec": "AV1",
+      "exact": 2,
+      "reference": "libdav1d (via ffmpeg)",
+      "suite": "libaom-encode crosscheck (tests)",
+      "total": 2
+    }
+  ]
+}

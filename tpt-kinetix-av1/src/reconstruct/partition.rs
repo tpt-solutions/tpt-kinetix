@@ -199,7 +199,7 @@ impl<'a> TileDecodeState<'a> {
                     continue;
                 }
                 let unit_col = x / unit_size;
-                if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_DBG_LR").is_ok() {
                     eprintln!(
                         "DBG read_lr sb=({r},{c}) plane={plane} frt={} unit_size={unit_size} unit=({unit_row},{unit_col}) bit={}",
                         self.lr.frame_restoration_type[plane],
@@ -311,7 +311,7 @@ impl<'a> TileDecodeState<'a> {
             }
             _ => return,
         };
-        if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_LR").is_ok() {
             match &lr_data {
                 LrUnitData::Sgrproj { set, xqd } => eprintln!(
                     "KIN SGR n={} pl={plane} set={set} w={xqd:?} rng={}",
@@ -414,7 +414,7 @@ impl<'a> TileDecodeState<'a> {
         // are validated.
         let ctx = self.partition_context(mi_row, mi_col, bsize);
         let bucket = PARTITION_CDF_LOOKUP[bsize];
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
                 "KTRACE PART_PRE fr={} y={mi_row} x={mi_col} bsize={bsize} ctx={ctx} r={}",
                 crate::debug_frame_seq::current(),
@@ -422,7 +422,9 @@ impl<'a> TileDecodeState<'a> {
             );
         }
         let partition = if has_rows && has_cols {
-            if std::env::var("KINETIX_AV1_DBG_PARTCDF").is_ok() && bsize == BLOCK_64X64 && ctx == 2
+            if crate::dbg_env::var("KINETIX_AV1_DBG_PARTCDF").is_ok()
+                && bsize == BLOCK_64X64
+                && ctx == 2
             {
                 eprintln!(
                     "KGPART seq={} mi=({},{}) pre={} cdf={:?}",
@@ -457,20 +459,20 @@ impl<'a> TileDecodeState<'a> {
         };
         let subs = split_into_subblocks(bw, bh, partition);
 
-        if std::env::var("KINETIX_AV1_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
                 "KTRACE PART y={mi_row} x={mi_col} bsize={bsize} ctx={ctx} bp={partition} r={}",
                 self.dec.raw_state().0
             );
         }
 
-        if std::env::var("KINETIX_AV1_DBG_PART").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_PART").is_ok() {
             eprintln!(
                 "DBG partition fr={} mi=({mi_col},{mi_row}) bsize={bsize} bw={bw} bh={bh} hw={half4x4} has_rows={has_rows} has_cols={has_cols} partition={partition} subs={subs:?}",
                 crate::debug_frame_seq::current()
             );
         }
-        if std::env::var("KINETIX_AV1_DBG_PARTALL").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_PARTALL").is_ok() {
             eprintln!(
                 "DBG partition fr={} mi=({mi_col},{mi_row}) bsize={bsize} has_rows={has_rows} has_cols={has_cols} ctx={ctx} partition={partition}",
                 crate::debug_frame_seq::current()
@@ -625,7 +627,7 @@ impl<'a> TileDecodeState<'a> {
         };
         let ctx = self.tx_depth_context(mi_row, mi_col, max_tx);
         let tx_depth = self.mode_cdfs.read_tx_level(&mut self.dec, bucket, ctx);
-        if std::env::var("KINETIX_AV1_DBG_TXSIZE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_TXSIZE").is_ok() {
             eprintln!(
                 "DBG txsize mi=({mi_col},{mi_row}) bsize={bsize} max_tx={max_tx} ctx={ctx} above_w={} left_h={} tx_depth={tx_depth}",
                 self.tx_above[mi_col], self.tx_left[mi_row]

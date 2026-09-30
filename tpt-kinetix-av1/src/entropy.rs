@@ -303,7 +303,7 @@ pub fn maybe_capture_block(
 }
 
 fn capture_target() -> Option<(usize, usize, usize)> {
-    let spec = std::env::var("KINETIX_AV1_CAPTURE").ok()?;
+    let spec = crate::dbg_env::var("KINETIX_AV1_CAPTURE").ok()?;
     // Capturing a block implies we want a symbol trace so the per-block symbol
     // slice can be embedded for the oracle diff.
     if !symbol_trace_enabled() {
@@ -579,7 +579,7 @@ impl<'a> SymbolDecoder<'a> {
             }
         }
 
-        if std::env::var("KINETIX_AV1_SEQWALK").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_SEQWALK").is_ok() {
             let loc = Location::caller();
             eprintln!("KSEQ {} {}", self.symbol_range, loc);
         }

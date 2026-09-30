@@ -582,7 +582,7 @@ impl SequenceHeaderObu {
                 order_hint_bits_minus_1 = f(&mut br, 3, "order_hint_bits_minus_1")? as u8;
             }
         }
-        if std::env::var("KINETIX_AV1_DBG_SEQ").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_SEQ").is_ok() {
             eprintln!(
                 "DBG SEQ interintra={enable_interintra_compound} masked={enable_masked_compound} \
                  warped={enable_warped_motion} dual_filter={enable_dual_filter} \

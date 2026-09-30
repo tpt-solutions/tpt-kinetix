@@ -629,7 +629,7 @@ fn build_rp_proj(
         let src_mi_rows = field.cells.len() / field.stride;
         let cur_mi_cols = w8 * 2;
         let cur_mi_rows = h8 * 2;
-        if std::env::var("KINETIX_AV1_DBG_RPDIM").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_RPDIM").is_ok()
             && (src_mi_cols != cur_mi_cols || src_mi_rows != cur_mi_rows)
         {
             eprintln!(
@@ -669,7 +669,7 @@ fn build_rp_proj(
     }
 
     let mut rp = vec![(Mv::default(), 0i32); w8 * h8];
-    let sv_dump = std::env::var("KINETIX_AV1_DBG_SVDUMP").is_ok();
+    let sv_dump = crate::dbg_env::var("KINETIX_AV1_DBG_SVDUMP").is_ok();
     for &m in &mfmv_refs {
         let Some(src) = rp_ref(m) else { continue };
         // dav1d `load_tmvs` clamps the scan to the SOURCE frame's grid
@@ -769,7 +769,7 @@ fn build_rp_proj(
             }
         }
     }
-    if std::env::var("KINETIX_AV1_DBG_RPPROJ").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_RPPROJ").is_ok() {
         for y in row_start8..row_end8 {
             for x in col_start8..col_end8 {
                 let (mv, r) = rp[y * w8 + x];
@@ -1267,7 +1267,7 @@ impl<'a> TileDecodeState<'a> {
         // the mi-grid, so `*4` MI units tile the exact extent.
         let tile_mi_cols = (tile_px_x0 + tile_w).div_ceil(MI_SIZE).min(mi_cols);
         let tile_mi_rows = (tile_px_y0 + tile_h).div_ceil(MI_SIZE).min(mi_rows);
-        if std::env::var("KINETIX_AV1_DBG_EXTENT").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_EXTENT").is_ok() {
             eprintln!(
                 "EXTENT fr={} mi_cols={mi_cols} mi_rows={mi_rows} tile_px=({tile_px_x0},{tile_px_y0}) tile=({tile_w},{tile_h}) tile_mi=({tile_mi_cols},{tile_mi_rows})",
                 crate::debug_frame_seq::current()
@@ -1287,7 +1287,7 @@ impl<'a> TileDecodeState<'a> {
             tile_w,
             tile_h,
         );
-        if std::env::var("KINETIX_AV1_DBG_TILE_BYTES").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_TILE_BYTES").is_ok() {
             let byte_off = bit_offset / 8;
             let hex: String = data[byte_off..]
                 .iter()
@@ -1298,7 +1298,7 @@ impl<'a> TileDecodeState<'a> {
                 bit_offset % 8
             );
         }
-        if std::env::var("KINETIX_AV1_DBG_TILE_INIT").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_TILE_INIT").is_ok() {
             eprintln!(
                 "DBG tile_init tx_mode_select={tx_mode_select} lossless={lossless} qindex={qindex}"
             );
@@ -1857,6 +1857,7 @@ pub fn decode_tile_group(
     meta: &mut FrameMeta,
     cdf_context: Option<&FrameCdfContext>,
 ) -> Result<FrameCdfContext, KinetixError> {
+    let _g = crate::dbg_env::Timer::new(3);
     let use_128 = _use_128x128_sb;
     let sb_size = if use_128 { 128 } else { 64 };
     let sb_mi = sb_size / MI_SIZE;
@@ -1951,7 +1952,7 @@ pub fn decode_tile_group(
     // set, enable the structured trace and snapshot the *base* (un-adapted) CDF
     // tables so the oracle can re-decode the whole tile from a known-good start
     // and localize any desync. See todo-av1.md Phase G.0.
-    let capture_tile = std::env::var("KINETIX_AV1_CAPTURE_TILE").is_ok();
+    let capture_tile = crate::dbg_env::var("KINETIX_AV1_CAPTURE_TILE").is_ok();
     if capture_tile {
         crate::entropy::enable_symbol_trace();
     }
@@ -2035,7 +2036,7 @@ pub fn decode_tile_group(
     }
     // Hand the per-64×64 CDEF unit indices (§5.11.56) to the post-filter pass so
     // it can select each unit's strength entry (the CDEF pass reads `meta.cdef_idx`).
-    if std::env::var("KINETIX_AV1_DBG_BITS").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_BITS").is_ok() {
         let final_bit = state.dec.bit_position();
         let total_data_bits = data.len() * 8;
         eprintln!(
@@ -2256,7 +2257,7 @@ pub fn reconstruct_av1_frame(
     prev_segment_ids: Option<&SegMap>,
 ) -> Result<Option<ReconstructOutput>, KinetixError> {
     let frame_is_intra = frame_header.frame_type.is_intra();
-    if std::env::var("KINETIX_AV1_DBG").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG").is_ok() {
         eprintln!(
             "DBG frame_header loop_filter_level={:?} cdef_bits={} base_q_idx={} enable_cdef={} cdef_y_strength={:?} cdef_uv_strength={:?} coded_lossless={} delta_q_present={} delta_lf_present={} segmentation_enabled={} allow_screen_content_tools={} allow_intrabc={} enable_filter_intra={} reduced_tx_set={} delta_q_y_dc={} delta_q_u_dc={} delta_q_u_ac={} delta_q_v_dc={} delta_q_v_ac={} using_qmatrix={} qm_y={} qm_u={} qm_v={}",
             frame_header.loop_filter_level, frame_header.cdef_bits, frame_header.base_q_idx,
@@ -2319,7 +2320,7 @@ pub fn reconstruct_av1_frame(
     } else {
         split_tile_group_payloads(&tile_group_payloads, &frame_header.tile_layout)?
     };
-    if std::env::var("KINETIX_AV1_DBG_TILES").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_TILES").is_ok() {
         eprintln!(
             "DBG TILES frame layout cols={} rows={} ctx_update={} groups={} tiles={}",
             frame_header.tile_layout.cols,
@@ -2440,7 +2441,7 @@ pub fn reconstruct_av1_frame(
             let mut meta = FrameMeta::new_ss(tw, th, ss_x as usize, ss_y as usize);
             let mut mf_cells: Vec<MotionFieldCell> = Vec::new();
 
-            if std::env::var("KINETIX_AV1_SEQWALK").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_SEQWALK").is_ok() {
                 eprintln!("KSEQTILE r={} c={}", y0 / 64, x0 / 64);
             }
             let decoded_cdfs = decode_tile_group(
@@ -2634,7 +2635,7 @@ pub fn reconstruct_av1_frame(
     // so it can be compared against that function's own `PXY pre-filter` line.
     // The two are taken at different points in the pipeline; if they disagree
     // the corruption happened in tile assembly rather than in a filter stage.
-    if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_PREFILTER_PXY") {
+    if let Ok(spec) = crate::dbg_env::var("KINETIX_AV1_DBG_PREFILTER_PXY") {
         if let Some((a, b)) = spec.split_once(',') {
             if let (Ok(px), Ok(py)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
                 if px < grid_w && py < height {
@@ -2654,7 +2655,7 @@ pub fn reconstruct_av1_frame(
     // comes back upscaled: the returned planes own the post-upscale pixels
     // (stride = upscaled grid stride) and become both the stored reference
     // and the cropped output.
-    let upscaled_planes = if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
+    let upscaled_planes = if crate::dbg_env::var("KINETIX_AV1_NOFILTER").is_err() {
         apply_post_filters(
             &mut y_plane,
             &mut u_plane,
@@ -2733,8 +2734,8 @@ pub fn reconstruct_av1_frame(
         real_height: height,
         segment_ids: frame_segment_ids,
     };
-    if std::env::var("KINETIX_AV1_DUMP_GRID").is_ok() {
-        let nm = std::env::var("KINETIX_AV1_DUMP_GRID").unwrap_or_default();
+    if crate::dbg_env::var("KINETIX_AV1_DUMP_GRID").is_ok() {
+        let nm = crate::dbg_env::var("KINETIX_AV1_DUMP_GRID").unwrap_or_default();
         let mut blob = Vec::with_capacity(grid_w * grid_h * 3 / 2);
         for r in 0..grid_h {
             blob.extend(
@@ -2834,7 +2835,7 @@ fn split_tile_group_payloads(
         // byte_alignment() before the first tile's size field / data.
         br.byte_align();
         let mut bit_pos = br.bit_position();
-        let dbg = std::env::var("KINETIX_AV1_DBG_TILES").is_ok();
+        let dbg = crate::dbg_env::var("KINETIX_AV1_DBG_TILES").is_ok();
         if dbg {
             let hex: Vec<String> = payload
                 .iter()

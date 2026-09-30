@@ -45,7 +45,7 @@ fn dav1d_ref(k: u8) -> i32 {
 #[inline]
 fn dbg_pred_target() -> (i64, i64, i64) {
     let get = |k: &str, d: i64| {
-        std::env::var(k)
+        crate::dbg_env::var(k)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(d)
@@ -232,7 +232,7 @@ impl<'a> TileDecodeState<'a> {
         let avail_l = mi_col > col_start;
         let threshold = (BLOCK_WIDTH[bsize].max(BLOCK_HEIGHT[bsize]) as i32).clamp(16, 112);
 
-        if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_WARP").is_ok() {
             eprintln!("DBG warp mi=({mi_col},{mi_row}) cur_mv={cur_mv:?} threshold={threshold} w4={w4} h4={h4}");
         }
         let mut num_samples = 0usize;
@@ -261,7 +261,7 @@ impl<'a> TileDecodeState<'a> {
                 return;
             }
             let cell = self.refmv_cell(mv_row as usize, mv_col as usize);
-            if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_WARP").is_ok() {
                 eprintln!(
                     "DBG warp add_sample dr={dr} dc={dc} -> ({mv_row},{mv_col}) \
                      cell.refs={:?} cell.mv={:?} ref0={ref0}",
@@ -413,7 +413,7 @@ impl<'a> TileDecodeState<'a> {
     ) -> Result<(), KinetixError> {
         let bw = BLOCK_WIDTH[bsize] / MI_SIZE;
         let bh = BLOCK_HEIGHT[bsize] / MI_SIZE;
-        if std::env::var("KINETIX_AV1_DBG_SB1").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_SB1").is_ok()
             && (16..=18).contains(&mi_row)
             && mi_col <= 2
         {
@@ -422,7 +422,7 @@ impl<'a> TileDecodeState<'a> {
                 self.dec.bit_position()
             );
         }
-        if std::env::var("KINETIX_AV1_DBG_B0ENTER").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_B0ENTER").is_ok() {
             eprintln!(
                 "DBG b0enter fr={} mi=({mi_col},{mi_row}) bsize={bsize} rng={}",
                 crate::debug_frame_seq::current(),
@@ -455,7 +455,7 @@ impl<'a> TileDecodeState<'a> {
                 .dec
                 .read_symbol(&mut self.mode_cdfs.skip_mode[ctx.min(2)])
                 == 1;
-            if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_B0").is_ok() {
                 eprintln!(
                     "DBG b0 skipmode={sm} ctx={ctx} rng={}",
                     self.dec.raw_state().0
@@ -476,7 +476,7 @@ impl<'a> TileDecodeState<'a> {
         // Skip flag (§5.11.11) — read before `is_inter`, matching the inter
         // syntax order.
         let skip_ctx = (above_skip + left_skip).min(2);
-        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_IBSUM").is_ok() {
             let (r0, v0, mb0, bp0) = self.dec.raw_state();
             eprintln!(
                 "KSKIPPRE mi=({mi_col},{mi_row}) sctx={skip_ctx} pre=(range={r0}, value={v0}, max_bits={mb0}, bit_pos={bp0}) f={:?}",
@@ -492,8 +492,8 @@ impl<'a> TileDecodeState<'a> {
             self.inter_segment_id(false, mi_row, mi_col, bsize, skip);
         }
         self.store_segment_id(mi_row, mi_col, bsize);
-        let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok();
-        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
+        let dbg_b0 = crate::dbg_env::var("KINETIX_AV1_DBG_B0").is_ok();
+        if crate::dbg_env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
                 "KSKIP mi=({mi_col},{mi_row}) skip={skip} sctx={skip_ctx} rng={} cdf=[{:?}] state=({},{},{},{})",
                 self.dec.raw_state().0,
@@ -540,7 +540,7 @@ impl<'a> TileDecodeState<'a> {
         } else {
             0
         };
-        if std::env::var("KINETIX_AV1_DBG_CDFROW").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_CDFROW").is_ok() {
             eprintln!(
                 "KIN INTRACDF ctx={inter_ctx} row={:?} rng={} mi=({mi_col},{mi_row}) oh={}",
                 &self.map_inter_cdfs.is_inter[inter_ctx][..],
@@ -563,7 +563,7 @@ impl<'a> TileDecodeState<'a> {
                 self.dec.raw_state().0
             );
         }
-        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
                 "KINTRA mi=({mi_col},{mi_row}) intra={} ictx={inter_ctx} rng={}",
                 !is_inter,
@@ -584,7 +584,7 @@ impl<'a> TileDecodeState<'a> {
             // producing an invalid symbol, but adapts the wrong CDF entries
             // under the wrong context, diverging the coder's `rng` from the
             // very first intra-in-inter-frame block onward.
-            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
                 eprintln!(
                     "YMODECDF-PRE fr={} mi=({mi_col},{mi_row}) grp={} row={:?}",
                     crate::debug_frame_seq::current(),
@@ -593,7 +593,7 @@ impl<'a> TileDecodeState<'a> {
                 );
             }
             let y_mode = self.mode_cdfs.read_y_mode(&mut self.dec, SIZE_GROUP[bsize]);
-            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
                 eprintln!(
                     "YMODECDF-POST fr={} mi=({mi_col},{mi_row}) ymode={y_mode} rng={}",
                     crate::debug_frame_seq::current(),
@@ -635,7 +635,7 @@ impl<'a> TileDecodeState<'a> {
                     self.dec.raw_state().0
                 );
             }
-            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
                 eprintln!(
                     "MODEINFO-UV fr={} mi=({mi_col},{mi_row}) uvmode={uv_mode} has_chroma={has_chroma} rng={}",
                     crate::debug_frame_seq::current(),
@@ -736,7 +736,7 @@ impl<'a> TileDecodeState<'a> {
             } else {
                 max_tx
             };
-            if std::env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_YMODECDF").is_ok() {
                 eprintln!(
                     "MODEINFO-TX fr={} mi=({mi_col},{mi_row}) luma_tx={luma_tx} filter_intra={:?} \
                      colors_y={} rng={}",
@@ -752,7 +752,7 @@ impl<'a> TileDecodeState<'a> {
                     self.dec.raw_state().0
                 );
             }
-            if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_IBSUM").is_ok() {
                 eprintln!(
                     "IBSUM fr={} mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=1 ymode={y_mode} skip={skip}",
                     crate::debug_frame_seq::current()
@@ -1130,7 +1130,7 @@ impl<'a> TileDecodeState<'a> {
             }
 
             let base_mv = stack.get(drl_idx).map(|m| m[0]).unwrap_or_default();
-            if std::env::var("KINETIX_AV1_DBG_IMODE").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_IMODE").is_ok() {
                 eprintln!(
                     "DBG imode mi=({mi_col},{mi_row}) ref={} ctx={ctx:#x}(nm={newmv_ctx},gm={globalmv_ctx},rm={refmv_ctx}) \
                      mode={mode} drl={drl_idx} n_mvs={n_mvs} base=({},{}) rng={}",
@@ -1468,7 +1468,7 @@ impl<'a> TileDecodeState<'a> {
                         mi_col as i32,
                         mi_row as i32,
                     );
-                    if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+                    if crate::dbg_env::var("KINETIX_AV1_DBG_WARP").is_ok() {
                         eprintln!(
                             "DBG warp derive mi=({mi_col},{mi_row}) bw4={bw4} bh4={bh4} mv={:?} num_samples={num_samples} raw_len={} raw={:?} model_valid={} model={:?}",
                             mvs[0],
@@ -1574,7 +1574,7 @@ impl<'a> TileDecodeState<'a> {
                     };
                     let ctx = (base + add).min(15);
                     *fout = self.dec.read_symbol(&mut self.mode_cdfs.interp_filter[ctx]) as u8;
-                    if std::env::var("KINETIX_AV1_DBG_FILTER").is_ok() {
+                    if crate::dbg_env::var("KINETIX_AV1_DBG_FILTER").is_ok() {
                         eprintln!(
                             "DBGFILT dir={dir} comp={comp} mi=({mi_col},{mi_row}) ref0={} \
                              left_inter={left_inter} left_ref={:?} left_f={} \
@@ -1690,7 +1690,7 @@ impl<'a> TileDecodeState<'a> {
             mi_col,
             warp_model.as_ref(),
         )?;
-        if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
                 "IBSUM fr={} mi=({mi_col},{mi_row}) bw4={bw} bh4={bh} intra=0 \
                  mv=({},{} ({},{})) ref=[{},{}] mm={motion_mode} filt=[{},{}] skip={skip}",
@@ -1990,8 +1990,8 @@ impl<'a> TileDecodeState<'a> {
         // `KINETIX_AV1_DBG_PRED_R` sets the half-width/half-height reach. A
         // window that does not move is how a probe ends up "confirming" a
         // block nobody is looking at any more.
-        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-            || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_PRED").is_ok()
+            || crate::dbg_env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
         {
             let px_end_y = px_y0 + bh_px;
             let px_end_x = px_x0 + bw_px;
@@ -2001,7 +2001,7 @@ impl<'a> TileDecodeState<'a> {
                 && (px_end_y as i64) > r0
                 && (px_x0 as i64) < c1
                 && (px_end_x as i64) > c0;
-            if in_window || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok() {
+            if in_window || crate::dbg_env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok() {
                 eprintln!(
                     "PRED-BASE mi=({mi_col},{mi_row}) bw={bw} bh={bh} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
                     ref_names[0], filter[0], filter[1], mvs[0].col, mvs[0].row
@@ -2030,7 +2030,7 @@ impl<'a> TileDecodeState<'a> {
                 // reproduce the original mi(4,18) window).
                 {
                     let (tgt_x, tgt_y, _reach) = dbg_pred_target();
-                    let hit = if std::env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
+                    let hit = if crate::dbg_env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
                         (px_x0 as i64) <= tgt_x
                             && tgt_x < (px_x0 + bw_px) as i64
                             && (px_y0 as i64) <= tgt_y
@@ -2072,7 +2072,7 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
-        if std::env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
             let px_end_x = px_x0 + bw_px;
             let px_end_y = px_y0 + bh_px;
             if px_x0 < 138 && px_end_x > 128 && px_y0 < 96 && px_end_y > 82 {
@@ -2088,7 +2088,7 @@ impl<'a> TileDecodeState<'a> {
                 );
             }
         }
-        if motion_mode == 1 && std::env::var("KINETIX_AV1_NOOBMC").is_err() {
+        if motion_mode == 1 && crate::dbg_env::var("KINETIX_AV1_NOOBMC").is_err() {
             for plane in 0..3 {
                 self.apply_obmc(mi_row, mi_col, bsize, plane);
             }
@@ -2113,8 +2113,8 @@ impl<'a> TileDecodeState<'a> {
         }
 
         // Debug: dump pre-residual prediction (post-OBMC) for error-region blocks.
-        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-            || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
+        if crate::dbg_env::var("KINETIX_AV1_DBG_PRED").is_ok()
+            || crate::dbg_env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok()
         {
             let px_end_y = px_y0 + bh_px;
             let px_end_x = px_x0 + bw_px;
@@ -2124,7 +2124,7 @@ impl<'a> TileDecodeState<'a> {
                 && (px_end_y as i64) > r0
                 && (px_x0 as i64) < c1
                 && (px_end_x as i64) > c0;
-            if in_window || std::env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok() {
+            if in_window || crate::dbg_env::var("KINETIX_AV1_DBG_PRED_ALL").is_ok() {
                 eprintln!(
                     "PRED fr={} mi=({mi_col},{mi_row}) bw={bw} bh={bh} mm={motion_mode} skip={skip} ref={} dir0_v={} dir1_h={} mv=({},{}) px=({px_x0},{px_y0})",
                     crate::debug_frame_seq::current(),
@@ -2159,7 +2159,7 @@ impl<'a> TileDecodeState<'a> {
         // internally, at transform-block granularity.
         let leaves = self.read_block_tx_size_ibc(mi_row, mi_col, bsize, skip);
         let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
-        if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_row < 4 {
+        if crate::dbg_env::var("KINETIX_AV1_CFSUM").is_ok() && mi_row < 4 {
             eprintln!(
                 "POSTVTX mi=({mi_col},{mi_row}) rng={} leaves={} all={:?}",
                 self.dec.raw_state().0,
@@ -2186,14 +2186,16 @@ impl<'a> TileDecodeState<'a> {
         // this before). `KINETIX_AV1_DBG_PRED_FRAME=n` restricts it to one
         // frame; without that the dump fires for every frame containing the
         // block and the values from an earlier frame get conflated.
-        let pred_target = std::env::var("KINETIX_AV1_DBG_PRED").ok().and_then(|s| {
-            let (a, b) = s.split_once(',')?;
-            Some((
-                a.trim().parse::<usize>().ok()?,
-                b.trim().parse::<usize>().ok()?,
-            ))
-        });
-        let pred_frame = std::env::var("KINETIX_AV1_DBG_PRED_FRAME")
+        let pred_target = crate::dbg_env::var("KINETIX_AV1_DBG_PRED")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((
+                    a.trim().parse::<usize>().ok()?,
+                    b.trim().parse::<usize>().ok()?,
+                ))
+            });
+        let pred_frame = crate::dbg_env::var("KINETIX_AV1_DBG_PRED_FRAME")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
         let pred_snap: Vec<Px> = match pred_target {
@@ -2222,7 +2224,7 @@ impl<'a> TileDecodeState<'a> {
         // bbox covers a specific chroma pixel without needing to know its mi
         // origin ahead of time — used to find which block owns a divergent
         // pixel reported by `av1_frame_locate`.
-        let chroma_xy_target = std::env::var("KINETIX_AV1_DBG_CHROMA_XY")
+        let chroma_xy_target = crate::dbg_env::var("KINETIX_AV1_DBG_CHROMA_XY")
             .ok()
             .and_then(|s| {
                 let (a, b) = s.split_once(',')?;
@@ -2238,7 +2240,7 @@ impl<'a> TileDecodeState<'a> {
             (tc, tr) == (mi_col, mi_row)
                 && pred_frame.is_none_or(|f| crate::debug_frame_seq::current() == f)
         }) || chroma_xy_hit)
-            && std::env::var("KINETIX_AV1_DBG_PRED_CHROMA").is_ok()
+            && crate::dbg_env::var("KINETIX_AV1_DBG_PRED_CHROMA").is_ok()
         {
             let cx0 = cpx_x0;
             let cy0 = cpx_y0;
@@ -2339,7 +2341,7 @@ impl<'a> TileDecodeState<'a> {
         // delta index = name − 1; INTRA_FRAME=1 maps to 0) and mode type.
         // The span is the block's tile-local luma rectangle, mirroring
         // `record_delta_lf4`'s addressing.
-        if std::env::var("KINETIX_AV1_DBG_LFREF").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_LFREF").is_ok() {
             eprintln!(
                 "LFREF n={} mi=({mi_col},{mi_row}) px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} ref_names={ref_names:?} lf_mode_type={lf_mode_type} recorded_ref={}",
                 crate::debug_frame_seq::current(),
@@ -2612,7 +2614,7 @@ impl<'a> TileDecodeState<'a> {
         bh: usize,
     ) -> Mv {
         let idx = ref_name as usize - 1;
-        if std::env::var("KINETIX_AV1_DBG_GMV").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_GMV").is_ok() {
             eprintln!(
                 "GMV n={} ref={} type={} mat={:?} mi=({mi_col},{mi_row}) bw={bw} bh={bh}",
                 crate::debug_frame_seq::current(),
@@ -2692,7 +2694,7 @@ impl<'a> TileDecodeState<'a> {
         let px_y0 = mi_row * MI_SIZE - self.tile_px_y0;
         let bw_px = bw * MI_SIZE;
         let bh_px = bh * MI_SIZE;
-        if std::env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_TAPBLK").is_ok() {
             let px_end_x = px_x0 + bw_px;
             let px_end_y = px_y0 + bh_px;
             if px_x0 < 138 && px_end_x > 128 && px_y0 < 96 && px_end_y > 82 {
@@ -2782,7 +2784,7 @@ impl<'a> TileDecodeState<'a> {
         // from the NEAREST-MV stack entry (never GLOBALMV), so `modeType` is
         // unconditionally 1 here, matching the `comp_mode != GLOBALMV_GLOBALMV`
         // derivation used for ordinary compound blocks above.
-        if std::env::var("KINETIX_AV1_DBG_LFREF").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_LFREF").is_ok() {
             eprintln!(
                 "LFREF-SKIPMODE n={} mi=({mi_col},{mi_row}) px=({px_x0},{px_y0}) bw={bw_px} bh={bh_px} ref_names={ref_names:?} mvs=({},{}),({},{})",
                 crate::debug_frame_seq::current(),
@@ -3073,18 +3075,20 @@ impl<'a> TileDecodeState<'a> {
         // `KINETIX_AV1_DBG_OBMC_XY=<mi_col>,<mi_row>` overrides the default
         // hardcoded probe block; `KINETIX_AV1_DBG_OBMC_PLANE` overrides the
         // default plane (1 = U).
-        let obmc_xy_target = std::env::var("KINETIX_AV1_DBG_OBMC_XY").ok().and_then(|s| {
-            let (a, b) = s.split_once(',')?;
-            Some((
-                a.trim().parse::<usize>().ok()?,
-                b.trim().parse::<usize>().ok()?,
-            ))
-        });
-        let obmc_plane = std::env::var("KINETIX_AV1_DBG_OBMC_PLANE")
+        let obmc_xy_target = crate::dbg_env::var("KINETIX_AV1_DBG_OBMC_XY")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((
+                    a.trim().parse::<usize>().ok()?,
+                    b.trim().parse::<usize>().ok()?,
+                ))
+            });
+        let obmc_plane = crate::dbg_env::var("KINETIX_AV1_DBG_OBMC_PLANE")
             .ok()
             .and_then(|s| s.trim().parse::<usize>().ok())
             .unwrap_or(1);
-        let dbg_obmc = std::env::var("KINETIX_AV1_DBG_OBMC").is_ok()
+        let dbg_obmc = crate::dbg_env::var("KINETIX_AV1_DBG_OBMC").is_ok()
             && plane == obmc_plane
             && obmc_xy_target.is_none_or(|(tc, tr)| mi_col == tc && mi_row == tr)
             && (obmc_xy_target.is_some() || (16..=22).contains(&mi_row));
@@ -3375,7 +3379,8 @@ impl<'a> TileDecodeState<'a> {
                 tile_h.saturating_sub(py),
                 self.bit_depth,
             );
-            if std::env::var("KINETIX_AV1_DBG_IIDUMP").is_ok() && mi_col == 4 && mi_row == 20 {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_IIDUMP").is_ok() && mi_col == 4 && mi_row == 20
+            {
                 eprintln!(
                     "IIDUMP plane={plane} ii_type={interintra_type} ii_mode={ii_mode} wedge={wedge_index} pw={pw} ph={ph} intra={:?} mask={:?}",
                     &tmp[..(pw * ph).min(32)],
@@ -3491,7 +3496,10 @@ impl<'a> TileDecodeState<'a> {
         let ref1_none = self.ref_slots.slots[slot1].is_none();
         let use_compound = ref_names[1] != NONE_FRAME && !ref1_none;
 
-        if plane != 0 && std::env::var("KINETIX_DBG_MCCHK").is_ok() && (24..=52).contains(&px_y) {
+        if plane != 0
+            && crate::dbg_env::var("KINETIX_DBG_MCCHK").is_ok()
+            && (24..=52).contains(&px_y)
+        {
             eprintln!(
                 "MCCHK oh={} pl={} x={} y={} w={} h={} mv0=({},{}) mv1=({},{}) f=({},{}) comp={} ref0={} mi=({},{})",
                 self.cur_order_hint,
@@ -3505,7 +3513,7 @@ impl<'a> TileDecodeState<'a> {
         // content versus the sampling. It takes an optional target block
         // `KINETIX_AV1_MCSUM_BLOCK=<mi_col>,<mi_row>`; without one it falls
         // back to the historical hardcoded mi (4,0).
-        let mcsum_target = std::env::var("KINETIX_AV1_MCSUM_BLOCK")
+        let mcsum_target = crate::dbg_env::var("KINETIX_AV1_MCSUM_BLOCK")
             .ok()
             .and_then(|s| {
                 let (a, b) = s.split_once(',')?;
@@ -3559,7 +3567,7 @@ impl<'a> TileDecodeState<'a> {
                     // (fixed from a hardcoded `>> 3`, which under-shifted a
                     // chroma mv by one bit and pointed the dump at the wrong
                     // reference column/row).
-                    if std::env::var("KINETIX_AV1_MCSUM").is_ok()
+                    if crate::dbg_env::var("KINETIX_AV1_MCSUM").is_ok()
                         && mi_col == mcsum_target.0
                         && mi_row == mcsum_target.1
                     {
@@ -3602,7 +3610,7 @@ impl<'a> TileDecodeState<'a> {
                     // bug. Left in place (mirrors this crate's other
                     // `KINETIX_AV1_DBG_*` debug hooks) since AV1 inter is
                     // still not pixel-exact and future sessions will want it.
-                    let warp_forced_off = std::env::var("KINETIX_AV1_NO_WARP").is_ok();
+                    let warp_forced_off = crate::dbg_env::var("KINETIX_AV1_NO_WARP").is_ok();
                     match warp_model {
                         Some(model)
                             if warp_eligible
@@ -3615,7 +3623,7 @@ impl<'a> TileDecodeState<'a> {
                                 )
                                 .is_none() =>
                         {
-                            if std::env::var("KINETIX_AV1_DBG_WARP").is_ok() {
+                            if crate::dbg_env::var("KINETIX_AV1_DBG_WARP").is_ok() {
                                 eprintln!(
                                     "DBG warp APPLY plane={plane} mi=({mi_col},{mi_row}) bw={bw} bh={bh} model={model:?}"
                                 );
@@ -3706,7 +3714,7 @@ impl<'a> TileDecodeState<'a> {
                 }
                 t
             };
-            if std::env::var("KINETIX_AV1_MCSUM").is_ok()
+            if crate::dbg_env::var("KINETIX_AV1_MCSUM").is_ok()
                 && mi_col == mcsum_target.0
                 && mi_row == mcsum_target.1
             {
@@ -3724,14 +3732,14 @@ impl<'a> TileDecodeState<'a> {
                     crate::debug_frame_seq::current(),
                 );
             }
-            if std::env::var("KINETIX_AV1_DBG_PREDUMP").is_ok() && plane == 1 {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_PREDUMP").is_ok() && plane == 1 {
                 eprintln!(
                     "PREDUMP mi=({mi_col},{mi_row}) cpx=({px_x},{px_y}) w={bw} h={bh} mv=({},{}) f=({},{}) pred={:?}",
                     mvs[0].row, mvs[0].col, filters[0], filters[1],
                     &tmp[..(bw * bh).min(64)]
                 );
             }
-            if std::env::var("KINETIX_AV1_DBG_PREDUMP2").is_ok()
+            if crate::dbg_env::var("KINETIX_AV1_DBG_PREDUMP2").is_ok()
                 && plane == 2
                 && px_x == 64
                 && px_y == 32
@@ -3856,7 +3864,7 @@ impl<'a> TileDecodeState<'a> {
             };
             let t0 = prep(slot0, mvs[0], 0);
             let t1 = prep(slot1, mvs[1], 1);
-            if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
+            if crate::dbg_env::var("KINETIX_AV1_DBG_COMP").is_ok()
                 && plane == 0
                 && (mi_row == 12 || mi_row == 14)
             {
@@ -3893,7 +3901,7 @@ impl<'a> TileDecodeState<'a> {
                             self.bit_depth,
                         )
                     };
-                    if std::env::var("KINETIX_AV1_DBG_COMP").is_ok()
+                    if crate::dbg_env::var("KINETIX_AV1_DBG_COMP").is_ok()
                         && (mi_row == 12 || mi_row == 14)
                     {
                         eprintln!("  mask sign={} rows:", mask.mask_sign);
@@ -4129,10 +4137,12 @@ impl<'a> TileDecodeState<'a> {
                         // skipping the dequant/inverse-transform entirely) keeps the
                         // reconstructed block's shape and code path identical to a
                         // normal run apart from the sample values.
-                        if std::env::var("KINETIX_AV1_NO_RESID").is_ok() {
+                        if crate::dbg_env::var("KINETIX_AV1_NO_RESID").is_ok() {
                             coeffs.quant.iter_mut().for_each(|q| *q = 0);
                         }
-                        if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_col == 4 && mi_row == 0
+                        if crate::dbg_env::var("KINETIX_AV1_CFSUM").is_ok()
+                            && mi_col == 4
+                            && mi_row == 0
                         {
                             let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                             let dequant_dbg = dequantize_coeffs(
@@ -4150,7 +4160,7 @@ impl<'a> TileDecodeState<'a> {
                         &dequant_dbg[..16.min(dequant_dbg.len())],
                     );
                         }
-                        if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
+                        if let Ok(t) = crate::dbg_env::var("KINETIX_AV1_CFTARGET") {
                             let mut it = t.split(',');
                             if let (Some(c), Some(r)) = (it.next(), it.next()) {
                                 if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string()
@@ -4180,7 +4190,7 @@ impl<'a> TileDecodeState<'a> {
                                 }
                             }
                         }
-                        if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                        if crate::dbg_env::var("KINETIX_AV1_DBG_B0").is_ok() {
                             eprintln!(
                         "DBG y-cf-blk mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} rng={}",
                         coeffs.tx_type,
@@ -4188,7 +4198,7 @@ impl<'a> TileDecodeState<'a> {
                         self.dec.raw_state().0
                     );
                         }
-                        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                        if crate::dbg_env::var("KINETIX_AV1_DBG_PRED").is_ok()
                             && mi_col == 4
                             && mi_row == 18
                             && leaf_mi_col == 4
@@ -4207,8 +4217,8 @@ impl<'a> TileDecodeState<'a> {
                                 }
                             }
                         }
-                        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-                            && std::env::var("KINETIX_AV1_DBG_PRED_COEFF").is_ok()
+                        if crate::dbg_env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                            && crate::dbg_env::var("KINETIX_AV1_DBG_PRED_COEFF").is_ok()
                             && {
                                 let (tx0, ty0, reach) = dbg_pred_target();
                                 (px_x as i64) < tx0 + reach
@@ -4242,7 +4252,7 @@ impl<'a> TileDecodeState<'a> {
                                 self.bit_depth,
                                 qm_for(self.cur_qm[0], 0, leaf_tx, coeffs.tx_type),
                             );
-                            if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                            if crate::dbg_env::var("KINETIX_AV1_DBG_PRED").is_ok()
                                 && mi_col == 4
                                 && mi_row == 18
                                 && leaf_mi_col == 4
@@ -4269,7 +4279,7 @@ impl<'a> TileDecodeState<'a> {
                             // `KINETIX_AV1_DBG_PRED_X/Y` target: prediction can be
                             // pixel-exact and the output still wrong, which localises
                             // the fault to dequant/ITX/residual-add rather than MC.
-                            if std::env::var("KINETIX_AV1_DBG_PRED_RESID").is_ok() {
+                            if crate::dbg_env::var("KINETIX_AV1_DBG_PRED_RESID").is_ok() {
                                 let (tx0, ty0, reach) = dbg_pred_target();
                                 if (px_x as i64) < tx0 + reach
                                     && (px_x as i64) + leaf_tx_w as i64 > tx0 - reach
@@ -4294,7 +4304,7 @@ impl<'a> TileDecodeState<'a> {
                             // correct decode at any qindex stays far below this, so a
                             // hit means the *coefficient* is wrong (a lost/desynced
                             // entropy read), not that the transform overshot.
-                            if std::env::var("KINETIX_AV1_DBG_BIGCOEF").is_ok() {
+                            if crate::dbg_env::var("KINETIX_AV1_DBG_BIGCOEF").is_ok() {
                                 let peak = dequant.iter().fold(0i32, |a, &b| a.max(b.abs()));
                                 if peak > (1 << 13) {
                                     eprintln!(
@@ -4303,7 +4313,7 @@ impl<'a> TileDecodeState<'a> {
                             );
                                 }
                             }
-                            if std::env::var("KINETIX_AV1_DBG_ITX").is_ok()
+                            if crate::dbg_env::var("KINETIX_AV1_DBG_ITX").is_ok()
                                 && (leaf_tx == 12 || leaf_tx == 4)
                             {
                                 eprintln!(
@@ -4319,7 +4329,7 @@ impl<'a> TileDecodeState<'a> {
                                     .collect();
                                 eprintln!("KIN RESID rowsums: {rowsums:?}");
                             }
-                            if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                            if crate::dbg_env::var("KINETIX_AV1_DBG_PRED").is_ok()
                                 && mi_col == 4
                                 && mi_row == 18
                                 && leaf_mi_col == 4
@@ -4373,7 +4383,7 @@ impl<'a> TileDecodeState<'a> {
                     }
                     // Temporary: post-add plane rows for the CFTARGET leaf (the
                     // pre/post-prediction dumps bracket this point but not the add).
-                    if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
+                    if let Ok(t) = crate::dbg_env::var("KINETIX_AV1_CFTARGET") {
                         let mut it = t.split(',');
                         if let (Some(c), Some(r)) = (it.next(), it.next()) {
                             if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
@@ -4548,7 +4558,7 @@ impl<'a> TileDecodeState<'a> {
                                         &mut self.coeff_ctxs,
                                         &blk,
                                     )?;
-                                    if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                                    if crate::dbg_env::var("KINETIX_AV1_DBG_B0").is_ok() {
                                         eprintln!(
                                 "DBG uv-cf-blk seq={} mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} cw={cw} ch={ch} txtp={} eob={} rng={}",
                                 crate::debug_frame_seq::current(),
@@ -4579,7 +4589,7 @@ impl<'a> TileDecodeState<'a> {
                                             self.bit_depth,
                                             &mut residual,
                                         );
-                                        if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
+                                        if crate::dbg_env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
                                             eprintln!(
                                     "RESDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} txtp={} residual={:?}",
                                     coeffs.tx_type,
@@ -4610,7 +4620,7 @@ impl<'a> TileDecodeState<'a> {
                                         }
                                     }
                                 }
-                                if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok()
+                                if crate::dbg_env::var("KINETIX_AV1_DBG_RESDUMP").is_ok()
                                     && mi_col == 4
                                     && mi_row == 20
                                     && cpx_x == 8
@@ -4687,7 +4697,7 @@ impl<'a> TileDecodeState<'a> {
             }
         }
         // End-of-block luma snapshot (see the note at the top of this probe).
-        if std::env::var("KINETIX_AV1_DBG_PRED_POST").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_PRED_POST").is_ok() {
             let (tgt_x, tgt_y, reach) = dbg_pred_target();
             let (bpx, bpy) = (blk_px_x as i64, blk_px_y as i64);
             let (bwid, bhei) = (bw * MI_SIZE, bh * MI_SIZE);
@@ -4755,7 +4765,7 @@ fn co_located_luma_type(
 ) -> usize {
     let lx = clpx_x << sub_x;
     let ly = clpx_y << sub_y;
-    if std::env::var("KINETIX_AV1_DBG_COLOC").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_COLOC").is_ok() {
         eprintln!(
             "COLOC mi=({mi_col},{mi_row}) clpx=({clpx_x},{clpx_y}) lx={lx} ly={ly} leaves={luma_leaf_types:?} own={own_luma_tx_type}"
         );

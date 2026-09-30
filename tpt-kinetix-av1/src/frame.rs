@@ -721,7 +721,7 @@ impl FrameHeader {
             read_f8(&mut br, 3)?
         };
         let frame_context_idx = primary_ref_frame;
-        if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH").is_ok() {
             eprintln!(
                 "DBG FH frame_type={frame_type:?} intra={frame_is_intra} err_res={error_resilient_mode} \
                  order_hint={order_hint} primary_ref={primary_ref_frame} \
@@ -744,7 +744,7 @@ impl FrameHeader {
                 }
             }
         }
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!(
                 "FHSEC brtime={} dmip={decoder_model_info_present} brtp={buffer_removal_time_present} opcnt={} brtl={}",
                 br.bits_read(),
@@ -776,7 +776,7 @@ impl FrameHeader {
                 };
             }
         }
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!(
                 "FHSEC refoh={} order_hint_bits={order_hint_bits} err_res={error_resilient_mode} enable_oh={enable_order_hint}",
                 br.bits_read()
@@ -805,7 +805,7 @@ impl FrameHeader {
             } else {
                 false
             };
-            if std::env::var("KINETIX_AV1_DBG_SUPERRES").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_SUPERRES").is_ok() {
                 eprintln!(
                     "DBG superres enable_superres={} w={w} h={h} uw={uw} rw={rw} rh={rh} allow_screen_content={} allow_intrabc={}",
                     seq.enable_superres, allow_screen_content_tools, allow_intrabc
@@ -838,7 +838,7 @@ impl FrameHeader {
                     // the preceding fields can be re-checked against the spec.
                     let off = br.bits_read();
                     *idx = read_f8(&mut br, 3)?;
-                    if std::env::var("KINETIX_AV1_DBG_REFIDX").is_ok() {
+                    if crate::dbg_env::var("KINETIX_AV1_DBG_REFIDX").is_ok() {
                         eprintln!(
                             "REFIDX [{idx}] = {v} @bit {off} (oh={order_hint} primref={primary_ref_frame} srs={frame_refs_short_signaling})",
                             v = *idx
@@ -932,7 +932,7 @@ impl FrameHeader {
             superres_denom = sr_denom;
             render_width = rw;
             render_height = rh;
-            if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_FH").is_ok() {
                 eprintln!(
                     "DBG frame_size_with_refs oh={order_hint} use_ref_search={use_ref_search} \
                      found={found_ref_dims:?} w={width} h={height} uw={upscaled_width}"
@@ -946,7 +946,7 @@ impl FrameHeader {
             let (filt, _is_switchable) = read_interpolation_filter(&mut br)?;
             interpolation_filter = filt;
             is_motion_mode_switchable = read_flag(&mut br)?;
-            if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_FH").is_ok() {
                 eprintln!(
                     "DBG FH inter oh={order_hint} interp_filter={interpolation_filter} \
                      mm_switch={is_motion_mode_switchable} w={width} h={height} hp={allow_high_precision_mv}"
@@ -957,11 +957,11 @@ impl FrameHeader {
             } else {
                 use_ref_frame_mvs = read_flag(&mut br)?;
             }
-            if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_FH").is_ok() {
                 eprintln!("DBG FH refmvs oh={order_hint} use_ref_frame_mvs={use_ref_frame_mvs}");
             }
         }
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!(
                 "FHSEC framesize={} refidx={ref_frame_idx:?} srs={frame_refs_short_signaling}",
                 br.bits_read()
@@ -977,7 +977,7 @@ impl FrameHeader {
 
         // --- tile_info ---
         let tile_layout = parse_tile_info(&mut br, &width, &height, seq.use_128x128_superblock)?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC tile={}", br.bits_read());
         }
 
@@ -1043,7 +1043,7 @@ impl FrameHeader {
                 }
             }
         }
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEG seg={}", br.bits_read());
         }
 
@@ -1054,7 +1054,7 @@ impl FrameHeader {
         // --- delta_lf_params ---
         let (delta_lf_present, delta_lf_res, delta_lf_multi) =
             parse_delta_lf_params(&mut br, delta_q_present, allow_intrabc)?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC dlq={}", br.bits_read());
         }
 
@@ -1093,10 +1093,10 @@ impl FrameHeader {
                 ref_lf_deltas_dpb[usize::from(ref_frame_idx[usize::from(primary_ref_frame)]) & 7]
             },
         )?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC lf={}", br.bits_read());
         }
-        if std::env::var("KINETIX_AV1_DBG_LFHDR").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_LFHDR").is_ok() {
             eprintln!(
                 "LFHDR oh={order_hint} levels={loop_filter_level:?} sharp={loop_filter_sharpness} enabled={loop_filter_delta_enabled} ref_deltas={:?} mode_deltas={:?}",
                 loop_filter_deltas.loop_filter_ref_deltas, loop_filter_deltas.loop_filter_mode_deltas
@@ -1111,10 +1111,10 @@ impl FrameHeader {
             enable_cdef,
             num_planes,
         )?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC cdef={}", br.bits_read());
         }
-        if std::env::var("KINETIX_AV1_DBG_LFHDR").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_LFHDR").is_ok() {
             eprintln!(
                 "CDEFHDR oh={order_hint} damping={cdef_damping} bits={cdef_bits} y={cdef_y_strength:?} uv={cdef_uv_strength:?}"
             );
@@ -1131,7 +1131,7 @@ impl FrameHeader {
             subsampling_y,
             seq.use_128x128_superblock,
         )?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC lr={}", br.bits_read());
         }
 
@@ -1160,7 +1160,7 @@ impl FrameHeader {
             &ref_frame_idx,
             ref_order_hint_dpb,
         )?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC skipmode={}", br.bits_read());
         }
 
@@ -1187,7 +1187,7 @@ impl FrameHeader {
                 ref_gm_params_dpb[usize::from(ref_frame_idx[usize::from(primary_ref_frame)]) & 7]
             },
         )?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEC gm={}", br.bits_read());
         }
 
@@ -1202,7 +1202,7 @@ impl FrameHeader {
             subsampling_x,
             subsampling_y,
         )?;
-        if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!(
                 "FHSEC fg={} fh_type={frame_type:?} refresh={refresh_frame_flags:#04x}",
                 br.bits_read()
@@ -1214,7 +1214,7 @@ impl FrameHeader {
         // padding (all-ones) here; this also positions `br` at the tile group.
         byte_align(&mut br)?;
 
-        if std::env::var("KINETIX_AV1_DBG_FH_JSON").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH_JSON").is_ok() {
             eprintln!(
                 "KIN FH bits={} hp={} intmv={}",
                 br.bits_read(),
@@ -1845,7 +1845,7 @@ fn parse_skip_mode(
         }
     };
 
-    if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_FH").is_ok() {
         eprintln!(
             "DBG skip_mode oh={order_hint} fwd={forward_idx} bwd={backward_idx} allowed={allowed} \
              sm=[{},{}] dpb_hints={ref_order_hint_dpb:?} ref_idx={ref_frame_idx:?}",
@@ -1899,7 +1899,7 @@ fn parse_global_motion(
             }
         }
         gm_type[ref_idx] = type_;
-        if std::env::var("KINETIX_AV1_DBG_GMBITS").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_GMBITS").is_ok() {
             eprintln!("GMBITS ref={ref_idx} type={type_} bit={}", br.bits_read());
         }
         if type_ >= GM_ROTZOOM {
@@ -1966,7 +1966,7 @@ fn parse_global_motion(
             )?;
         }
     }
-    if std::env::var("KINETIX_AV1_DBG_GMBITS").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_GMBITS").is_ok() {
         for r in 1..=7 {
             if gm_type[r] != GM_IDENTITY {
                 eprintln!(
@@ -2401,7 +2401,7 @@ fn parse_tile_info(
         layout.tile_size_bytes = read_f8(br, 2)? + 1;
     }
 
-    if std::env::var("KINETIX_AV1_DBG_TILEINFO").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_TILEINFO").is_ok() {
         eprintln!(
             "DBG tile_info sb_cols={sb_cols} sb_rows={sb_rows} min_log2_tile_cols={min_log2_tile_cols} max_log2_tile_cols={max_log2_tile_cols} uniform={uniform_tile_spacing} cols={} rows={} log2_cols={} log2_rows={} col_start_sb={:?} row_start_sb={:?} ctx_update={} size_bytes={}",
             layout.cols,

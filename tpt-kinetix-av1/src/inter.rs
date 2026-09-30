@@ -15,15 +15,9 @@
 //! * [`build_mv_candidates`] — the spatial-neighbour MV candidate list that
 //!   drives the `NEAREST`/`NEAR`/`NEW` mode selection (§7.10).
 //!
-//! **Scope / limitations (AV1 Phase E, not yet pixel-exact):**
-//! * Single-reference and compound (two-reference) blocks are both parsed and
-//!   reconstructed; compound uses reference averaging.
-//! * Temporal MV prediction (the order-hint-derived `TemporalMvPrediction`
-//!   candidate) and warped/OBMC motion modes are not yet implemented — blocks
-//!   that select them fall back to the spatial candidate list (or, for global
-//!   motion, to a translation-only prediction), which keeps the bitstream in
-//!   sync but is not pixel-exact. The decoder continues to report
-//!   `pixel_exact = false`.
+//! **Scope:** single-reference and compound blocks, temporal MV prediction,
+//! OBMC, warped and global motion are all implemented and bit-exact against
+//! dav1d on the FATE and libaom crosscheck suites; see [`crate::decoder`].
 
 use tpt_kinetix_core::error::KinetixError;
 
@@ -213,6 +207,95 @@ fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
     defaults::SUBPEL_FILTERS[set][pos as usize]
 }
 
+/// Copy the `pw` x `ph` window of `refp` whose top-left is `(x0, y0)` into a
+/// contiguous buffer, clamping every coordinate to the plane exactly as the
+/// per-tap `clamp` in the filters used to. Doing the clamp once per sample
+/// here lets the filter loops below run without bounds clamps.
+fn gather_patch(
+    refp: &[Px],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    x0: i32,
+    y0: i32,
+    pw: usize,
+    ph: usize,
+) -> Vec<i32> {
+    let mut patch = vec![0i32; pw * ph];
+    let inside = x0 >= 0 && x0 as usize + pw <= ref_w;
+    for ty in 0..ph {
+        let ry = (y0 + ty as i32).clamp(0, ref_h as i32 - 1) as usize;
+        let row = &refp[ry * ref_stride..ry * ref_stride + ref_w];
+        let dst = &mut patch[ty * pw..(ty + 1) * pw];
+        if inside {
+            for (d, &v) in dst.iter_mut().zip(&row[x0 as usize..x0 as usize + pw]) {
+                *d = v as i32;
+            }
+        } else {
+            for (x, d) in dst.iter_mut().enumerate() {
+                *d = row[(x0 + x as i32).clamp(0, ref_w as i32 - 1) as usize] as i32;
+            }
+        }
+    }
+    patch
+}
+
+/// 8-tap horizontal pass over `rows` rows of a patch `bw + 7` wide, producing
+/// `bw`-wide rows of `(sum + rnd) >> shift`.
+fn filter_rows_h(
+    patch: &[i32],
+    bw: usize,
+    rows: usize,
+    k: &[i32; 8],
+    rnd: i32,
+    shift: u32,
+) -> Vec<i32> {
+    let pw = bw + 7;
+    let mut out = vec![0i32; bw * rows];
+    for ty in 0..rows {
+        let src = &patch[ty * pw..(ty + 1) * pw];
+        let dst = &mut out[ty * bw..(ty + 1) * bw];
+        for (x, d) in dst.iter_mut().enumerate() {
+            let w = &src[x..x + 8];
+            let s = w[0] * k[0]
+                + w[1] * k[1]
+                + w[2] * k[2]
+                + w[3] * k[3]
+                + w[4] * k[4]
+                + w[5] * k[5]
+                + w[6] * k[6]
+                + w[7] * k[7];
+            *d = (s + rnd) >> shift;
+        }
+    }
+    out
+}
+
+/// 8-tap vertical pass: output row `y` combines rows `y..y + 8` of `src`
+/// (`bw` wide) and is mapped through `f(sum)`.
+fn filter_rows_v(
+    src: &[i32],
+    bw: usize,
+    bh: usize,
+    k: &[i32; 8],
+    mut f: impl FnMut(i32, usize, usize),
+) {
+    for y in 0..bh {
+        let r: [&[i32]; 8] = std::array::from_fn(|i| &src[(y + i) * bw..(y + i + 1) * bw]);
+        for x in 0..bw {
+            let s = r[0][x] * k[0]
+                + r[1][x] * k[1]
+                + r[2][x] * k[2]
+                + r[3][x] * k[3]
+                + r[4][x] * k[4]
+                + r[5][x] * k[5]
+                + r[6][x] * k[6]
+                + r[7][x] * k[7];
+            f(s, y, x);
+        }
+    }
+}
+
 /// Motion-compensate a `bw`×`bh` luma/chroma block at tile-local pixel
 /// (`dst_x`, `dst_y`) of `dest` from `refp`, using motion vector `mv` and the
 /// interpolation `filter`.
@@ -260,6 +343,7 @@ pub fn motion_compensate(
     vbits: u32,
     bit_depth: u32,
 ) {
+    let _g = crate::dbg_env::Timer::new(1);
     let ib = intermediate_bits(bit_depth);
     let pix_max = (1i32 << bit_depth) - 1;
     let dx = mv.col & ((1 << hbits) - 1);
@@ -336,34 +420,39 @@ pub fn motion_compensate(
         // Horizontal-only: dav1d put_8tap_c fh-only branch,
         // (sum + intermediate_rnd) >> 6 with intermediate_rnd = 32 + ((1 << (6 - ib)) >> 1).
         let h_only_rnd = 32 + ((1i32 << (6 - ib)) >> 1);
+        let patch = gather_patch(
+            refp,
+            ref_stride,
+            ref_w,
+            ref_h,
+            base_x - 3,
+            base_y,
+            bw + 7,
+            bh,
+        );
+        let rows = filter_rows_h(&patch, bw, bh, &kw, h_only_rnd, 6);
         for y in 0..bh {
-            let ry = (base_y + y as i32).clamp(0, ref_h as i32 - 1);
-            let row = ry as usize * ref_stride;
             for x in 0..bw {
-                let rx = base_x + x as i32;
-                let mut s = 0i32;
-                for k in 0..8u32 {
-                    let sx = (rx + k as i32 - 3).clamp(0, ref_w as i32 - 1);
-                    s += refp[row + sx as usize] as i32 * kw[k as usize];
-                }
-                dest[y * dest_stride + x] = ((s + h_only_rnd) >> 6).clamp(0, pix_max) as Px;
+                dest[y * dest_stride + x] = (rows[y * bw + x]).clamp(0, pix_max) as Px;
             }
         }
         return;
     }
     if !h_subpel && v_subpel {
         // Vertical-only: dav1d put_8tap_c fv-only branch, (sum + 32) >> 6.
-        for x in 0..bw {
-            for y in 0..bh {
-                let mut s = 0i32;
-                for k in 0..8u32 {
-                    let ry = (base_y + y as i32 + k as i32 - 3).clamp(0, ref_h as i32 - 1);
-                    let sx = (base_x + x as i32).clamp(0, ref_w as i32 - 1);
-                    s += refp[ry as usize * ref_stride + sx as usize] as i32 * kh[k as usize];
-                }
-                dest[y * dest_stride + x] = ((s + 32) >> 6).clamp(0, pix_max) as Px;
-            }
-        }
+        let patch = gather_patch(
+            refp,
+            ref_stride,
+            ref_w,
+            ref_h,
+            base_x,
+            base_y - 3,
+            bw,
+            bh + 7,
+        );
+        filter_rows_v(&patch, bw, bh, &kh, |s, y, x| {
+            dest[y * dest_stride + x] = ((s + 32) >> 6).clamp(0, pix_max) as Px;
+        });
         return;
     }
     // §7.11.3.3: the AV1 `Subpel_Filters` table is 128-scale (`FILTER_BITS =
@@ -376,34 +465,23 @@ pub fn motion_compensate(
     // the second-read symbol the vertical one (dav1d `fh = type & 3`,
     // `fv = type >> 2`); full-pel axes resolve to the identity kernel.
     let ext_h = bh + 7;
-    let mut tmp = vec![0i32; bw * ext_h];
-    for ty in 0..ext_h {
-        let ry = (base_y + ty as i32 - 3).clamp(0, ref_h as i32 - 1);
-        let row = ry as usize * ref_stride;
-        for x in 0..bw {
-            let rx = base_x + x as i32;
-            let mut s = 0i32;
-            for k in 0..8u32 {
-                let koff = (k as i32) - 3;
-                let sx = (rx + koff).clamp(0, ref_w as i32 - 1);
-                s += refp[row + sx as usize] as i32 * kw[k as usize];
-            }
-            tmp[ty * bw + x] = (s + ((1 << (6 - ib)) >> 1)) >> (6 - ib);
-        }
-    }
+    let patch = gather_patch(
+        refp,
+        ref_stride,
+        ref_w,
+        ref_h,
+        base_x - 3,
+        base_y - 3,
+        bw + 7,
+        ext_h,
+    );
+    let tmp = filter_rows_h(&patch, bw, ext_h, &kw, (1 << (6 - ib)) >> 1, 6 - ib);
 
     // Vertical pass from `tmp` (already offset by 3 rows) into `dest`. `dest`
-    // is the destination *block* buffer (stride `dest_stride`, sized `bw`×`bh`).
-    for y in 0..bh {
-        for x in 0..bw {
-            let mut s = 0i32;
-            for (k, &c) in kh.iter().enumerate() {
-                s += tmp[(y + k) * bw + x] * c;
-            }
-            let v = ((s + (1 << (5 + ib))) >> (6 + ib)).clamp(0, pix_max) as Px;
-            dest[y * dest_stride + x] = v;
-        }
-    }
+    // is the destination *block* buffer (stride `dest_stride`, sized `bw`x`bh`).
+    filter_rows_v(&tmp, bw, bh, &kh, |s, y, x| {
+        dest[y * dest_stride + x] = ((s + (1 << (5 + ib))) >> (6 + ib)).clamp(0, pix_max) as Px;
+    });
 }
 
 /// Compound "prep" motion compensation (§7.11.3.2, `isCompound == 1`): the same
@@ -428,6 +506,7 @@ pub fn motion_compensate_prep(
     vbits: u32,
     bit_depth: u32,
 ) -> Vec<i32> {
+    let _g = crate::dbg_env::Timer::new(1);
     let ib = intermediate_bits(bit_depth);
     let dx = mv.col & ((1 << hbits) - 1);
     let dy = mv.row & ((1 << vbits) - 1);
@@ -437,31 +516,21 @@ pub fn motion_compensate_prep(
     let kh = subpel_kernel(filter_v, dy, vbits, bh <= 4);
 
     let ext_h = bh + 7;
-    let mut tmp = vec![0i32; bw * ext_h];
-    for ty in 0..ext_h {
-        let ry = (base_y + ty as i32 - 3).clamp(0, ref_h as i32 - 1);
-        let row = ry as usize * ref_stride;
-        for x in 0..bw {
-            let rx = base_x + x as i32;
-            let mut s = 0i32;
-            for (k, &c) in kw.iter().enumerate() {
-                let sx = (rx + k as i32 - 3).clamp(0, ref_w as i32 - 1);
-                s += refp[row + sx as usize] as i32 * c;
-            }
-            tmp[ty * bw + x] = (s + ((1 << (6 - ib)) >> 1)) >> (6 - ib);
-        }
-    }
-
+    let patch = gather_patch(
+        refp,
+        ref_stride,
+        ref_w,
+        ref_h,
+        base_x - 3,
+        base_y - 3,
+        bw + 7,
+        ext_h,
+    );
+    let tmp = filter_rows_h(&patch, bw, ext_h, &kw, (1 << (6 - ib)) >> 1, 6 - ib);
     let mut out = vec![0i32; bw * bh];
-    for y in 0..bh {
-        for x in 0..bw {
-            let mut s = 0i32;
-            for (k, &c) in kh.iter().enumerate() {
-                s += tmp[(y + k) * bw + x] * c;
-            }
-            out[y * bw + x] = (s + 32) >> 6;
-        }
-    }
+    filter_rows_v(&tmp, bw, bh, &kh, |s, y, x| {
+        out[y * bw + x] = (s + 32) >> 6;
+    });
     out
 }
 
@@ -607,6 +676,7 @@ pub fn motion_compensate_scaled(
     sc: &RefScale,
     bit_depth: u32,
 ) {
+    let _g = crate::dbg_env::Timer::new(1);
     let out = scaled_predict(
         refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits, vbits,
         sc, false, bit_depth,
@@ -637,6 +707,7 @@ pub fn motion_compensate_prep_scaled(
     sc: &RefScale,
     bit_depth: u32,
 ) -> Vec<i32> {
+    let _g = crate::dbg_env::Timer::new(1);
     scaled_predict(
         refp, ref_stride, ref_w, ref_h, dst_x, dst_y, bw, bh, mv, filter_h, filter_v, hbits, vbits,
         sc, true, bit_depth,
@@ -972,7 +1043,7 @@ pub fn read_mv(
     allow_hp: bool,
     force_integer_mv: bool,
 ) -> Result<Mv, KinetixError> {
-    if std::env::var("KINETIX_AV1_DBG_MVJOINT").is_ok() {
+    if crate::dbg_env::var("KINETIX_AV1_DBG_MVJOINT").is_ok() {
         eprintln!(
             "MVJOINT pre rng={} cdf={:?} class0={:?} class={:?}",
             dec.raw_state().0,

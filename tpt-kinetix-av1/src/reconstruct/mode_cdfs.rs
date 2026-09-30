@@ -647,7 +647,7 @@ impl ModeCdfs {
             3 => &mut self.partition_w64[ctx],
             _ => &mut self.partition_w128[ctx],
         };
-        if std::env::var("KINETIX_AV1_DBG_PARTCDF").is_ok() && bucket == 3 && ctx == 2 {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_PARTCDF").is_ok() && bucket == 3 && ctx == 2 {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static PC: AtomicUsize = AtomicUsize::new(0);
             eprintln!(
@@ -823,7 +823,7 @@ impl ModeCdfs {
         cat: usize,
         ctx: usize,
     ) -> bool {
-        if std::env::var("KINETIX_AV1_DBG_TXSPLIT").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_TXSPLIT").is_ok() {
             eprintln!(
                 "KGTXSPLIT cat={cat} ctx={ctx} cdf={:?} pre={}",
                 &self.txfm_split[cat * 3 + ctx][..3],

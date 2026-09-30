@@ -1,7 +1,7 @@
 # Adding a New Codec via the `tpt-kinetix-kg` Pipeline
 
-This document describes the repeatable process for integrating a new audio or video codec
-into TPT Kinetix using the `tpt-kinetix-kg` knowledge-graph tooling. Following this process
+This document describes the repeatable process for integrating a new video codec
+(audio codecs live in the separate `tpt-cadence` repo and do not belong here) into TPT Kinetix using the `tpt-kinetix-kg` knowledge-graph tooling. Following this process
 consistently keeps each codec crate coherent, fuzz-hardened, and parallelism-aware from
 the start.
 
@@ -54,12 +54,11 @@ Download or locate the codec's C implementation. The canonical source is FFmpeg'
 
 ```
 libavcodec/vp8.c            # VP8 video decoder
-libavcodec/aac.c            # AAC audio decoder
-libavcodec/hevcdec.c        # HEVC/H.265 video decoder
+libavcodec/vp9.c            # VP9 video decoder
 ```
 
-Some codecs span multiple files (e.g. HEVC uses `hevcdec.c`, `hevc_cabac.c`,
-`hevc_filter.c`, etc.). Ingest each file separately and merge the graphs later, or
+Some codecs span multiple files (e.g. H.264 uses `h264dec.c`, `h264_cabac.c`,
+`h264_cavlc.c`, `h264_loopfilter.c`, etc.). Ingest each file separately and merge the graphs later, or
 ingest the primary decoder file first and add supporting files incrementally.
 
 Prefer a pinned FFmpeg release tag rather than `HEAD` so the graph is reproducible
@@ -98,9 +97,9 @@ tpt-kinetix-kg graph path/to/codec_decoder.c -o codec.json
 ```
 
 The output is a JSON document containing every node and edge the ingestion pass
-extracted. It is the input to all subsequent pipeline steps. Keep `codec.json` under
-version control in `tpt-kinetix-kg/graphs/` so graph evolution can be tracked alongside
-code changes.
+extracted. It is the input to all subsequent pipeline steps. Consider keeping `codec.json`
+under version control (e.g. a `graphs/` directory of your own choosing — the repo does not
+ship one) so graph evolution can be tracked alongside code changes.
 
 ---
 
@@ -178,13 +177,15 @@ tpt-kinetix-kg codegen codec.json \
 
 The codegen step emits:
 
-- `src/generated/mod.rs` — top-level module re-exporting the decoder struct
-- `src/generated/types.rs` — enums and structs mirroring the C types (macroblock
-  types, prediction modes, coefficient arrays)
-- `src/generated/parser.rs` — stub functions for every C function identified as a
-  parsing step, with `todo!()` bodies and inline comments referencing the source line
-- `src/generated/dispatch.rs` — `match` expressions scaffolded from the SwitchCase nodes
-- `src/generated/parallel.rs` — `rayon::par_iter` injection points identified in Step 5
+- `src/generated/functions.rs` — stub functions for the C functions found in the graph
+- `src/generated/mb_states.rs` — enums for macroblock/state nodes (only emitted if the
+  graph contains any `MacroblockState` nodes)
+- `src/generated/parallel_sets.rs` — `rayon` injection points from the Step 5 independent
+  sets (only emitted with `--inject-rayon` and when independent sets exist)
+- `src/generated/mod.rs` — top-level module re-exporting the above
+
+The scaffold is much thinner than a full decoder skeleton: it does not mirror C structs or
+generate `match` dispatch from SwitchCase nodes.
 
 Commit this generated output before making hand edits. That way `git diff` clearly
 separates machine-generated code from hand-written additions.
@@ -193,7 +194,7 @@ separates machine-generated code from hand-written additions.
 
 ## Step 7 — Hand-Complete the Scaffold
 
-The scaffold compiles but panics on every `todo!()`. Hand-completion is the largest
+The scaffold is a starting point only; expect stubbed bodies. Hand-completion is the largest
 effort in the process. Work through these sub-steps in order:
 
 1. **Parser tables**: fill in VLC/Huffman tables, quantiser matrices, and scan orders.
@@ -201,7 +202,7 @@ effort in the process. Work through these sub-steps in order:
    licence contamination; implement from the spec.
 
 2. **Entropy decoding**: implement CAVLC, CABAC, or Huffman decoding as appropriate.
-   H.264 and HEVC use CABAC; H.264 also has CAVLC; VP8/VP9/AV1 use boolean arithmetic
+   H.264 uses CABAC or CAVLC; VP8/VP9/AV1 use boolean/multi-symbol arithmetic
    coding. Entropy decoding is almost never parallelisable and must be done serially
    before the parallel reconstruction stages.
 
@@ -212,37 +213,33 @@ effort in the process. Work through these sub-steps in order:
    correctly implementing the decoded picture buffer (DPB) and reference frame
    management.
 
-5. **Loop filters**: deblocking and any codec-specific post-filters (SAO in HEVC,
-   CDEF in AV1). These often have subtle ordering constraints.
+5. **Loop filters**: deblocking and any codec-specific post-filters (CDEF and loop
+   restoration in AV1). These often have subtle ordering constraints.
 
 ---
 
 ## Step 8 — Write a Pixel-Diff Validation Harness
 
-Before declaring correctness, compare decoded output frame-by-frame against FFmpeg:
+Before declaring correctness, compare decoded output frame-by-frame against a reference
+decoder (FFmpeg, or a codec's own reference such as dav1d/JM):
 
 ```bash
 # Decode a test clip with FFmpeg to raw YUV
 ffmpeg -i test_clip.mp4 -f rawvideo -pix_fmt yuv420p reference.yuv
-
-# Decode the same clip with kinetix and write raw YUV
-cargo run -p tpt-kinetix-cli -- decode --input test_clip.mp4 --output candidate.yuv
-
-# Diff the two files
-cmp reference.yuv candidate.yuv
 ```
 
-For automated testing, integrate the comparison into `tpt-kinetix-test-utils`:
+The CLI has no raw-YUV `decode` subcommand (`tpt-kinetix` currently offers `probe`,
+`transcode`, `stream` and `vision`), so drive your decoder from an integration test in
+`tpt-kinetix-test-utils` instead. That crate provides:
 
-```rust
-use tpt_kinetix_test_utils::pixel_diff::assert_frames_match;
+- `reference` — helpers that shell out to reference decoders
+  (`decode_h264_with_ffmpeg`, `decode_av1_with_dav1d`, `ffmpeg_available`, ...)
+- `pixel_diff` — `psnr_yuv420p`, `within_tolerance`, `luma_diff_count`
+- `corpus` / `synthetic` — generated test streams
 
-assert_frames_match("tests/fixtures/test_clip.mp4", tolerance_psnr_db: 60.0);
-```
-
-A PSNR tolerance of ≥ 60 dB indicates pixel-exact decode. Values below 40 dB suggest
-a logic error in prediction or transform. Test across multiple profiles and
-resolutions; H.264 baseline and high profiles exercise different code paths.
+Examples live in `tpt-kinetix-test-utils/tests/conformance.rs`. Prefer an exact match
+(zero differing samples) over a PSNR threshold: a decoder is either bit-exact or it isn't,
+and PSNR figures hide small drift that cascades through inter prediction.
 
 ---
 
@@ -262,8 +259,11 @@ fuzz_target!(|data: &[u8]| {
 });
 ```
 
-Run the fuzzer for at least 24 hours before the first release, and add all
-crash-inducing inputs as regression fixtures in `fuzz/corpus/`.
+Fuzz targets live in a per-crate `fuzz/` directory that is excluded from the workspace
+(see `exclude` in the root `Cargo.toml`; add yours there). Run the fuzzer for at least
+60 s per target after touching a parser (`just fuzz <crate> <target> 60`) and longer before
+a release, and commit crash-inducing inputs into `fuzz/corpus/<target>/` as regression
+cases.
 
 ---
 
@@ -323,21 +323,16 @@ follow-up if you hit one of these for a new codec.
 
 Add conformance tests using `tpt-kinetix-test-utils` that cover:
 
-- ITU-T or IETF conformance test vectors (if available for the codec)
-- Boundary conditions: zero-length frames, maximum resolution, all-intra streams
+- ITU-T or IETF conformance test vectors (if available for the codec) — e.g.
+  `just fetch-h264-conformance` downloads the free ITU-T H.264 suite
+- Boundary conditions: zero-length frames, maximum resolution, all-intra streams, odd
+  (non-multiple-of-block) dimensions
 - Profile/level combinations relevant to the target use case
+- Assert `capabilities().pixel_exact` matches what the tests actually prove
 
-```rust
-#[cfg(test)]
-mod conformance {
-    use tpt_kinetix_test_utils::conformance::run_vector;
-
-    #[test]
-    fn itu_t_h264_bp_cavlc_420_baseline() {
-        run_vector("tests/vectors/CAVLC_A_Sony_E.264");
-    }
-}
-```
+Add these as integration tests under `<crate>/tests/` (or in
+`tpt-kinetix-test-utils/tests/conformance.rs` for cross-crate comparisons); `just
+conformance` prints each decoder's `DecoderCapabilities`.
 
 ---
 
@@ -362,10 +357,10 @@ references that affect the quality of the independence analysis.
 
 | Complexity Class | Examples | KG scaffold (days) | Hand-completion (weeks) | Total estimate |
 |-----------------|----------|--------------------|------------------------|----------------|
-| **Simple** | VP8, MPEG-1 audio, PCM | 0.5 | 2–3 | 3–4 weeks |
-| **Medium** | VP9, AAC, MPEG-2 video | 1 | 4–6 | 5–7 weeks |
+| **Simple** | VP8, PCM | 0.5 | 2–3 | 3–4 weeks |
+| **Medium** | VP9, MPEG-2 video | 1 | 4–6 | 5–7 weeks |
 | **Complex** | H.264, AV1, MPEG-4 ASP | 1–2 | 8–12 | 10–14 weeks |
-| **Very complex** | HEVC/H.265, VVC/H.266 | 2–3 | 14–20 | 16–24 weeks |
+| **Very complex** | VVC/H.266 (HEVC was evaluated and dropped — see `codec-evaluations/hevc.md`) | 2–3 | 14–20 | 16–24 weeks |
 
 These estimates assume one experienced Rust developer who is familiar with the codec
 spec but is implementing it in Rust for the first time. Reuse of entropy-decoding

@@ -5,8 +5,9 @@
 //! reconstruction to [`crate::reconstruct`] for intra-coded keyframes;
 //! inter frames and unsupported features still return an error in strict mode.
 //!
-//! **Decoder capabilities**: `pixel_exact` is `false` until the full
-//! reconstruction path is validated against `dav1d` reference output.
+//! **Decoder capabilities**: `pixel_exact` is `true`: the official FFmpeg
+//! FATE AV1 set (204/204 frames) and a libaom-encode crosscheck decode
+//! byte-exact against `dav1d`. See `docs/CONFORMANCE.md`.
 
 use tpt_kinetix_core::{
     capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
@@ -143,7 +144,7 @@ impl RefFrameStore {
         // Build the motion field cells once; clone into each slot.
         let mf_cells_opt: Option<&[crate::inter::MotionFieldCell]> =
             motion_field.map(|mf| mf.cells.as_slice());
-        if std::env::var("KINETIX_AV1_DUMP_GRID").is_ok() && to_refresh.contains(&0) {
+        if crate::dbg_env::var("KINETIX_AV1_DUMP_GRID").is_ok() && to_refresh.contains(&0) {
             let mut fp = std::fs::File::create("k_grid0.bin").ok();
             if let Some(fp) = fp.as_mut() {
                 use std::io::Write;
@@ -160,7 +161,7 @@ impl RefFrameStore {
                 }
             }
         }
-        if std::env::var("KINETIX_AV1_DBG_REFRESH").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_REFRESH").is_ok() {
             let stride = planes.stride;
             if stride > 80 && y.len() > 66 * stride + 80 {
                 eprintln!(
@@ -269,10 +270,10 @@ impl Av1Decoder {
 
     /// Reports what this decoder can and cannot do.
     ///
-    /// The AV1 decoder **attempts** pixel-exact decode for intra-coded
-    /// keyframes using the reconstruction pipeline in [`crate::reconstruct`],
-    /// but is **not yet validated** against `dav1d` reference output, so
-    /// `pixel_exact` remains `false` until the conformance harness passes.
+    /// The AV1 decoder reconstructs intra and inter frames through the
+    /// pipeline in [`crate::reconstruct`] and is validated bit-exact against
+    /// `dav1d` on the official FFmpeg FATE AV1 set (204/204 frames) plus a
+    /// libaom-encode crosscheck, so `pixel_exact` is `true`.
     ///
     /// # Examples
     ///
@@ -280,12 +281,12 @@ impl Av1Decoder {
     /// use tpt_kinetix_av1::Av1Decoder;
     ///
     /// let caps = Av1Decoder::new().capabilities();
-    /// assert!(!caps.pixel_exact);
+    /// assert!(caps.pixel_exact);
     /// ```
     pub fn capabilities(&self) -> DecoderCapabilities {
         DecoderCapabilities {
             codec: "AV1",
-            pixel_exact: false,
+            pixel_exact: true,
             supports_cabac: true,
             supports_cavlc: true,
             supports_intra_prediction: true,
@@ -333,6 +334,7 @@ impl Av1Decoder {
     /// via [`crate::reconstruct::reconstruct_av1_frame`]. Falls back to
     /// strict-mode `NotPixelExact` for unsupported frame types.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
+        crate::dbg_env::refresh();
         let obus = parse_obu_sequence(&packet.data);
 
         self.tile_data.clear();
@@ -379,7 +381,7 @@ impl Av1Decoder {
                         &self.ref_gm_params,
                         &self.ref_seg_params,
                     );
-                    if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+                    if crate::dbg_env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!("KIN ObuType::Frame parse_with_dpb ok={}", parsed.is_ok());
                         if let Err(e) = &parsed {
                             eprintln!("KIN   err={e}");
@@ -406,7 +408,7 @@ impl Av1Decoder {
                         &self.ref_gm_params,
                         &self.ref_seg_params,
                     );
-                    if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+                    if crate::dbg_env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!(
                             "KIN ObuType::FrameHeader parse_with_dpb ok={}",
                             parsed.is_ok()
@@ -512,7 +514,7 @@ impl Av1Decoder {
             {
                 apply_grain_to_frame(frame, p, fh.bit_depth, seq);
             }
-            if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                 eprintln!(
                     "KIN show_existing_frame idx={idx} slot_present={} order_hint={}",
                     f.is_some(),
@@ -528,7 +530,7 @@ impl Av1Decoder {
         if consumed >= payload.len() {
             return None;
         }
-        if std::env::var("KINETIX_AV1_DBG_TILEDATA").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_TILEDATA").is_ok() {
             let td = &payload[consumed..];
             let hex: Vec<String> = td[..8.min(td.len())]
                 .iter()
@@ -557,7 +559,7 @@ impl Av1Decoder {
         // the wrong frame. The counter is a relaxed atomic increment — always
         // on, and negligible next to a tile decode.
         let n = crate::debug_frame_seq::next();
-        if std::env::var("KINETIX_AV1_DBG_SEQ").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_SEQ").is_ok() {
             eprintln!(
                 "DBGSEQ n={n} order_hint={} show_frame={} frame_type={:?}",
                 fh.order_hint, fh.show_frame, fh.frame_type
@@ -572,7 +574,7 @@ impl Av1Decoder {
         let initial_cdfs = if fh.primary_ref_frame != 7 {
             let slot = fh.ref_frame_idx[usize::from(fh.primary_ref_frame)] as usize;
             let ctx = self.ref_cdf_contexts[slot].clone();
-            if std::env::var("KINETIX_AV1_DBG_CDFSAVE").is_ok() {
+            if crate::dbg_env::var("KINETIX_AV1_DBG_CDFSAVE").is_ok() {
                 eprintln!(
                     "KIN CDFLOAD oh={} pri={} restore_slot={} have={}",
                     fh.order_hint,
@@ -616,7 +618,7 @@ impl Av1Decoder {
             // is set so a failing tile-group split isn't silently replaced by
             // the grey placeholder path in `decode()`.
             other => {
-                if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
+                if crate::dbg_env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                     match &other {
                         Err(e) => eprintln!("KIN recon error oh={}: {e}", fh.order_hint),
                         Ok(None) => eprintln!("KIN recon ok(none) oh={}", fh.order_hint),
@@ -652,7 +654,7 @@ impl Av1Decoder {
         }
         // After a `refresh_context` frame, its adapted CDFs are saved into
         // every slot selected by `refresh_frame_flags` (§ context update).
-        if std::env::var("KINETIX_AV1_DBG_CDFSAVE").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_CDFSAVE").is_ok() {
             eprintln!(
                 "KIN CDFSAVE refresh={:#04x} disable_end={} adapted={}",
                 refresh,
@@ -713,7 +715,7 @@ impl Av1Decoder {
             self.ref_frames
                 .refresh(refresh, planes, motion_field.as_ref(), pixel_format);
         }
-        if std::env::var("KINETIX_AV1_DUMP_FRAMES").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DUMP_FRAMES").is_ok() {
             let nm = format!("kfr_{:02}.yuv", crate::debug_frame_seq::current());
             let _ = std::fs::write(&nm, &frame.data);
             eprintln!("dumped {nm} ({} bytes) oh={}", frame.data.len(), order_hint);
@@ -728,7 +730,7 @@ impl Av1Decoder {
                 self.ref_seg_maps[i] = saved_seg_map.clone();
             }
         }
-        if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+        if crate::dbg_env::var("KINETIX_AV1_DBG_FH").is_ok() {
             eprintln!(
                 "DBG refresh oh={order_hint} show={} flags={refresh:#010b} -> hints={:?}",
                 fh.show_frame, self.ref_order_hints
