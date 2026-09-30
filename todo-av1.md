@@ -14924,3 +14924,65 @@ Monochrome is now FULLY supported: decode end to end (syntax, prediction,
 filters, `Gray`/`Gray10le`/`Gray12le` output) bit-exact on every tested
 stream. Remaining (AV1): 4:4:4 / 4:2:2 input (sequenced plan in #5), FATE
 sample re-fetch.
+
+## Session 2026-09-30 #8 -- loop restoration was ALREADY implemented (index claim is
+## stale); found and fixed a real 4:2:2 PANIC in `crop_planes` instead
+
+**Correction to the task index and to several older session notes.** The index
+row and multiple `[ ]` items in this file claim "loop restoration is still
+parsed-for-sync-only: the decoded Wiener / self-guided filter is never
+applied". **That is false and has been false since 2026-09-04.** Verified by
+reading the code: `wiener_filter_plane` / `sgrproj_filter_plane` /
+`apply_loop_restoration_plane` are all fully implemented in `loop_filter.rs`
+(~800 lines), `read_lr_unit` populates `meta.lr_units`, and the filter runs by
+DEFAULT in `apply_post_filters` (only `KINETIX_AV1_NOLR` disables it). The
+older session notes that describe it as gated off behind
+`KINETIX_AV1_FILTER=1` are also superseded -- that env var no longer exists
+in the tree. Its measured effect at the time: testsrc V (Wiener) 49.26 ->
+55.18 dB, mandelbrot Y (SgrProj) 58.79 -> 70.45 dB. Do not re-open this as
+"implement restoration"; the remaining restoration work is only the
+*accuracy* items below, not wiring.
+
+FATE samples are NOT on disk, so `av1_fate_score` cannot be re-run here
+(`skipping: set KINETIX_AV1_FATE_DIR`). FATE-frame counts quoted in older
+notes are therefore unverified in this session.
+
+**What I did instead: probed the other stated open item, 4:4:4 / 4:2:2
+support, and found a hard crash.** `crop_planes` derived the chroma stride as
+`grid_w >> ss_x` (halving the luma stride) -- correct only for 4:2:0. 4:2:2 has
+`ss_x == 0`, so its chroma planes are allocated full-width and the derived
+stride was twice the real one. A real 192x128 4:2:2 keyframe PANICKED:
+
+    range end index 12480 out of range for slice of length 12288
+
+Fixed in d07f53a: the chroma stride is now passed in (`crop_planes` gains
+`uv_grid_w`; `PaddedPlanes` gains `uv_grid_width`; `StoredFrame` gains
+`uv_width`), and the emit loops are bounds-checked so a geometry/allocation
+mismatch degrades instead of panicking. Three regression tests added (the
+4:2:2 stride, 4:2:0 still halving both axes, and truncation).
+
+**Measured after the fix (192x128 single-keyframe, vs libdav1d):**
+
+| format | before | after |
+|---|---|---|
+| 4:2:2 | **panic** | decodes, no crash, but emits a 4:4:4-sized buffer (73344 vs 49152) -- layout still wrong |
+| 4:4:4 | diff=6260 maxabs=12 | unchanged (diff=6260 maxabs=12) |
+
+So the panic is gone but **4:2:2 and 4:4:4 are still not correct**, exactly as
+the plan in session #5 predicted (the chroma geometry is 4:2:0-shaped in
+~dozens of sites: uv grid alloc, tile assembly chroma rows, MC chroma origins
+`cpx = px/2`, sub-8x8 chroma ownership padding, CDEF/deblock chroma, film
+grain, superres chroma). The 4:2:2 output-size mismatch above localises the
+*next* concrete step: `pixel_format_for` returns `Yuv422p` for `!ss_x && ss_y`
+(correct), but the chroma plane is allocated/filtered as if 4:4:4, so the
+`emit` loop writes full-width rows for `h` rows instead of `h/2`.
+
+### Remaining (AV1), corrected
+- **4:2:2 first** (it is closer than 4:4:4 and is the one that mis-sizes its
+  output): make the chroma grid allocation, tile assembly and MC chroma
+  origins honour `ss_x = 0`. Then 4:4:4, then 10/12-bit 422/444.
+- Loop restoration: wiring is DONE; only accuracy remains (FATE re-fetch
+  needed to quantify).
+- `pixel_exact` stays `false`. FATE, `switch_frame` 30/31, `non_uniform_tiling`
+  6/24, `frames_refs_short_signaling` 1/50 -- all still open and unmeasurable
+  without the FATE samples.
