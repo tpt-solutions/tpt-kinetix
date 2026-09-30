@@ -296,7 +296,7 @@ retyping tables from a PDF or C file by hand.
    pub const SOME_TABLE: [i8; 64] = [ ... ];
    ```
    If your Rust const only covers part of a larger combined C array (see
-   `CABAC_CTX_INIT_PB0/1/2` in `tpt-kinetix-h264/src/cabac_tables.rs`, each a slice of
+   `CABAC_CTX_INIT_PB0/1/2` in `out-kinetix-h264/src/cabac_tables.rs`, each a slice of
    FFmpeg's single `cabac_context_init_PB[3][1024][2]`), add `range=start:end` — the
    half-open index range into the *flattened* C array your const corresponds to.
 4. `cargo run -p tpt-kinetix-kg -- verify-tables path/to/your_file.rs` re-fetches the
@@ -311,7 +311,7 @@ gitignored `tpt-kinetix-kg/.cache/` and are re-fetched on demand. See
 `tpt-kinetix-kg/src/fetch_source.rs` and `tpt-kinetix-kg/src/table_extract.rs`.
 
 Not every table is a simple named C array — some (like H.264's `RANGE_TAB_LPS`/
-`TRANS_IDX_LPS`/`TRANS_IDX_MPS` in `tpt-kinetix-h264/src/entropy.rs`) are packed by
+`TRANS_IDX_LPS`/`TRANS_IDX_MPS` in `out-kinetix-h264/src/entropy.rs`) are packed by
 FFmpeg into one combined byte blob (`ff_h264_cabac_tables`) with hand-computed offsets;
 those aren't yet wired to `verify-tables` and still rely on the doc-comment provenance
 trail instead. Extending the extractor to unpack a unified byte blob is a reasonable

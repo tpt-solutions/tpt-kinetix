@@ -1,11 +1,11 @@
-//! A concrete [`tpt_kinetix_h264::DecodeTracer`] that collects every per-stage
+//! A concrete [`out_kinetix_h264::DecodeTracer`] that collects every per-stage
 //! callback into a map, keyed by macroblock/plane/block/stage, so tests and
 //! debugging tools can inspect or diff intermediate decoder state instead of
 //! only the final reconstructed frame.
 
 use std::collections::HashMap;
 
-use tpt_kinetix_h264::{DecodeTracer, TracePlane};
+use out_kinetix_h264::{DecodeTracer, TracePlane};
 
 /// Which pipeline stage a captured sample buffer came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

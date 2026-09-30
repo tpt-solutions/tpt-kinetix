@@ -854,6 +854,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "out-kinetix-h264"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "nom",
+ "proptest",
+ "rayon",
+ "thiserror",
+ "tpt-kinetix-core",
+ "tpt-kinetix-test-utils",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1532,7 +1546,6 @@ dependencies = [
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
- "tpt-kinetix-h264",
  "tpt-kinetix-pipeline",
  "tpt-kinetix-stream",
  "tpt-kinetix-vision",
@@ -1571,20 +1584,6 @@ dependencies = [
  "thiserror",
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
-]
-
-[[package]]
-name = "tpt-kinetix-h264"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "criterion",
- "nom",
- "proptest",
- "rayon",
- "thiserror",
- "tpt-kinetix-core",
- "tpt-kinetix-test-utils",
 ]
 
 [[package]]
@@ -1642,7 +1641,6 @@ dependencies = [
  "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
- "tpt-kinetix-h264",
  "tpt-kinetix-test-utils",
  "tpt-kinetix-vp9",
  "tracing",
@@ -1689,13 +1687,13 @@ dependencies = [
 name = "tpt-kinetix-test-utils"
 version = "0.1.0"
 dependencies = [
+ "out-kinetix-h264",
  "proptest",
  "serde",
  "serde_json",
  "tpt-kinetix-av1",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
- "tpt-kinetix-h264",
  "tpt-kinetix-lean",
  "tpt-kinetix-realtime",
  "tpt-kinetix-vision",

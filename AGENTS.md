@@ -47,7 +47,7 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
   The `--strict` (pixel-exact) conformance assertion is **currently non-blocking**
   (`continue-on-error: true` in CI) because AV1, Lean, and Vision decoders are
   **not pixel-exact yet** (H.264 reports `pixel_exact: true`).
-- **ffmpeg-dependent `dbg_*`/conformance tests must skip, not panic.** `tpt-kinetix-h264/tests/dbg_*.rs`
+- **ffmpeg-dependent `dbg_*`/conformance tests must skip, not panic.** `out-kinetix-h264/tests/dbg_*.rs`
   and `examples/dbg_*.rs` (and the `conformance_*`/`phase_c_*` test files) shell out to `ffmpeg`
   to synthesize reference clips/YUV. Gate them on a `ffmpeg_available()` helper (either the shared
   `tpt_kinetix_test_utils::reference::ffmpeg_available`, or a local

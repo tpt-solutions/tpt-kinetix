@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Fetch a curated subset of the ITU-T H.264.1 (H.264 conformance) bitstream
-# suite into tpt-kinetix-h264/tests/fixtures/itu/<CLIP>/ for the
+# suite into out-kinetix-h264/tests/fixtures/itu/<CLIP>/ for the
 # `itu_conformance` integration test.
 #
 # Source: https://www.itu.int/wftp3/av-arch/jvt-site/draft_conformance/
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 BASE="https://www.itu.int/wftp3/av-arch/jvt-site/draft_conformance"
-DEST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tpt-kinetix-h264/tests/fixtures/itu"
+DEST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/out-kinetix-h264/tests/fixtures/itu"
 
 # clip name -> suite subdir. Curated to cover exactly what
 # `capabilities().pixel_exact == true` claims, plus a few negative clips.

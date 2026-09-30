@@ -26,7 +26,7 @@ when the buffer is full, preventing unbounded memory growth.
 | Stage | Input | Output | Implementation |
 |-------|-------|--------|----------------|
 | `DemuxStage` | (none — reads from `data: Vec<u8>`) | `Packet` | `tpt_kinetix_demux::Mp4Demuxer` |
-| `DecodeStage` | `Packet` | `VideoFrame` | `tpt_kinetix_h264::H264Decoder` |
+| `Vp9DecodeStage` | `Packet` | `VideoFrame` | `tpt_kinetix_vp9::Vp9Decoder` (`codec-vp9` feature) |
 | `FilterStage` | `VideoFrame` | `VideoFrame` | `passthrough()`, `scale(w, h)`, or `from_fn(..)` |
 | `EncodeStage` | `VideoFrame` | `Packet` | `tpt_kinetix_av1::Av1Encoder` (rav1e) |
 | `SinkStage` | `VideoFrame` | (collects into `Arc<Mutex<Vec<VideoFrame>>>`) | Built-in collector |
@@ -51,13 +51,13 @@ equivalent `ffmpeg` transcode for side-by-side comparison.
 ## Usage
 
 ```rust
-use tpt_kinetix_pipeline::{Pipeline, DemuxStage, DecodeStage, FilterStage, SinkStage};
+use tpt_kinetix_pipeline::{Pipeline, DemuxStage, Vp9DecodeStage, FilterStage, SinkStage};
 
 let (sink, frames) = SinkStage::new();
 
 Pipeline::new()
     .add_stage(DemuxStage { data: mp4_bytes })
-    .add_stage(DecodeStage)
+    .add_stage(Vp9DecodeStage)
     .add_stage(FilterStage::scale(1280, 720))
     .add_stage(sink)
     .run_to_completion()?;

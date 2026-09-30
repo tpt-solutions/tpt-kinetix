@@ -1,0 +1,283 @@
+//! Scratch: decode the first N frames of an ITU clip in strict mode and print
+//! the exact per-NAL error, so a scaffold fallback surfaces its reason.
+//!
+//! Run: FIELD_CLIP=CI1_FT_B cargo test -p out-kinetix-h264 \
+//!   --test dbg_field_triage -- --nocapture
+
+use std::path::PathBuf;
+
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
+use out_kinetix_h264::H264Decoder;
+
+fn nal_starts(annexb: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    for i in 0..annexb.len().saturating_sub(3) {
+        if annexb[i] == 0 && annexb[i + 1] == 0 && annexb[i + 2] == 1 {
+            starts.push(i + 3);
+        }
+    }
+    starts
+}
+
+#[test]
+fn field_triage_strict() {
+    let name = std::env::var("FIELD_CLIP").unwrap_or_else(|_| "CI1_FT_B".into());
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/itu")
+        .join(&name);
+    if !dir.exists() {
+        eprintln!(
+            "skipping: ITU fixture dir not found at {dir:?} (run `just fetch-h264-conformance`)"
+        );
+        return;
+    }
+    let mut stream = None;
+    for e in std::fs::read_dir(&dir).unwrap().flatten() {
+        let path = e.path();
+        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if matches!(ext, "264" | "jsv" | "h264" | "avc" | "jvt" | "26l" | "bits") {
+            stream = Some(path);
+            break;
+        }
+    }
+    let annexb = std::fs::read(stream.expect("bitstream")).unwrap();
+    let starts = nal_starts(&annexb);
+
+    // Optional reference YUV for pixel comparison.
+    let refyuv = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            matches!(
+                p.extension().and_then(|x| x.to_str()),
+                Some("yuv") | Some("qcif") | Some("cif") | Some("4cif")
+            )
+        })
+        .and_then(|p| std::fs::read(p).ok());
+
+    let mut dec = H264Decoder::new().with_strict(true);
+    if std::env::var_os("FIELD_DISPLAY_ORDER").is_some() {
+        dec = dec.with_display_order();
+    }
+    let mut emitted = Vec::new();
+    for (n, &s) in starts.iter().enumerate() {
+        let e = starts.get(n + 1).copied().unwrap_or(annexb.len());
+        let mut data = vec![0u8, 0, 0, 1];
+        data.extend_from_slice(&annexb[s..e]);
+        let pkt = Packet {
+            pts: Timestamp::new(n as i64, (1, 30)),
+            dts: Timestamp::new(n as i64, (1, 30)),
+            data,
+            stream_index: 0,
+            is_key_frame: true,
+        };
+        match dec.decode(&pkt) {
+            Ok(Some(f)) => {
+                emitted.push(f.clone());
+                eprintln!(
+                    "NAL {n}: frame {}x{} len={}",
+                    f.width,
+                    f.height,
+                    f.data.len()
+                );
+                if std::env::var_os("FIELD_MATCH_SEARCH").is_some() {
+                    if let Some(refy) = &refyuv {
+                        let fl = f.width as usize * f.height as usize * 3 / 2;
+                        if fl > 0 && f.data.len() == fl {
+                            let mut matched = None;
+                            let nframes = refy.len() / fl;
+                            for ri in 0..nframes {
+                                if refy[ri * fl..(ri + 1) * fl] == f.data[..] {
+                                    matched = Some(ri);
+                                    break;
+                                }
+                            }
+                            eprintln!(
+                                "        emitted#{} (NAL {n}) matches ref index {matched:?}",
+                                emitted.len() - 1
+                            );
+                        }
+                    }
+                }
+                if let Some(refy) = &refyuv {
+                    let fl = f.width as usize * f.height as usize * 3 / 2;
+                    if refy.len() >= fl {
+                        let md = f.data[..fl]
+                            .iter()
+                            .zip(&refy[..fl])
+                            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+                            .max()
+                            .unwrap_or(0);
+                        let nd = f.data[..fl]
+                            .iter()
+                            .zip(&refy[..fl])
+                            .filter(|(a, b)| a != b)
+                            .count();
+                        eprintln!("        vs ref frame 0: max_diff={md} ndiff={nd}/{fl}");
+                    }
+                }
+                // Full per-frame comparison + field-parity split (luma only).
+                if let Some(refy) = &refyuv {
+                    let w = f.width as usize;
+                    let h = f.height as usize;
+                    let yl = w * h;
+                    let idx = emitted.len() - 1;
+                    if refy.len() >= yl * (idx + 1) {
+                        let r = &refy[yl * idx..yl * (idx + 1)];
+                        let (mut top_n, mut bot_n, mut tmax, mut bmax) =
+                            (0usize, 0usize, 0i32, 0i32);
+                        for y in 0..h {
+                            for x in 0..w {
+                                let d = (f.data[y * w + x] as i32 - r[y * w + x] as i32).abs();
+                                if d != 0 {
+                                    if y % 2 == 0 {
+                                        top_n += 1;
+                                        tmax = tmax.max(d);
+                                    } else {
+                                        bot_n += 1;
+                                        bmax = bmax.max(d);
+                                    }
+                                }
+                            }
+                        }
+                        eprintln!(
+                            "        frame {idx} luma: top-field ndiff={top_n} max={tmax} | bottom-field ndiff={bot_n} max={bmax}"
+                        );
+                        // Target frame for the row-band map / luma dump.
+                        let want: usize = std::env::var("DIFF_FRAME")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1);
+                        // Dump luma of our frame `want` plus the first few
+                        // reference frames for offline shift correlation.
+                        if idx == want {
+                            let dump = |tag: &str, src: &[u8]| {
+                                let p = std::env::temp_dir().join(tag);
+                                std::fs::write(&p, src).unwrap();
+                                eprintln!("          dumped {p:?}");
+                            };
+                            dump("triage_ours_f1.y", &f.data[..yl]);
+                            for rf in 0..4usize {
+                                if refy.len() >= yl * (rf + 1) {
+                                    dump(
+                                        std::format!("triage_ref_f{rf}.y").leak(),
+                                        &refy[yl * rf..yl * (rf + 1)],
+                                    );
+                                }
+                            }
+                        }
+                        // Row-band diff map (per-field-row counts, first 40 rows).
+                        if idx == want {
+                            // ASCII per-MB error map of each field: 45x30
+                            // grid, '.' <=8 wrong samples, '0'-'9' tens,
+                            // '#' >99. Field-row r of MB row R is 16R+r.
+                            for (_parity, tag) in [(0usize, "TOP"), (1usize, "BOT")] {
+                                eprintln!("          MB map {tag}:");
+                                for my in 0..(h / 16) {
+                                    let mut line = String::new();
+                                    for mx in 0..(w / 16) {
+                                        let mut wrong = 0usize;
+                                        for fr in 0..16 {
+                                            // 16*my+fr is a FRAME row: even rows
+                                            // belong to the top field, odd to
+                                            // the bottom.
+                                            let y = 16 * my + fr;
+                                            for x in (16 * mx)..(16 * mx + 16) {
+                                                if f.data[y * w + x] != r[y * w + x] {
+                                                    wrong += 1;
+                                                }
+                                            }
+                                        }
+                                        let c = if wrong <= 8 {
+                                            '.'
+                                        } else if wrong > 99 {
+                                            '#'
+                                        } else {
+                                            std::char::from_digit((wrong / 10) as u32, 10)
+                                                .unwrap_or('?')
+                                        };
+                                        line.push(c);
+                                    }
+                                    eprintln!("            {line}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None) => eprintln!("NAL {n}: no frame"),
+            Err(err) => {
+                eprintln!("NAL {n}: ERR {err}");
+                break;
+            }
+        }
+    }
+    if let Ok(rest) = dec.flush() {
+        emitted.extend(rest);
+    }
+    if let Some(out) = std::env::var_os("FIELD_DUMP_OUT") {
+        let mut blob = Vec::new();
+        for f in &emitted {
+            blob.extend_from_slice(&f.data);
+        }
+        std::fs::write(&out, blob).unwrap();
+        eprintln!("wrote {} frames to {out:?}", emitted.len());
+    }
+    for (idx, f) in emitted.iter().enumerate() {
+        eprintln!(
+            "FLUSHED emitted#{idx} {}x{} len={}",
+            f.width,
+            f.height,
+            f.data.len()
+        );
+    }
+    if let Some(refyuv) = refyuv {
+        let w = emitted.first().map(|f| f.width as usize).unwrap_or(0);
+        let h = emitted.first().map(|f| f.height as usize).unwrap_or(0);
+        let frame_len = w * h * 3 / 2;
+        let y_len = w * h;
+        let chroma_len = w * h / 4;
+        for (idx, f) in emitted.iter().enumerate() {
+            if f.data.len() != frame_len || refyuv.len() < frame_len * (idx + 1) {
+                continue;
+            }
+            let ours = &f.data;
+            let reference = &refyuv[idx * frame_len..(idx + 1) * frame_len];
+            let mut top_diff = 0usize;
+            let mut bottom_diff = 0usize;
+            let mut top_max = 0i32;
+            let mut bottom_max = 0i32;
+            let mut first_mb = None;
+            for y in 0..h {
+                for x in 0..w {
+                    let d = (ours[y * w + x] as i32 - reference[y * w + x] as i32).abs();
+                    if d != 0 {
+                        if y % 2 == 0 {
+                            top_diff += 1;
+                            top_max = top_max.max(d);
+                        } else {
+                            bottom_diff += 1;
+                            bottom_max = bottom_max.max(d);
+                        }
+                        if first_mb.is_none() {
+                            first_mb = Some((x / 16, y / 16));
+                        }
+                    }
+                }
+            }
+            let mut cb_diff = 0usize;
+            let mut cr_diff = 0usize;
+            let cb_start = y_len;
+            let cr_start = y_len + chroma_len;
+            for i in 0..chroma_len {
+                cb_diff += (ours[cb_start + i] != reference[cb_start + i]) as usize;
+                cr_diff += (ours[cr_start + i] != reference[cr_start + i]) as usize;
+            }
+            eprintln!(
+                "FRAME {idx}: top_diff={top_diff} top_max={top_max} bottom_diff={bottom_diff} bottom_max={bottom_max} cb_diff={cb_diff} cr_diff={cr_diff} first_mb={first_mb:?}"
+            );
+        }
+    }
+}

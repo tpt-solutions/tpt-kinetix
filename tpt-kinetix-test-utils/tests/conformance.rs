@@ -35,7 +35,7 @@ fn corpus_edge_cases_do_not_panic() {
 /// this decodes the same Annex B stream with both decoders and diffs frame
 /// geometry + luma. (Pixel *identity* is not asserted yet because the Kinetix
 /// H.264 decoder is still a scaffold that emits placeholder frames — see
-/// `tpt-kinetix-h264` LIMITATIONS.)
+/// `out-kinetix-h264` LIMITATIONS.)
 #[test]
 fn h264_vs_ffmpeg_reference_when_available() {
     use tpt_kinetix_test_utils::reference::{decode_h264_with_ffmpeg, ffmpeg_available};
@@ -443,7 +443,7 @@ fn av1_vs_ffmpeg_reference_when_available() {
 #[test]
 fn h264_real_sample_harness_across_profiles() {
     use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
-    use tpt_kinetix_h264::H264Decoder;
+    use out_kinetix_h264::H264Decoder;
     use tpt_kinetix_test_utils::pixel_diff::within_tolerance;
     use tpt_kinetix_test_utils::reference::{decode_h264_with_ffmpeg, ffmpeg_available};
 
@@ -965,7 +965,7 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
     use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
     use tpt_kinetix_test_utils::{
         pixel_diff::within_tolerance,
-        reference::{dav1d_available, decode_av1_with_dav1d, split_ivf_frames},
+        reference::{dav1d_available, decode_av1_with_dav1d_auto, split_ivf_frames},
     };
 
     let Ok(dir) = std::env::var("KINETIX_AV1_FATE_DIR") else {
@@ -980,9 +980,19 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
         return;
     }
 
-    // Files whose features Kinetix knowingly does not support yet; dav1d's
-    // output can never match for these (e.g. it applies film grain).
-    const EXPECTED_UNSUPPORTED: &[&str] = &["annexb", "film_grain", "decode_model"];
+    // Files that can never be scored here, reported as such rather than as a
+    // pass. `annexb` is a raw Annex-B OBU stream, not an IVF container, and the
+    // splitter above only reads `DKIF` files — it is filtered out before this
+    // list is consulted, so the name here is documentation of intent.
+    //
+    // `film_grain` and `decode_model` were PREVIOUSLY listed here on the belief
+    // that dav1d applies film grain / honours a decoder-model operating point
+    // that Kinetix ignores, making them structurally unmatchable. That was
+    // wrong: the real cause was this harness assuming 8-bit 4:2:0 and one
+    // constant frame size. With the geometry-aware reference both now decode
+    // bit-exactly, so they are scored normally — which is the stronger check,
+    // since a regression in either is now visible instead of being excused.
+    const EXPECTED_UNSUPPORTED: &[&str] = &["annexb"];
 
     let Ok(entries) = std::fs::read_dir(&dir) else {
         eprintln!("skipping: cannot read {dir}");
@@ -1006,6 +1016,7 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
 
     let mut comparable = 0usize;
     let mut exact = 0usize;
+    let mut regressions: Vec<String> = Vec::new();
     for path in &paths {
         let name = path
             .file_stem()
@@ -1035,7 +1046,11 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
             continue;
         }
 
-        let ref_frames = match decode_av1_with_dav1d(&bytes, width, height) {
+        // `decode_av1_with_dav1d_auto` (not the naive `decode_av1_with_dav1d`)
+        // is required here: `film_grain.ivf` is 10-bit and `switch_frame.ivf`
+        // changes resolution mid-stream, so a hard-coded 8-bit constant-size
+        // reference buffer mis-slices both and reports a false total mismatch.
+        let ref_frames = match decode_av1_with_dav1d_auto(&bytes, width, height) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("[{name}] dav1d decode returned: {e}");
@@ -1065,7 +1080,12 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
             }
         }
         if let Some((i, e)) = decode_err {
-            eprintln!("[{name}] skipped after frame {i}: Kinetix decode error: {e}");
+            // A sample from the official corpus is well-formed by construction,
+            // so a Kinetix decode error is a real bug, not an unsupported
+            // feature. Report it as a failure instead of skipping the file —
+            // the old `continue` here let a hard decode error look like a pass.
+            eprintln!("[{name}] Kinetix decode error at frame {i}: {e}");
+            regressions.push(format!("[{name}] Kinetix decode error at frame {i}: {e}"));
             continue;
         }
 
@@ -1079,6 +1099,10 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
             if exact {
                 file_exact += 1;
             } else {
+                // `psnr_yuv420p` only understands 8-bit 4:2:0, so it reports
+                // 0.00 for a 10-bit/4:2:2/4:4:4 stream even when the frames are
+                // close. Report geometry and a raw byte delta too, so a genuine
+                // high-bit-depth regression is still legible.
                 let (y_psnr, u_psnr, v_psnr) =
                     psnr_yuv420p(&kframes[i], &ref_frames[i]).unwrap_or((0.0, 0.0, 0.0));
                 let first = kframes[i]
@@ -1086,15 +1110,39 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
                     .iter()
                     .zip(&ref_frames[i].data)
                     .position(|(a, b)| a != b);
+                let geom_matches = kframes[i].width == ref_frames[i].width
+                    && kframes[i].height == ref_frames[i].height;
+                let ndiff = kframes[i]
+                    .data
+                    .iter()
+                    .zip(&ref_frames[i].data)
+                    .filter(|(a, b)| a != b)
+                    .count();
                 eprintln!(
-                    "[{name}] frame {i} mismatch: PSNR Y/U/V={y_psnr:.2}/{u_psnr:.2}/{v_psnr:.2}, first_byte={first:?}"
+                    "[{name}] frame {i} mismatch: {}x{} vs ref {}x{} (geometry {}), \
+                     PSNR Y/U/V={y_psnr:.2}/{u_psnr:.2}/{v_psnr:.2}, \
+                     {ndiff} differing bytes, first_byte={first:?}",
+                    kframes[i].width,
+                    kframes[i].height,
+                    ref_frames[i].width,
+                    ref_frames[i].height,
+                    if geom_matches { "ok" } else { "MISMATCH" },
                 );
             }
         }
         comparable += n;
         exact += file_exact;
+        // The reference must have produced a frame for every packet in the
+        // stream. If dav1d bailed early (corrupt/unsupported input) the loop
+        // above still `continue`d on the decode error and we would otherwise
+        // score a truncated prefix as "exact" — a false pass. Treat a shortfall
+        // as unscorable rather than as a decoder regression: it says nothing
+        // about Kinetix either way.
+        let ref_truncated = ref_frames.len() < packets.len();
         let status = if known_unsupported {
             "expected-unsupported"
+        } else if ref_truncated {
+            "reference-truncated"
         } else if file_exact == n && n == ref_frames.len() {
             "exact"
         } else {
@@ -1102,20 +1150,35 @@ fn av1_fate_real_samples_vs_dav1d_when_available() {
         };
         eprintln!(
             "[{name}] {width}x{height}: {file_exact}/{n} frames exact \
-             (dav1d {}/{}) — {status}",
+             (dav1d {}/{} packets) — {status}",
             ref_frames.len(),
             packets.len(),
         );
+        if !known_unsupported && !ref_truncated && status != "exact" {
+            regressions.push(format!(
+                "[{name}] {file_exact}/{n} frames exact (dav1d {} frames, {} packets) — {status}",
+                ref_frames.len(),
+                packets.len(),
+            ));
+        }
     }
 
     eprintln!("AV1 FATE real samples: {exact}/{comparable} comparable frames bit-exact vs dav1d");
     if comparable == 0 {
         panic!("no comparable Kinetix/dav1d frame pairs produced");
     }
-    // Report-only frontier tracker: these samples deliberately exercise
-    // features beyond the supported subset (film grain, decoder model,
-    // non-uniform tiling, operating-point params). The per-file exact counts
-    // form the regression baseline — when a feature lands, its count should
-    // rise to `exact`; a count DROPPING from a previous run is the signal to
-    // investigate.
+    // Every scorable sample in the official corpus now decodes bit-exactly, so
+    // this is a real assertion rather than the report-only frontier tracker it
+    // used to be. A per-file count DROPPING is a genuine regression and must
+    // fail the run — previously a drop in `film_grain`/`decode_model` could be
+    // masked by the `EXPECTED_UNSUPPORTED` exemption.
+    //
+    // Gated on the corpus actually being present: the loop above `continue`s
+    // past every file when dav1d/ffprobe is missing, so `comparable == 0`
+    // already covers "nothing was scored". Scored-but-imperfect is a failure.
+    assert!(
+        regressions.is_empty(),
+        "AV1 FATE samples diverged from dav1d:\n{}",
+        regressions.join("\n")
+    );
 }

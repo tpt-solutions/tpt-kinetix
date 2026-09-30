@@ -59,10 +59,9 @@ codec from a written spec rather than porting an existing C decoder.
 
 The roadmap targets **royalty-free formats only** (VP9, Opus, MP3, MPEG-TS). Any PR that
 adds or changes a codec crate must update the encumbrance table in
-[`PATENTS.md`](PATENTS.md), and — if the codec is patent-encumbered — wire it behind a
-default-on `codec-*` Cargo feature on `tpt-kinetix-pipeline` / `tpt-kinetix-cli` (as
-`tpt-kinetix-h264` is) so `cargo build --no-default-features`
-still produces a royalty-free-only engine. See `PATENTS.md` for the project's full
+[`PATENTS.md`](PATENTS.md), and — if the codec is patent-encumbered — keep it out of the published crates (name it `out-*`, set
+`publish = false`, and don't make `tpt-kinetix-pipeline` / `tpt-kinetix-cli` depend on it, as with
+`out-kinetix-h264`). See `PATENTS.md` for the project's full
 patent posture.
 
 ---
@@ -216,7 +215,7 @@ Current proptest suites:
 | File | Tested invariant |
 |------|-----------------|
 | `tpt-kinetix-demux/tests/proptest_mp4.rs` | `parse_mp4` and `parse_box_header` never panic |
-| `tpt-kinetix-h264/tests/proptest_nal.rs` | `parse_nal_units_from_annexb` and `remove_emulation_prevention_bytes` never panic |
+| `out-kinetix-h264/tests/proptest_nal.rs` | `parse_nal_units_from_annexb` and `remove_emulation_prevention_bytes` never panic |
 | `tpt-kinetix-av1/tests/proptest_obu.rs` | `parse_obu_sequence` never panics |
 
 ### Fuzz testing

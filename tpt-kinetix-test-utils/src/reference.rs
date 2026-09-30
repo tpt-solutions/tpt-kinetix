@@ -148,6 +148,156 @@ fn split_raw_yuv420p(
     Ok(frames)
 }
 
+/// Frame geometry and pixel format of an AV1 bitstream, probed with `ffprobe`.
+///
+/// Both fields matter for reference slicing and are easy to get wrong: the
+/// FATE AV1 corpus contains a **10-bit** stream (`film_grain.ivf`,
+/// `yuv420p10le`) and a stream that **changes resolution mid-sequence**
+/// (`switch_frame.ivf`, 852x480 for frames 0-29 then 426x240 for 30-31).
+/// Assuming 8-bit and/or a constant frame size makes the reference disagree
+/// with a *correct* decoder on every frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Av1StreamInfo {
+    /// The container-reported pixel format, e.g. `"yuv420p10le"`.
+    pub pix_fmt: String,
+    /// Per-frame `(width, height)` in ffprobe (output) order.
+    pub frames: Vec<(u32, u32)>,
+}
+
+/// Returns `true` if `ffprobe` is callable on this machine.
+pub fn ffprobe_available() -> bool {
+    binary_available("ffprobe")
+}
+
+/// Probe an AV1 bitstream's pixel format and per-frame geometry with `ffprobe`.
+///
+/// Returns `None` when `ffprobe` is unavailable, the probe fails, or the
+/// reported pixel format is not one of the planar YUV/grey layouts this crate
+/// can represent in [`PixelFormat`].
+///
+/// The bitstream is handed over through a temp file rather than stdin because
+/// some `ffprobe` builds cannot demux from a pipe without a seekable input.
+pub fn probe_av1_stream(bitstream: &[u8]) -> Option<Av1StreamInfo> {
+    if !ffprobe_available() {
+        return None;
+    }
+    let mut path = std::env::temp_dir();
+    path.push(format!("kinetix-ffprobe-av1-{}.ivf", std::process::id()));
+    std::fs::write(&path, bitstream).ok()?;
+
+    let run = |args: &[&str]| -> Option<String> {
+        let out = Command::new("ffprobe")
+            .args(args)
+            .arg(path.to_str()?)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+
+    let pix_fmt = run(&[
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=pix_fmt",
+        "-of",
+        "default=nw=1:nk=1",
+    ])?;
+    let pix_fmt = pix_fmt.trim().to_string();
+
+    let frame_list = run(&[
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "frame=width,height",
+        "-of",
+        "csv=p=0",
+    ])?;
+
+    let frames = frame_list
+        .lines()
+        .filter_map(|line| {
+            let mut it = line.trim().split(',');
+            let w: u32 = it.next()?.trim().parse().ok()?;
+            let h: u32 = it.next()?.trim().parse().ok()?;
+            (w > 0 && h > 0).then_some((w, h))
+        })
+        .collect::<Vec<_>>();
+
+    let _ = std::fs::remove_file(&path);
+    if frames.is_empty() || pixel_format_from_str(&pix_fmt).is_none() {
+        return None;
+    }
+    Some(Av1StreamInfo { pix_fmt, frames })
+}
+
+/// Map an ffmpeg pixel-format name to this crate's [`PixelFormat`].
+fn pixel_format_from_str(name: &str) -> Option<PixelFormat> {
+    Some(match name {
+        "yuv420p" => PixelFormat::Yuv420p,
+        "yuv422p" => PixelFormat::Yuv422p,
+        "yuv444p" => PixelFormat::Yuv444p,
+        "yuv420p10le" => PixelFormat::Yuv420p10le,
+        "yuv422p10le" => PixelFormat::Yuv422p10le,
+        "yuv444p10le" => PixelFormat::Yuv444p10le,
+        "yuv420p12le" => PixelFormat::Yuv420p12le,
+        "yuv422p12le" => PixelFormat::Yuv422p12le,
+        "yuv444p12le" => PixelFormat::Yuv444p12le,
+        "gray" => PixelFormat::Gray,
+        "gray10le" => PixelFormat::Gray10le,
+        "gray12le" => PixelFormat::Gray12le,
+        _ => return None,
+    })
+}
+
+/// Byte length of one planar frame of `format` at `width` x `height`.
+///
+/// Chroma is subsampled with the ceil-the-odd-dimension rule the decoders use
+/// (an odd width/height gets a chroma plane one sample larger), so this agrees
+/// with what [`Av1Decoder`](tpt_kinetix_av1::Av1Decoder) emits.
+fn planar_frame_len(width: u32, height: u32, format: PixelFormat) -> Option<usize> {
+    let w = width as usize;
+    let h = height as usize;
+    let (sub_x, sub_y, bits): (usize, usize, usize) = match format {
+        PixelFormat::Yuv420p | PixelFormat::Yuv422p | PixelFormat::Yuv444p => {
+            let sub_x = usize::from(format != PixelFormat::Yuv444p);
+            let sub_y = usize::from(format == PixelFormat::Yuv420p);
+            (sub_x, sub_y, 8)
+        }
+        PixelFormat::Yuv420p10le | PixelFormat::Yuv422p10le | PixelFormat::Yuv444p10le => {
+            let sub_x = usize::from(format != PixelFormat::Yuv444p10le);
+            let sub_y = usize::from(format == PixelFormat::Yuv420p10le);
+            (sub_x, sub_y, 10)
+        }
+        PixelFormat::Yuv420p12le | PixelFormat::Yuv422p12le | PixelFormat::Yuv444p12le => {
+            let sub_x = usize::from(format != PixelFormat::Yuv444p12le);
+            let sub_y = usize::from(format == PixelFormat::Yuv420p12le);
+            (sub_x, sub_y, 12)
+        }
+        PixelFormat::Gray | PixelFormat::Gray10le | PixelFormat::Gray12le => {
+            let bits: usize = match format {
+                PixelFormat::Gray => 8,
+                PixelFormat::Gray10le => 10,
+                _ => 12,
+            };
+            return w.checked_mul(h)?.checked_mul(bits.div_ceil(8));
+        }
+        // RGB variants are never produced by these reference paths.
+        PixelFormat::Rgb24 | PixelFormat::Bgr24 => return None,
+    };
+    let bytes = bits.div_ceil(8);
+    let cw = w.div_ceil(1 << sub_x);
+    let ch = h.div_ceil(1 << sub_y);
+    Some(w.checked_mul(h)?.checked_mul(bytes)? + 2 * cw.checked_mul(ch)?.checked_mul(bytes)?)
+}
+
 /// Feed `input` to `bin` on stdin and collect raw stdout bytes.
 fn run_piped(bin: &'static str, args: &[&str], input: &[u8]) -> Result<Vec<u8>, RefDecodeError> {
     if !binary_available(bin) {
@@ -261,6 +411,10 @@ pub fn decode_h264_with_ffmpeg(
 
 /// Decode an AV1 OBU / IVF bitstream with `dav1d`, returning YUV420p frames.
 ///
+/// **This assumes 8-bit 4:2:0 and a constant frame size.** Use
+/// [`decode_av1_with_dav1d_auto`] for streams that are high-bit-depth or
+/// change resolution mid-sequence (the FATE AV1 corpus contains both).
+///
 /// `dav1d` is invoked with `-o -` writing raw Y4M-less planar frames via the
 /// `yuv` muxer; `width`/`height` slice the output into frames.
 pub fn decode_av1_with_dav1d(
@@ -293,6 +447,110 @@ pub fn decode_av1_with_dav1d(
         return split_raw_yuv420p(&raw, width, height);
     }
     Err(RefDecodeError::BinaryUnavailable("dav1d"))
+}
+
+/// Decode an AV1 bitstream with `dav1d`, honouring the stream's real pixel
+/// format and its per-frame geometry.
+///
+/// This is the correct entry point for conformance work. The naive
+/// [`decode_av1_with_dav1d`] hard-codes 8-bit 4:2:0 and one frame size for the
+/// whole file, which silently mis-slices two real FATE AV1 streams:
+///
+/// - `film_grain.ivf` is `yuv420p10le`, so an 8-bit reference buffer is half
+///   the size of the decoder's output and *every* frame mismatches.
+/// - `switch_frame.ivf` is 852x480 for frames 0-29 and 426x240 for 30-31, so
+///   frames 30-31 are read at the wrong offset.
+///
+/// Geometry comes from [`probe_av1_stream`] (ffprobe). Falls back to the
+/// IVF-header geometry and 8-bit 4:2:0 when ffprobe is unavailable, so it
+/// never *fails* a run that the old path could handle — it just cannot fix up
+/// the two cases above without ffprobe.
+///
+/// `-noautoscale` is essential: it stops ffmpeg from padding the resolution-
+/// switched frames back up to the first frame's size, which would defeat the
+/// per-frame slicing.
+pub fn decode_av1_with_dav1d_auto(
+    ivf_or_obu: &[u8],
+    fallback_width: u32,
+    fallback_height: u32,
+) -> Result<Vec<VideoFrame>, RefDecodeError> {
+    let probed = probe_av1_stream(ivf_or_obu);
+    let (pix_fmt, format, mut geometries) = match &probed {
+        Some(info) => {
+            let Some(format) = pixel_format_from_str(&info.pix_fmt) else {
+                return Err(RefDecodeError::BinaryUnavailable("ffprobe"));
+            };
+            let geoms = info.frames.clone();
+            (info.pix_fmt.clone(), format, geoms)
+        }
+        None => ("yuv420p".to_string(), PixelFormat::Yuv420p, Vec::new()),
+    };
+    if geometries.is_empty() {
+        geometries.push((fallback_width, fallback_height));
+    }
+
+    if binary_available("dav1d") && probed.is_none() {
+        // The standalone `dav1d` CLI always emits 8-bit 4:2:0; only take this
+        // path when that is actually what the stream is.
+        let raw = run_dav1d_file(ivf_or_obu)?;
+        let (w, h) = geometries[0];
+        return split_raw_yuv420p(&raw, w, h);
+    }
+    if !ffmpeg_libdav1d_available() {
+        return Err(RefDecodeError::BinaryUnavailable("dav1d"));
+    }
+
+    let raw = run_piped(
+        "ffmpeg",
+        &[
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-pix_fmt",
+            &pix_fmt,
+            "-noautoscale",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ],
+        ivf_or_obu,
+    )?;
+
+    // Slice the flat buffer using each frame's own geometry.
+    let mut frames = Vec::new();
+    let mut off = 0usize;
+    for (i, (w, h)) in geometries.iter().copied().enumerate() {
+        let Some(len) = planar_frame_len(w, h, format) else {
+            break;
+        };
+        let Some(end) = off.checked_add(len) else {
+            break;
+        };
+        if end > raw.len() {
+            // Reference ran out early (e.g. a frame the probe counted that the
+            // decoder did not output). Keep what we have.
+            break;
+        }
+        frames.push(VideoFrame {
+            pts: Timestamp::new(i as i64, (1, 90_000)),
+            dts: Timestamp::new(i as i64, (1, 90_000)),
+            data: raw[off..end].to_vec(),
+            width: w,
+            height: h,
+            pixel_format: format,
+            is_key_frame: i == 0,
+        });
+        off = end;
+    }
+    if frames.is_empty() {
+        return Err(RefDecodeError::UnexpectedOutputSize {
+            expected_multiple: planar_frame_len(geometries[0].0, geometries[0].1, format)
+                .unwrap_or(0),
+            got: raw.len(),
+        });
+    }
+    Ok(frames)
 }
 
 /// Decode a raw low-overhead-bitstream AV1 OBU stream against `dav1d`,

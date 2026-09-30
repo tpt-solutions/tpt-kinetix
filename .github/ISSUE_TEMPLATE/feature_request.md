@@ -19,7 +19,7 @@ repeatable process is documented in `docs/adding-a-codec.md`.
 - [ ] tpt-kinetix-core
 - [ ] tpt-kinetix-demux
 - [ ] tpt-kinetix-mux
-- [ ] tpt-kinetix-h264
+- [ ] out-kinetix-h264
 - [ ] tpt-kinetix-av1
 - [ ] tpt-kinetix-kg
 - [ ] tpt-kinetix-pipeline

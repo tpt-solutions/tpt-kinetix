@@ -12,7 +12,7 @@ fn main() {
     let release = args.iter().any(|a| a == "--release");
     let crates: Vec<String> = if args.is_empty() || release && args.len() == 1 {
         vec![
-            "tpt-kinetix-h264".to_string(),
+            "out-kinetix-h264".to_string(),
             "tpt-kinetix-av1".to_string(),
             "tpt-kinetix-pipeline".to_string(),
         ]

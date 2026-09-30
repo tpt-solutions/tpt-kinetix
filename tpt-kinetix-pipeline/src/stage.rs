@@ -84,59 +84,6 @@ impl Stage for DemuxStage {
     }
 }
 
-// ── DecodeStage ──────────────────────────────────────────────────────────────
-
-/// Decode stage: receives [`PipelineMessage::Packet`]s and emits decoded
-/// [`PipelineMessage::Frame`]s via the H.264 decoder.
-///
-/// Only built when the `codec-h264` feature is enabled (on by default). H.264 is
-/// patent-encumbered — see `PATENTS.md`.
-#[cfg(feature = "codec-h264")]
-pub struct DecodeStage;
-
-#[cfg(feature = "codec-h264")]
-impl Stage for DecodeStage {
-    fn name(&self) -> &'static str {
-        "decode"
-    }
-
-    fn spawn(
-        self: Box<Self>,
-        input: Receiver<PipelineMessage>,
-        output: Sender<PipelineMessage>,
-    ) -> JoinHandle<Result<(), KinetixError>> {
-        std::thread::spawn(move || {
-            // Emit frames in presentation order so downstream filter/encode
-            // stages see a monotonic timeline for B-frame streams.
-            let mut decoder = tpt_kinetix_h264::H264Decoder::new().with_display_order();
-            for msg in input {
-                match msg {
-                    PipelineMessage::Packet(pkt) => match decoder.decode(&pkt) {
-                        Ok(Some(frame)) => {
-                            output.send(PipelineMessage::Frame(frame)).ok();
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            output.send(PipelineMessage::Error(e.to_string())).ok();
-                        }
-                    },
-                    PipelineMessage::Flush => {
-                        for frame in decoder.flush().unwrap_or_default() {
-                            output.send(PipelineMessage::Frame(frame)).ok();
-                        }
-                        output.send(PipelineMessage::Flush).ok();
-                        break;
-                    }
-                    other => {
-                        output.send(other).ok();
-                    }
-                }
-            }
-            Ok(())
-        })
-    }
-}
-
 // ── Vp9DecodeStage ───────────────────────────────────────────────────────────
 
 /// Decode stage: receives [`PipelineMessage::Packet`]s and emits decoded

@@ -75,6 +75,151 @@ fn encode(case: &Case, out: &std::path::Path) -> Option<Vec<u8>> {
     std::fs::read(out).ok()
 }
 
+/// Film grain on ODD frame dimensions with horizontally subsampled chroma.
+///
+/// A dedicated test because `libaom_crosscheck` cannot cover this: ffmpeg's
+/// `lavfi` + `libaom-av1` path silently rounds an odd `size=` down to the next
+/// even value (asking for 211x143 encodes 210x142), so no odd-dimension stream
+/// ever reaches the decoder through the usual helper. This test therefore
+/// generates the raw planar frames itself, pads each to the *ceil-chroma* frame
+/// size an odd width actually requires, and feeds that to libaom via the
+/// `rawvideo` demuxer, which preserves the odd geometry.
+///
+/// Regression: `apply_grain_to_frame` used to bail out entirely when
+/// `subsampling_x == 1 && width % 2 != 0`, leaving every frame ungrained.
+/// That cost ~39k differing bytes per frame against libdav1d; the chroma plane
+/// geometry the grain loop already used is ceil-correct, so the skip was
+/// simply wrong.
+#[test]
+fn libaom_film_grain_on_odd_dimensions_matches_libdav1d() {
+    if !ffmpeg_has("libaom-av1", "-encoders") || !ffmpeg_has("libdav1d", "-decoders") {
+        eprintln!("skipping: ffmpeg with libaom-av1 and libdav1d not available");
+        return;
+    }
+    let dir = scratch_dir();
+
+    // Odd width AND odd height, plus an odd width with even height and the
+    // reverse, so both ceil rules in the chroma plane are exercised.
+    let sizes = [(211u32, 143u32), (213, 145), (165, 83), (101, 67)];
+
+    let mut failures = Vec::new();
+    for (i, (w, h)) in sizes.iter().copied().enumerate() {
+        let (w, h) = (w as usize, h as usize);
+        // Odd dimensions need ceil'd chroma, which is what a real encoder's
+        // frame size is; ffmpeg's own rawvideo writer uses the same rule.
+        let frame_size = w * h + 2 * w.div_ceil(2) * h.div_ceil(2);
+        let raw = dir.join(format!("grain_odd_{i}.yuv"));
+        let gen = Command::new("ffmpeg")
+            .args([
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc2=size={w}x{h}:rate=10"),
+                "-t",
+                "0.6",
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "rawvideo",
+            ])
+            .arg(&raw)
+            .stdin(Stdio::null())
+            .status();
+        if !gen.ok().is_some_and(|s| s.success()) {
+            eprintln!("skipping {w}x{h}: raw frame generation failed");
+            continue;
+        }
+        // ffmpeg's rawvideo writer truncates the last partial frame, so trim to
+        // a whole number of frames and re-emit.
+        let Ok(bytes) = std::fs::read(&raw) else {
+            eprintln!("skipping {w}x{h}: cannot read generated frames");
+            continue;
+        };
+        let whole = bytes.len() / frame_size;
+        if whole == 0 {
+            eprintln!("skipping {w}x{h}: no complete frames generated");
+            continue;
+        }
+        std::fs::write(&raw, &bytes[..whole * frame_size]).expect("trim raw frames");
+
+        let ivf = dir.join(format!("grain_odd_{i}.ivf"));
+        let enc = Command::new("ffmpeg")
+            .args([
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-s",
+                &format!("{w}x{h}"),
+                "-r",
+                "10",
+                "-i",
+            ])
+            .arg(&raw)
+            .args([
+                "-c:v",
+                "libaom-av1",
+                "-cpu-used",
+                "4",
+                "-aom-params",
+                "film-grain-test=4",
+                "-f",
+                "ivf",
+            ])
+            .arg(&ivf)
+            .stdin(Stdio::null())
+            .status();
+        if !enc.ok().is_some_and(|s| s.success()) {
+            eprintln!("skipping {w}x{h}: libaom encode failed");
+            continue;
+        }
+
+        // Guard the geometry assumption: a silent round-to-even would make this
+        // test vacuous, so assert the stream really is the odd size.
+        let encoded = std::fs::read(&ivf).expect("read encoded ivf");
+        if encoded.len() < 16 {
+            eprintln!("skipping {w}x{h}: truncated IVF header");
+            continue;
+        }
+        let ew = u16::from_le_bytes([encoded[12], encoded[13]]) as u32;
+        let eh = u16::from_le_bytes([encoded[14], encoded[15]]) as u32;
+        if ew != w as u32 || eh != h as u32 {
+            eprintln!("skipping {w}x{h}: encoder produced {ew}x{eh} (geometry not preserved)");
+            continue;
+        }
+
+        let Some(expected) = reference(&encoded, "yuv420p") else {
+            eprintln!("skipping {w}x{h}: reference decode failed");
+            continue;
+        };
+        let actual = decode_all(&encoded);
+        if actual.len() != expected.len() {
+            failures.push(format!(
+                "{w}x{h}: length mismatch ours={} ref={}",
+                actual.len(),
+                expected.len()
+            ));
+            continue;
+        }
+        let differing = actual.iter().zip(&expected).filter(|(a, b)| a != b).count();
+        if differing != 0 {
+            failures.push(format!("{w}x{h}: {differing} differing bytes"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "odd-dimension film grain diverged from libdav1d:\n{}",
+        failures.join("\n")
+    );
+}
+
 /// Reference decode through ffmpeg + libdav1d (grain applied, as dav1d does).
 fn reference(ivf: &[u8], pix_fmt: &str) -> Option<Vec<u8>> {
     let mut child = Command::new("ffmpeg")

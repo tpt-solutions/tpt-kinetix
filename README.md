@@ -31,7 +31,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4 and MPEG-TS input, format-sniffed). `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path, H.264 input the `codec-h264` path. `stream` is still a stub. |
+| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4 and MPEG-TS input, format-sniffed). `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path (VP9 is the only supported transcode input). `stream` is still a stub. |
 
 > ⚠️ **Decode correctness:** The H.264 and VP9 decoders report
 > `pixel_exact: true` for their supported subsets (H.264: CAVLC/CABAC
@@ -42,10 +42,10 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 > decoder is not yet pixel-exact. Call `capabilities()` (or
 > `tpt-kinetix probe`) to check at runtime.
 
-> ⚖️ **Patents:** H.264 (`tpt-kinetix-h264`) is patent-encumbered. This
+> ⚖️ **Patents:** H.264 (`out-kinetix-h264`) is patent-encumbered, so it is
+> unfinished, unpublished and not used by the CLI or pipeline. This
 > project ships source only and obtains no patent
-> licenses. See [PATENTS.md](PATENTS.md) for the full posture and how to build a
-> royalty-free-only engine (`cargo build --workspace --no-default-features`).
+> licenses. See [PATENTS.md](PATENTS.md) for the full posture.
 
 ---
 
@@ -89,7 +89,7 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-mux         — container muxers (progressive MP4 for H.264)
 │
-├── tpt-kinetix-h264        — H.264 / AVC decoder (NAL-unit parser + slice decoder)
+├── out-kinetix-h264        — H.264 / AVC decoder (NAL-unit parser + slice decoder)
 │
 ├── tpt-kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
 │
@@ -229,7 +229,7 @@ coherent and avoids mixed-version combinations.
 Crates must be published to crates.io in dependency order to satisfy the registry resolver:
 
 1. `tpt-kinetix-core`
-2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
+2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `out-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
 3. `tpt-kinetix-pipeline` *(depends on the codec/demux crates above)*
 4. `tpt-kinetix-stream` *(independent of pipeline, but published after for consistency)*
 5. `tpt-kinetix-cli` *(depends on `tpt-kinetix-pipeline` and `tpt-kinetix-stream`)*
@@ -240,7 +240,7 @@ Before running `cargo publish` for the first time, **manually reserve each crate
 crates.io by publishing a minimal `0.0.1` placeholder, or by logging in and creating the crate
 entry. This prevents name squatting. The names to reserve are:
 
-`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg`,
+`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-mux`, `out-kinetix-h264`, `tpt-kinetix-av1`, `tpt-kinetix-kg`,
 `tpt-kinetix-pipeline`, `tpt-kinetix-stream`, `tpt-kinetix-cli`
 
 ---

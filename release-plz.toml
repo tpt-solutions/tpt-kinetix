@@ -31,8 +31,8 @@ name = "tpt-kinetix-mux"
 publish = true
 
 [[package]]
-name = "tpt-kinetix-h264"
-publish = true
+name = "out-kinetix-h264"
+publish = false
 
 [[package]]
 name = "tpt-kinetix-av1"

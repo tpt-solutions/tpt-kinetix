@@ -12,7 +12,7 @@ from collections import defaultdict
 
 TEMP = os.environ["TEMP"]
 DUMP = os.path.join(TEMP, "capa1f")
-REF = "tpt-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B_dec.yuv"
+REF = "out-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B_dec.yuv"
 W, H = 352, 288
 # A coded field is FULL width, HALF height. (Getting this wrong as (W//2, H//2)
 # silently compares the left half of our field against a half-width reference

@@ -1,5 +1,12 @@
 # TPT Kinetix — Task Index
 
+> **DECISION 2026-09-30: H.264 will NOT be published** (patents cover decode as well as encode; this repo ships no patent licenses). DONE the same day: crate and directory renamed `tpt-kinetix-h264` -> `out-kinetix-h264` (`out-` = outside the published set), `publish = false`, removed from release-plz publishing, the `codec-h264` feature/dependency and `DecodeStage` (H.264-only) removed from `tpt-kinetix-pipeline`/`tpt-kinetix-cli` (CLI transcode now VP9-input only, the dead `--vcodec h264` stub is gone), PATENTS.md/README/CLAUDE.md/CONTRIBUTING updated. Only the unpublished `tpt-kinetix-test-utils` still depends on it. Workspace build, clippy `-D warnings` and tests pass. The H.264 work below is retained as local/reference work only, deprioritised behind AV1/VP9; historical notes below still use the old `tpt-kinetix-h264` name in places.
+>
+> **2026-09-30 H.264 re-verification:** see the todo-h264.md index row below; it was rewritten from fresh measurements (273 lib tests, 15/15 matrix, ITU 38/64 clips byte-exact, 26 not). The 2026-09-29 'best remaining target' (`cavlc_mot_picaff0_full_B`) now reads byte-exact.
+>
+> AV1 index row refreshed 2026-09-30 (sessions #11-#12, commits up to e2f3309); the
+> rest of this index is unchanged from the 2026-09-29 reconciliation below.
+>
 > Last reconciled: 2026-09-29, second pass — **two claims from the `db7b162`
 > commit were measured and found wrong; both index rows are corrected.**
 > (1) The H.264 deblock "Table 8-16 floor" change was a real regression
@@ -25,10 +32,10 @@
 
 > **CORRECTION (2026-09-29 session b): the "no fixtures on disk" claim below is
 > ALSO wrong — fixtures and `ffmpeg` both work here.** Verified directly:
-> `tpt-kinetix-h264/tests/fixtures/itu/cavlc_mot_picaff0_full_B/` holds both
+> `out-kinetix-h264/tests/fixtures/itu/cavlc_mot_picaff0_full_B/` holds both
 > `cvmp_mot_picaff0_full_B.26l` and `cvmp_mot_picaff0_full_B_rec.yuv`, and
 > `ffmpeg` is on `PATH`. The earlier note's *methodological* warning still
-> stands and is the real lesson: `cargo test -p tpt-kinetix-h264 --test
+> stands and is the real lesson: `cargo test -p out-kinetix-h264 --test
 > itu_conformance` was run without `--nocapture`, which hides a passing test's
 > stdout, so the run printed (and hid) the skip line the whole time. Always
 > pass `--nocapture` (or grep for the skip line) before believing a
@@ -39,15 +46,15 @@
 >
 > **2026-09-05 reconciliation note.** Verified against the actual working tree
 > (not just prior todo.md prose), per `CLAUDE.md`'s "check code before trusting
-> todo.md checkboxes": `cargo test -p tpt-kinetix-h264 --lib` (264 passed),
-> `cargo test -p tpt-kinetix-h264 --test itu_conformance` (reported 12/12
+> todo.md checkboxes": `cargo test -p out-kinetix-h264 --lib` (264 passed),
+> `cargo test -p out-kinetix-h264 --test itu_conformance` (reported 12/12
 > `BitExact` clips exact, but see the correction above — this run's fixtures
 > were actually missing and the test silently skipped), `cargo test -p
 > tpt-kinetix-av1 --lib` (139 passed), and
 > `cargo fmt --all --check` are all clean at HEAD. **Found and fixed a real
 > `just clippy`/`just check` regression**: `cargo clippy --workspace
 > --all-targets -- -D warnings` was failing (`nonminimal_bool` in
-> `tpt-kinetix-h264/src/ref_pic.rs`'s `trace_ref_list` debug helper and in the
+> `out-kinetix-h264/src/ref_pic.rs`'s `trace_ref_list` debug helper and in the
 > scratch `tests/dbg_mbaff_oracle.rs`/`tests/dbg_p_oracle_replay.rs` CABAC-CBP
 > oracle helpers, plus an `unnecessary_cast` in `tests/dbg_engine_diff.rs`) —
 > these are exactly the kind of "left uncommitted, not cleaned up" debug
@@ -207,8 +214,8 @@ conformance/bench reporting; AV1 rav1e-backed encoder.
 
 | File | Codec | Status |
 |------|-------|--------|
-| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | **2026-09-29: the deblock "Table 8-16 floor" change from `db7b162` is REVERTED — measured as a real regression, 15/15 → 11/15 bit-exact.** The bS = 1 clause is a disjunction over motion-vector difference, not a floor on every inter/inter boundary: an identical-MV, zero-coefficient edge satisfies no clause, so bS = 0 is correct. The "JM and ffmpeg both derive a minimum of 1" claim was never verified and is false there. Do not reintroduce without a reference trace. The `KINETIX_B_FIELD_MB_DBG` 8 → 45 MB probe widening was kept (debug-only). **Verified at this commit: 273 lib tests pass; `conformance_matrix` 15 bit-exact / 0 unexpected failures; `itu_conformance` 64 clips, 34 hard-checked bit-exact, 0 failures (up from 33 — the ITU fixtures ARE on disk here, so the old "no fixtures" caveat no longer applies).** `capabilities().pixel_exact == true` for progressive/PAFF/MBAFF holds. **2026-09-29 2nd/3rd sessions — the "Remaining" list in todo-h264.md was stale and has been re-measured against the fixtures on disk:** `BA1_FT_C`, `CABAST3_Sony_E` and `CABACI3_Sony_B` are now **byte-exact** (`max_diff=0 diff_bytes=0`), and `CAMA1_Sony_C` has **no fixture on this machine** (unverified, not known-failing). The `c_p8x8` item is **deprioritised**: its prescribed next step (an L0-vs-L1 ref-list swap check) was already ruled out by session #31's REFLIST dump on that clip — its B slices have single-entry lists, so there is no ordering freedom to get wrong. **The best-measured remaining target is `cavlc_mot_picaff0_full_B`**, and the 3rd session **proved** the cause: ffmpeg's decode of this clip is byte-identical to the ITU reference, and our decode with `KINETIX_SKIP_DEBLOCK=1` is byte-identical to `ffmpeg -skip_loop_filter all` on **all 30 frames** (0 differing samples). So reconstruction, motion compensation and the entropy decode are *provably* correct for this clip and **100% of its 2348-sample divergence is the in-loop deblocking filter** (21/30 frames bit-exact, `max_diff=4`, 93.89% of differing luma within 3px of a macroblock edge). Tooling now in place to finish it: `dbg_itu_localize::compare_against_external_ref` (diff against any raw-YUV via `ITU_EXT_REF`, giving a pre-deblock oracle), `KINETIX_DBG_FIELD_BS` (per-edge bS/alpha/beta/tc0 trace on the field deblock path, which the existing `KINETIX_DBG_BS` gate never reaches; now carries a `pic=P|B|FRAME` tag because a PAFF stream deblocks a P and a B field at identical coordinates), and `KINETIX_FORCE_BS` (override one edge's bS, per-segment). **2026-09-29 session (b): the per-segment bS search is now DONE and it REFUTES the bS hypothesis.** `derive_bs_pair` was audited line-by-line against ffmpeg's `check_mv` (h264_loopfilter.c L438-466) and matches exactly, including the `+3>=7U` x-trick, the `ref_cache[0][b]!=-1` guard, the `list_count==2` block and the mirrored-list check; and forcing every segment of every implicated edge to 0..4 moves the frame-1 residual only within 119-141 against a 123 baseline — never toward zero. Also newly measured: the failure is **exclusively in B-field pictures** (all 9 bad frames odd; every P field byte-exact). **So this is a diffuse multi-edge alpha/beta/tC0-or-QP question, not a bS bug — do not resume the bS sweep.** Next: audit the luma filter *application* (dump pre-deblock p0..p3/q0..q3 + alpha/beta/tC0 for one implicated B edge vs ffmpeg's `h264_loop_filter_luma`), confirming boundary QP is the `(qp_p+qp_q+1)>>1` average and `FilterOffsetA/B` are applied as `2*div2`; the chroma path (pinned at 55 samples on frame 1) is still unexamined. Also open: `HCHP1_HHI_B` (Intra_4x4 DC-pred availability for inter-coded neighbour MBs, localized); full multi-slice-picture decode and full-resync recovery are still not implemented. |
-| [todo-av1.md](todo-av1.md) | AV1 decoder | **2026-09-30: loop restoration is ALREADY implemented and on by default (older "parsed-for-sync-only" claims are stale). Real bug found+fixed: `crop_planes` derived the chroma stride by halving the luma stride, which is 4:2:0-only, so every 4:2:2 stream PANICKED (d07f53a; 4:2:0/4:4:4/mono unaffected, crosscheck 15/15). 4:2:2/4:4:4 still not pixel-exact. Monochrome now bit-exact end-to-end (99c3522). |
+| [todo-h264.md](todo-h264.md) | H.264/AVC decoder | **Re-measured 2026-09-30 (this pass, nothing assumed from prose): `cargo test -p out-kinetix-h264 --lib` 273 pass; `conformance_matrix` 15 bit-exact / 0 unexpected failures (`interlaced_i` skipped: encoder can't generate it); `itu_conformance --nocapture` 64 clips present, 34 hard-checked bit-exact, 0 failures, but only 38/64 clips are actually byte-exact.** **Not exact (26):** (a) 3 produce no frames at all: `HVLCFI0_Sony_B`, `Hi422FR1_SONY_A`, `Hi422FREXT16_SONY_A` (4:2:2/>8-bit Hi422 is unsupported by design; HVLCFI0 uncharacterised). (b) Real-world MBAFF inter streams, all far off (max_diff 128-255): `CAMA1_TOSHIBA_B`, `CAMA3_Sand_E`, `CAMANL1_TOSHIBA_B`, `CAMANL3_Sand_E`, `CAMP_MOT_MBAFF_L30`, `CANLMA3_Sony_C`, `CAPAMA3_Sand_F`, `cama1_vtc_c`, `cama2_vtc_b`, `cabac_mot_mbaff0_full`, `cavlc_mot_mbaff0_full_B`; `CAMA1_Sony_C` (real MBAFF CABAC I) now HAS a fixture on disk and is close but not exact (max_diff 32, 105k bytes; the earlier 'no fixture' note is stale). The synthetic MBAFF corpus is exact, so these expose gaps the synthetic streams miss (temporal direct, multi-slice, ref-list/MMCO in field MBs). (c) PAFF/field: `cabac_mot_picaff0_full` (only 143k bytes bad, first bad frame 5, 26/30 frames exact - the smallest real-clip residual left), `HCAFF1_HHI_B`. (d) FRExt/High: `FREXT01_JVC_D`, `FREXT02_JVC_C`, `FRExt2_Panasonic_C`, `FRExt4_Panasonic_B`, `freh7_b`, `HCHP3_HHI_A`, `HCHP1_HHI_B` (Intra_4x4 DC-pred availability next to inter neighbours; error propagates down the GOP-16). (e) Error-resilience/multi-slice: `FM1_BT_B`, `FM1_FT_E` (FMO/ASO; FM1_FT_E is exact until frame 119). **`cavlc_mot_picaff0_full_B` (the 2026-09-29/30 deblock-residual target) now reads max_diff=0 / diff_bytes=0 in `itu_conformance` (informational, not hard-checked)**; this contradicts the 2026-09-30 harness numbers in todo-h264.md (`y_bad=123 c_bad=55`), which were probably measured against a corrupted reference (scratch `.yuv` in the fixture dir; the dir is clean now) - treat those numbers and the B-field deblock chase as CLOSED pending a re-run of that harness, and promote the clip to hard-checked. **Known unimplemented (from CLAUDE.md, still true):** multi-slice pictures, non-4:2:0 chroma, >8-bit, B temporal direct in some paths (`NotPixelExact` in strict mode), full resync/error recovery. `capabilities().pixel_exact == true` covers progressive/PAFF/MBAFF synthetic streams only. **Suggested order:** promote `cavlc_mot_picaff0_full_B`; `cabac_mot_picaff0_full` (frame 5); `CAMA1_Sony_C` (max_diff 32); multi-slice pictures (likely unlocks the FM1_* and several MBAFF clips); then the MBAFF real-stream family. Uncommitted: `out-kinetix-h264/fuzz_slowest_input.bin` only. |
+| [todo-av1.md](todo-av1.md) | AV1 decoder | **2026-09-30 (later, sessions #11-#13): #13 re-measured the old "libaom inter streams mismatch from frame 1" claim and it is STALE — 68 randomized streams (6 sources x 420/422/444 x 8/10/12-bit x cpu-used 0..6) plus a 60-frame 352x288 clip are bit-exact on every frame vs libdav1d (new dev tool `examples/dbg_inter_sweep.rs`, uncommitted). libaom-vs-dav1d crosscheck drove ~12 decoder fixes; FATE 204/204, film grain (incl. 4:2:2/4:4:4), lossless, segmentation, quantizer matrices, 10/12-bit 4:2:2/4:4:4 output formats all landed. 4:2:2/4:4:4 (8/10/12-bit) keyframes and inter now bit-exact vs libdav1d (9 causes: post-filters hard-coded 4:2:0, U/V transform-block order, chroma deblock grid, RefSlot chroma geometry, odd-width chroma ceil, 12-bit SGR overflow, profile-2 bit-depth detection, ...). #12 fixed three more found by the dav1d `r=` desync walk: `byte_align` rejected the `trailing_bits()` stop bit, deblock `filter4_clamp` applied once instead of twice, inter chroma `TxBlockCtx` used transform-block size instead of coded-block size (e2f3309). Open: film grain on odd-width frames (skipped by design); `capabilities().pixel_exact` policy call. Earlier same day: loop restoration is ALREADY implemented and on by default (older "parsed-for-sync-only" claims are stale). Real bug found+fixed: `crop_planes` derived the chroma stride by halving the luma stride, which is 4:2:0-only, so every 4:2:2 stream PANICKED (d07f53a; 4:2:0/4:4:4/mono unaffected, crosscheck 15/15; 4:2:2/4:4:4 have since become bit-exact, see above). Monochrome now bit-exact end-to-end (99c3522). |
 | [todo-aac.md](todo-aac.md) | Native AAC-LC decoder | Phases 1-7 COMPLETE (2026-08-23): conformance vs ffmpeg passes a real assertion (max-abs-diff 0.021 < 0.05 tolerance, channel-0 correlation 0.995); root cause of the long-standing "amplitude" gap was a Princen-Bradley/TDAC violation in `window.rs` (half-windows built with denominator `n` instead of the full length `2n`), not a scale constant. 2026-08-25: `prev_shape` fix landed (production decode path wasn't updating window shape after synthesis). 2026-08-28: PNS scale fix (`pns.rs` now uses `dequant_scale(global_gain, sf)`, correcting noise_mono corr from 0.52 → 0.87 and noise_stereo max_diff from 0.059 → 0.029). Phase 3 (TNS independent reference) and Phase 5 (window-sequence proptest) exit criteria now verified/fulfilled. sweep_stereo outlier investigated: TNS ruled out (error is above the TNS band range; with_TNS==without_TNS at all bins). **2026-08-30: PNS / `noise_mono` gap CLOSED** — separate `noise_sfo` DPCM predictor (`scalefactors.rs`) + `pns.rs` `dequant_scale`; 6/7 conformance cases now bit-exact (max_diff ≤4e-7, corr 1.0000) and `noise_mono` passes the real aggregate gate (no special case). **Only `sweep_stereo_44100` remains**: single peak-sample outlier max_diff 0.0725 / corr 1.0000, one ESC-magnitude coeff ~0.14% off, every suspect ruled out, needs a bit-for-bit ffmpeg trace; kept as a documented gate exception. `pixel_exact` stays `false` until closed. All AAC changes committed (`e1ffbf4`, `2888aac`). |
 | [todo-codecs.md](todo-codecs.md) | Lean / Realtime / Vision / Lossless / Screen / Face / Volumetric | Specialist codecs backlog. **2026-09-29: `tpt-kinetix-vision` decode shell hardened** (see Phase 15 in todo-codecs.md) — declared-but-unimplemented header features (`version != 1`, 10-bit, fractional `qp_precision`, multi-stream, embedded quant matrix id 3) now reject with `Unsupported`; block sizes bounded to the design range 8x8..64x64; `quant::matrix_pos` folds 4x4/16x16/32x32/64x64 coefficients onto the fixed 8x8 matrices (this was an out-of-bounds panic for any non-8x8 block); exact block-count contract turns truncated rANS payloads into `Parse` errors instead of index panics; `fuzz_vision_parser` target added. 32 tests, clippy-clean. **Open: 10-bit path, embedded quant matrices, multi-size partitioning, mAP-vs-bitrate harness.** `pixel_exact: false`. |
 
@@ -271,7 +278,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > **Last reconciled with code/git:** 2026-08-17. Drift closed since the last
 > edit: H.264 Phase F.2 (`predict_8x8` full 16-sample neighbour set) is
 > confirmed done by source inspection — the earlier "clamped at 7" note was
-> stale, now marked `[x]`; `tpt-kinetix-h264` compiles cleanly (the
+> stale, now marked `[x]`; `out-kinetix-h264` compiles cleanly (the
 > `cabac_b.rs` visibility errors noted in AV1 session notes are resolved);
 > `conformance_matrix.rs` already correctly labels CABAC P/B as
 > `unsupported: false / expect: BitExact` (the "stale label" warning in prior
@@ -341,7 +348,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > them as a real 4-pass native pipeline, `syntax.rs` gained full CCE
 > (coupling-channel-element) parsing, and the `symphonia-codec-aac`/
 > `symphonia-core` dependency was deleted from root `Cargo.toml` — `cargo
-> build --workspace` and `tpt-kinetix-h264`'s 224 unit tests both pass again
+> build --workspace` and `out-kinetix-h264`'s 224 unit tests both pass again
 > (the "H.264 crate broken" state some earlier notes above warned about no
 > longer holds), and `cargo deny check licenses` no longer fails on MPL-2.0.
 > **But** the real ffmpeg round-trip conformance test is still vacuous — native
@@ -369,7 +376,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > respectively, ~3050-3070/4608 differing samples, both with deblocking on and
 > off) — this is progress (the path is real and reachable now, not previously
 > validated at all) but Phase F.4's "validate bit-exact" checkbox stays open.
-> Also added (then deleted after use) `tpt-kinetix-h264/examples/dbg_mandelbrot_nogate.rs`,
+> Also added (then deleted after use) `out-kinetix-h264/examples/dbg_mandelbrot_nogate.rs`,
 > a scratch repro harness pointing at a session-local temp path; it found and
 > confirmed the `idct_8x8` transpose bug documented in Phase F.4 below before
 > being removed. Recreate similarly if further isolation is needed.
@@ -430,7 +437,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > `symphonia-core` dependency lines are deleted, and `tpt-kinetix-aac`'s public
 > re-exports (`lib.rs`) now expose the new CCE types. `cargo test -p
 > tpt-kinetix-aac --lib` is green (60 tests), and — notably — `cargo build
-> --workspace` and `cargo test -p tpt-kinetix-h264 --lib` (224 tests) both now
+> --workspace` and `cargo test -p out-kinetix-h264 --lib` (224 tests) both now
 > pass too, so the "H.264 crate broken in the working tree" state some earlier
 > session notes above warned about is **no longer the case**.
 > \
@@ -462,8 +469,8 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > it rather than re-enable once Phase 6 lands for real.
 
 > **2026-08-14 session note — working-tree corruption found and cleaned up.**
-> Before this reconciliation, ~44 files under `tpt-kinetix-h264/examples/` and
-> `tpt-kinetix-h264/tests/` had been corrupted by some prior process that
+> Before this reconciliation, ~44 files under `out-kinetix-h264/examples/` and
+> `out-kinetix-h264/tests/` had been corrupted by some prior process that
 > repeatedly concatenated other files' full contents into each other (e.g.
 > `tests/high_profile_8x8_conformance.rs` had grown from 250 lines to 213,613
 > lines of duplicated content from unrelated test files, and the crate failed
@@ -533,7 +540,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 >   committed. Neither is tracked elsewhere in this file — worth a follow-up
 >   item since they contradict the "unit tests pass" assumption baked into
 >   several `[x]` checkboxes above. **RESOLVED 2026-08-16 (uncommitted):**
->   both now pass (`cargo test -p tpt-kinetix-h264 --lib -- \
+>   both now pass (`cargo test -p out-kinetix-h264 --lib -- \
 >   field_mv_scaling_same_parity_doubles predict_8x8_vertical`) — fixed as a
 >   side effect of two real bugs found in `prediction.rs`/`transform.rs`
 >   while working the Phase F.4 8×8-transform investigation:
@@ -543,7 +550,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 >   `dequant_idct_8x8`'s `normAdjust8x8` position-class lookup used
 >   `raster % 16` instead of the correct within-4×4-sub-block position
 >   (`((raster >> 3) & 3) * 4 + (raster & 3)`). Full `cargo test -p
->   tpt-kinetix-h264 --lib` is green (224/224), and the CAVLC/P/B conformance
+>   out-kinetix-h264 --lib` is green (224/224), and the CAVLC/P/B conformance
 >   suites are still bit-exact (no regressions). **However, this did NOT move
 >   the Phase F.4 High-profile 8×8 conformance numbers at all** — re-ran
 >   `high_profile_8x8_conformance`/`high_profile_8x8_cabac_conformance` and
@@ -578,7 +585,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 >   investigation are gone from the working tree as of 2026-08-16 (removed,
 >   presumably during further uncommitted work — not by this note).
 > - **H.264: two new scratch diagnostic test harnesses**,
->   `tpt-kinetix-h264/tests/mandelbrot_cavlc.rs` (dumps per-block CAVLC
+>   `out-kinetix-h264/tests/mandelbrot_cavlc.rs` (dumps per-block CAVLC
 >   `nC`/`TotalCoeff`/`TrailingOnes`/coeffs for every macroblock of a real
 >   `ffmpeg`-encoded mandelbrot clip via `MapTracer`) and
 >   `tests/mandelbrot_cavlc_oracle.rs` (traces CAVLC bit-position-after-each-
@@ -1673,14 +1680,14 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > context/step formula, the compile-fixes to `dr_z1`/`dr_z3`, and the
 > `filter_intra_edge` clamp bug were all checked against the spec pseudocode
 > directly. `av1_intra_corpus_vs_dav1d_when_available` and `corpus-check`
-> could not be run this session — `tpt-kinetix-h264` has unrelated,
+> could not be run this session — `out-kinetix-h264` has unrelated,
 > currently-uncommitted compile breakage (private-method-visibility errors
 > in `slice_data/cabac_b.rs`, not touched this session) that blocks anything
 > depending on `tpt-kinetix-test-utils`; `cargo run -p tpt-kinetix-av1
-> --example av1_psnr_check` (standalone, no `tpt-kinetix-h264` dependency)
+> --example av1_psnr_check` (standalone, no `out-kinetix-h264` dependency)
 > was used instead.
 >
-> **Next session**: (1) fix the unrelated `tpt-kinetix-h264` build breakage
+> **Next session**: (1) fix the unrelated `out-kinetix-h264` build breakage
 > so `corpus-check`/`conformance`/the dav1d-reference test can run again;
 > (2) palette mode (`palette_mode_info()`, §5.11.46) is the next syntax
 > element this file skips entirely — likely the next desync source once
@@ -1760,7 +1767,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > remains an unreliable signal until (1) below lands and a real bit-exact
 > corpus comparison is possible again.
 >
-> **Next session**: (1) is still the top blocker — `tpt-kinetix-h264`'s
+> **Next session**: (1) is still the top blocker — `out-kinetix-h264`'s
 > build breakage prevents `corpus-check`/`conformance`/the dav1d-reference
 > test from running at all, so there is still no bit-exact ground truth to
 > validate *any* of this phase's work against, CFL and palette included;
@@ -1822,7 +1829,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 > `proptest_coeffs` panic-fuzz suite, includes the palette-enabled variants)
 > all clean — no signature/behavior changes needed in the never-panics
 > proptests, since `has_chroma` only removes reads, it never adds a new
-> panic surface. `tpt-kinetix-h264` builds again this session (the
+> panic surface. `out-kinetix-h264` builds again this session (the
 > `slice_data/cabac_b.rs` breakage the previous note mentioned is gone,
 > whether from this session's environment or a concurrent process — see
 > `project_concurrent_repo_activity` — not re-diagnosed here), so
@@ -1875,7 +1882,7 @@ MVP target: MP4 demux → H.264 decode → transcode → AV1 encode, with an RTM
 
 ### Phase 7.1 — Unified trace/diff tooling (started 2026-08-24; core implemented, diagnostic migrations remain)
 
-Consolidates 23 duplicated ad-hoc `dbg_*.rs` files in `tpt-kinetix-h264` (each hand-rolling
+Consolidates 23 duplicated ad-hoc `dbg_*.rs` files in `out-kinetix-h264` (each hand-rolling
 print/compare boilerplate) onto the existing-but-underused `DecodeTracer`/`MapTracer` (h264) and
 `SymbolTraceEntry` (AV1) trace infra, and extends tracing to AAC (currently has none). Internal-only,
 Tier 1 scope — an ffmpeg-internal-state oracle harness was considered and explicitly deferred as a
@@ -1895,7 +1902,7 @@ separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking
       `dbg_cabac_b.rs`, and `dbg_cabac_p_matrix.rs` no longer exist; the other
       five named files still contain bespoke comparison logic. The eight stale
       files listed in the original plan are also already absent.
-- [ ] AAC tracing — **blocked in the current workspace**: the referenced
+- [x] AAC tracing — **N/A, closed 2026-09-30**: AAC now lives in tpt-cadence (not this repo); originally blocked: the referenced
       `tpt-kinetix-aac` crate is not a workspace member and no AAC crate exists
       under the repository root. Reopen when an AAC decoder crate is restored.
 - [ ] Convert the 5 bespoke hand-transcribed-FFmpeg oracle-replay files
@@ -1933,7 +1940,7 @@ separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking
 > technical eval, banner marks it dropped). Plan file:
 > `~/.claude/plans/what-do-you-think-majestic-reddy.md`.
 
-- [ ] **Precondition** — close the H.264 High-profile 8×8 transform (`NotPixelExact`
+- [~] **Precondition (2026-09-30: H.264 8×8 DONE; AV1 bit-exact on all measured corpora, only the `pixel_exact` policy call remains)** — close the H.264 High-profile 8×8 transform (`NotPixelExact`
       → bit-exact) and get AV1 decode to `capabilities().pixel_exact` (or explicitly
       park AV1) before starting a new codec. Don't add a 4th half-finished decoder.
 - [x] **VP9 decode** — new `tpt-kinetix-vp9` crate via the cargo-generate
@@ -2033,9 +2040,9 @@ separate, larger effort. Full design: `C:\Users\phill\.claude\plans\i-m-thinking
 
 ### Codec correctness (in progress)
 - [x] AAC PCM decode: wrap `symphonia-codec-aac` in `tpt-kinetix-aac` so `decode()` returns real PCM instead of parse-only output — `AacDecoder::decode()` delegates AAC-LC reconstruction to `symphonia-codec-aac`, returning interleaved `f32` PCM; verified by the `ffmpeg`-gated round-trip test `tpt-kinetix-aac/tests/decode_pcm.rs` (HE-AAC SBR/PS still unsupported by the wrapped decoder)
-- [~] H.264 CABAC entropy decoding in `tpt-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; mb_type I-slice context (Table 9-11), coded_block_pattern (Table 9-12), and mb_qp_delta (Table 9-20) context tables implemented and tested; still missing: the remaining per-syntax-element context-index tables (Tables 9-13..9-33) and macroblock-level CABAC syntax parsing wired into `decoder.rs`
-- [x] H.264 intra prediction in `tpt-kinetix-h264/src/prediction.rs`
-- [x] H.264 deblocking filter in `tpt-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
+- [~] H.264 CABAC entropy decoding in `out-kinetix-h264/src/entropy.rs` (alongside the existing CAVLC path) — binary arithmetic decoding engine (`CabacDecoder`: `decode_decision`/`decode_bypass`/`decode_terminate`, §9.3.3.2) and context-variable init from `(m, n)` (§9.3.1.1) are implemented and tested with the spec's `rangeTabLPS`/`transIdxLPS`/`transIdxMPS` tables; mb_type I-slice context (Table 9-11), coded_block_pattern (Table 9-12), and mb_qp_delta (Table 9-20) context tables implemented and tested; still missing: the remaining per-syntax-element context-index tables (Tables 9-13..9-33) and macroblock-level CABAC syntax parsing wired into `decoder.rs`
+- [x] H.264 intra prediction in `out-kinetix-h264/src/prediction.rs`
+- [x] H.264 deblocking filter in `out-kinetix-h264/src/deblock.rs`, plus updating `H264Decoder::capabilities()` and enabling the gated pixel-exact conformance assertions once CABAC + intra + deblocking are all in
 - [~] AV1 frame/tile reconstruction in `tpt-kinetix-av1/src/reconstruct.rs` (replacing the grey placeholder-frame path), including the standing `TODO(phase-4)` parallel tile-decode item — FrameHeader and TileGroup OBUs now parsed and stored; `TileData` struct captures per-tile payloads for future parallel decode; **AV1 Phase B is done (2026-08-09): intra keyframe coefficients now decode through the real symbol decoder via `coeffs()` (all_zero / intra_tx_type / eob_pt_* / eob_extra / coeff_base(_eob) / coeff_br / dc_sign / sign_bit / Exp-Golomb tail) in `coeff.rs`, rewiring the old `BitReader` scheme in `decode_tile_group`/`decode_chroma_tx`**; still outstanding: real superblock partition + mode syntax (Phase C), inter prediction, non-square transforms, full AV1 transform set, and loop filters
 
 Full plan: see the session plan this phase was scoped from (adoption polish + browser demo + all five codec-correctness sub-efforts).

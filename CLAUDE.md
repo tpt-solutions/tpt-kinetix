@@ -16,8 +16,10 @@ for the current state of every crate before assuming something works. AAC suppor
 removed from this repo (now covered by a separate project) — don't re-add a `tpt-kinetix-aac` crate.
 
 Patents: this project ships source only and obtains no patent licenses. H.264 is
-patent-encumbered; `tpt-kinetix-pipeline` / `tpt-kinetix-cli` gate it behind the default-on
-`codec-h264` feature (`cargo build --no-default-features` → royalty-free-only).
+patent-encumbered (encode AND decode), so it is **not published**: the crate is named `out-kinetix-h264`
+(the `out-` prefix marks it as outside the published set), is `publish = false`, and is not a dependency of
+`tpt-kinetix-pipeline` / `tpt-kinetix-cli` (only of the unpublished `tpt-kinetix-test-utils`). It is kept
+for local/reference work only; everything else in the workspace is royalty-free.
 See PATENTS.md; keep its encumbrance table current when touching a codec crate.
 
 ## Commands
@@ -38,9 +40,9 @@ just check                  # fmt-check + clippy + build + test — run this bef
 Single-crate / single-test:
 
 ```sh
-cargo test -p tpt-kinetix-h264
-cargo test -p tpt-kinetix-h264 --test b_frame_conformance
-cargo test -p tpt-kinetix-h264 some_test_name -- --exact
+cargo test -p out-kinetix-h264
+cargo test -p out-kinetix-h264 --test b_frame_conformance
+cargo test -p out-kinetix-h264 some_test_name -- --exact
 ```
 
 Decoder conformance and corpus tooling (H.264-focused, the crate closest to correctness right now):
@@ -54,7 +56,7 @@ Fuzzing (nightly + `cargo-fuzz` required):
 
 ```sh
 just fuzz-build                              # compiles all fuzz targets across crates
-just fuzz tpt-kinetix-h264 fuzz_h264_nal 60   # run one target for 60s
+just fuzz out-kinetix-h264 fuzz_h264_nal 60   # run one target for 60s
 ```
 A crash reproducer lands in `fuzz/artifacts/<target>/crash-*`; commit it into `fuzz/corpus/<target>/`
 so it becomes a permanent regression case. Run the relevant fuzz target for ≥60s after touching any
@@ -74,7 +76,7 @@ breaking change in any public API bumps all of them together):
   `PixelFormat`, `KinetixError`, `DecoderCapabilities`.
 - `tpt-kinetix-demux` — container demuxers (MP4/ISO-BMFF works; MKV/WebM is a basic EBML subset).
 - `tpt-kinetix-mux` — container muxers (progressive MP4, single H.264 track).
-- `tpt-kinetix-h264` — H.264/AVC decoder: NAL parsing, SPS/PPS, slice header/data, CAVLC + CABAC
+- `out-kinetix-h264` — H.264/AVC decoder: NAL parsing, SPS/PPS, slice header/data, CAVLC + CABAC
   entropy decode, intra/inter prediction, motion compensation, deblocking, reference-picture
   management (MMCO/dec_ref_pic_marking, POC-based B-slice list ordering). This is the crate under
   heaviest active development — check `todo.md` and the README LIMITATIONS section for current gaps.

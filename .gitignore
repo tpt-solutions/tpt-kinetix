@@ -6,7 +6,7 @@
 # This workspace contains binaries, so Cargo.lock is tracked (not ignored).
 
 # Fuzz testing (unanchored so this matches fuzz/ dirs nested under any crate,
-# e.g. tpt-kinetix-h264/fuzz/ — a mid-path slash would otherwise anchor the
+# e.g. out-kinetix-h264/fuzz/ — a mid-path slash would otherwise anchor the
 # pattern to the repo root and silently miss them)
 **/fuzz/target/
 **/fuzz/corpus/
@@ -35,7 +35,7 @@
 
 # ITU-T H.264.1 conformance fixtures (fetched with `just fetch-h264-conformance`,
 # ~hundreds of MB of bitstreams + reference YUV — never committed)
-/tpt-kinetix-h264/tests/fixtures/itu/
+/out-kinetix-h264/tests/fixtures/itu/
 
 # Editor / OS
 .vscode/
@@ -60,8 +60,8 @@ ff_*.c
 *.txt
 **/__pycache__/
 # loose per-macroblock/field binary trace dumps (1.2, 1.fn1, …) from dbg_* tests
-tpt-kinetix-h264/1.[0-9]*
-tpt-kinetix-h264/1.fn*
+out-kinetix-h264/1.[0-9]*
+out-kinetix-h264/1.fn*
 
 # AV1 Phase G.0 block-capture bridge output (written by KINETIX_AV1_CAPTURE)
 av1_capture.json

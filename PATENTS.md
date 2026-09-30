@@ -29,7 +29,7 @@ third parties who are not contributors.
 
 | Crate | Codec | Encumbrance | Notes |
 | --- | --- | --- | --- |
-| `tpt-kinetix-h264` | H.264 / AVC decode | **Encumbered** | Via LA (ex-MPEG-LA) AVC patent pool; core patents expected to run to ~2027–2030 |
+| `out-kinetix-h264` | H.264 / AVC decode | **Encumbered** | Via LA (ex-MPEG-LA) AVC patent pool; core patents expected to run to ~2027–2030 |
 | `tpt-kinetix-av1` | AV1 decode / encode | Royalty-free | AOMedia patent license; designed to be royalty-free |
 | `tpt-kinetix-demux` / `-mux` | MP4 / MKV / WebM containers | Unencumbered | Container formats, no known active essential patents |
 | `tpt-kinetix-stream` | RTMP, HLS, MPEG-TS | Unencumbered / expired | MPEG-TS systems-layer patents have expired |
@@ -42,23 +42,17 @@ table as part of the change that introduces them — see `CONTRIBUTING.md`.
 
 ## Producing a royalty-free-only build
 
-The `tpt-kinetix-pipeline` and `tpt-kinetix-cli` crates enable the encumbered
-codec through a **default-on Cargo feature** (`codec-h264`). To build the CLI
-without it:
+H.264 is **not published**. Its crate is named `out-kinetix-h264` (the `out-`
+prefix marks it as outside the published set), is `publish = false`, and is not a
+dependency of `tpt-kinetix-pipeline` or `tpt-kinetix-cli`. Those crates therefore
+already build royalty-free-only:
 
 ```sh
 just build-royalty-free
-# = cargo build -p tpt-kinetix-pipeline -p tpt-kinetix-cli --no-default-features
+# = cargo build -p tpt-kinetix-pipeline -p tpt-kinetix-cli
 ```
 
-This drops `tpt-kinetix-h264` from the CLI dependency graph entirely (verify
-with `cargo tree -p tpt-kinetix-cli --no-default-features`); the resulting
-engine handles only the royalty-free paths — AV1 plus the container/streaming
-layers.
-
-The codec crate itself (`tpt-kinetix-h264`) and the test-only helper crate
-(`tpt-kinetix-test-utils`, `publish = false`) still build
-and run their own test suites directly, matching how FFmpeg keeps its
-conformance coverage (FATE) running for encumbered decoders. CI is not gated:
-stripping encumbered codecs for redistribution is a decision for a downstream
-packager shipping binaries into a specific jurisdiction, not for this project.
+`out-kinetix-h264` and the test-only helper crate (`tpt-kinetix-test-utils`,
+`publish = false`) still build and run their own test suites directly, matching
+how FFmpeg keeps its conformance coverage (FATE) running for encumbered decoders.
+The H.264 decoder is unfinished and kept for local/reference work only.

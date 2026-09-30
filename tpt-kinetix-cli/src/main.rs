@@ -27,7 +27,7 @@ enum Commands {
         /// Input file path (MP4/ISO-BMFF or MPEG-TS).
         input: PathBuf,
     },
-    /// Transcode a media file (e.g. H.264 MP4 → AV1).
+    /// Transcode a media file (VP9 MP4 → AV1).
     Transcode {
         /// Input file path.
         #[arg(short, long)]
@@ -281,8 +281,6 @@ fn decoder_capabilities_for(
 ) -> Option<tpt_kinetix_core::capabilities::DecoderCapabilities> {
     use tpt_kinetix_core::codec::CodecId;
     match codec {
-        #[cfg(feature = "codec-h264")]
-        Some(CodecId::H264) => Some(tpt_kinetix_h264::H264Decoder::new().capabilities()),
         #[cfg(feature = "codec-vp9")]
         Some(CodecId::Vp9) => Some(tpt_kinetix_vp9::Vp9Decoder::new().capabilities()),
         Some(CodecId::Av1) => Some(tpt_kinetix_av1::Av1Decoder::new().capabilities()),
@@ -331,8 +329,7 @@ fn transcode(
 
     match vcodec {
         "av1" => transcode_to_av1(&data, output, rate_control, speed, geometry),
-        "h264" => transcode_to_h264(&data, output, rate_control, speed, width, height),
-        _ => anyhow::bail!("unsupported output codec '{vcodec}'. Supported: av1, h264"),
+        _ => anyhow::bail!("unsupported output codec '{vcodec}'. Supported: av1"),
     }
 }
 
@@ -363,10 +360,7 @@ fn input_video_geometry(data: &[u8]) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// Returns the [`tpt_kinetix_core::codec::CodecId`] of the first video track.
-#[cfg_attr(
-    not(any(feature = "codec-h264", feature = "codec-vp9")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(feature = "codec-vp9"), allow(dead_code))]
 fn input_video_codec(data: &[u8]) -> Option<tpt_kinetix_core::codec::CodecId> {
     use tpt_kinetix_core::codec::MediaType;
 
@@ -379,12 +373,8 @@ fn input_video_codec(data: &[u8]) -> Option<tpt_kinetix_core::codec::CodecId> {
 }
 
 /// Geometry and timing of the input video track, used to size the output.
-// Fields are only read on the transcode paths (one decode feature must be on
-// for `transcode` to do anything).
-#[cfg_attr(
-    not(any(feature = "codec-h264", feature = "codec-vp9")),
-    allow(dead_code)
-)]
+// Fields are only read on the transcode path (needs the `codec-vp9` feature).
+#[cfg_attr(not(feature = "codec-vp9"), allow(dead_code))]
 struct VideoGeometry {
     width: u32,
     height: u32,
@@ -392,11 +382,9 @@ struct VideoGeometry {
     fps_den: u32,
 }
 
-/// Transcode MP4 input to AV1 output, dispatching on the probed input codec:
-/// VP9 input takes the royalty-free decode path (`codec-vp9`); every other
-/// input falls back to the H.264 decode path (`codec-h264`,
-/// patent-encumbered — see PATENTS.md).
-#[cfg(not(any(feature = "codec-h264", feature = "codec-vp9")))]
+/// Transcode MP4 input to AV1 output. Only VP9 input (royalty-free,
+/// `codec-vp9`) is supported; this workspace ships no patent-encumbered decoder.
+#[cfg(not(feature = "codec-vp9"))]
 fn transcode_to_av1(
     _data: &[u8],
     _output: &str,
@@ -404,14 +392,10 @@ fn transcode_to_av1(
     _speed: u8,
     _geometry: VideoGeometry,
 ) -> Result<()> {
-    anyhow::bail!(
-        "transcode requires the `codec-vp9` (royalty-free) or `codec-h264` \
-         (patent-encumbered) decode feature; neither is enabled in this build \
-         (see PATENTS.md)"
-    )
+    anyhow::bail!("transcode requires the `codec-vp9` decode feature, which is not enabled in this build")
 }
 
-#[cfg(any(feature = "codec-h264", feature = "codec-vp9"))]
+#[cfg(feature = "codec-vp9")]
 fn transcode_to_av1(
     data: &[u8],
     output: &str,
@@ -419,7 +403,6 @@ fn transcode_to_av1(
     speed: u8,
     geometry: VideoGeometry,
 ) -> Result<()> {
-    #[cfg(feature = "codec-vp9")]
     if input_video_codec(data) == Some(tpt_kinetix_core::codec::CodecId::Vp9) {
         tracing::info!("input codec vp9: using the royalty-free decode path");
         return transcode_to_av1_via(
@@ -432,25 +415,10 @@ fn transcode_to_av1(
         );
     }
 
-    #[cfg(feature = "codec-h264")]
-    return transcode_to_av1_via(
-        tpt_kinetix_pipeline::DecodeStage,
-        data,
-        output,
-        rate_control,
-        speed,
-        geometry,
-    );
-
-    #[cfg(not(feature = "codec-h264"))]
-    anyhow::bail!(
-        "no decoder available for this input in this build: VP9 input needs \
-         the `codec-vp9` feature, H.264 input the patent-encumbered \
-         `codec-h264` feature (see PATENTS.md)"
-    );
+    anyhow::bail!("unsupported input codec: only VP9 input can be transcoded (see PATENTS.md)")
 }
 
-#[cfg(any(feature = "codec-h264", feature = "codec-vp9"))]
+#[cfg(feature = "codec-vp9")]
 fn transcode_to_av1_via<S: tpt_kinetix_pipeline::Stage>(
     decode_stage: S,
     data: &[u8],
@@ -515,29 +483,8 @@ fn transcode_to_av1_via<S: tpt_kinetix_pipeline::Stage>(
     Ok(())
 }
 
-fn transcode_to_h264(
-    _data: &[u8],
-    output: &str,
-    _rate_control: tpt_kinetix_core::encode::RateControl,
-    _speed: u8,
-    width: u32,
-    height: u32,
-) -> Result<()> {
-    // The workspace currently ships no H.264 *encoder* — only a decoder and the
-    // `rav1e`-backed AV1 encoder. Transcoding to H.264 would require re-encoding
-    // the decoded frames, which is unsupported; fail clearly instead of producing
-    // a corrupt container with placeholder SPS/PPS.
-    anyhow::bail!(
-        "transcode to H.264 is not yet supported (no H.264 encoder in this build); \
-         use --vcodec av1. Requested output {} ({}x{})",
-        output,
-        width,
-        height
-    );
-}
-
-// Only used by the H.264-decode → AV1 transcode path (`codec-h264`).
-#[cfg_attr(not(feature = "codec-h264"), allow(dead_code))]
+// Only used by the VP9-decode → AV1 transcode path (`codec-vp9`).
+#[cfg_attr(not(feature = "codec-vp9"), allow(dead_code))]
 fn write_ivf(
     path: &str,
     packets: &[tpt_kinetix_core::packet::Packet],

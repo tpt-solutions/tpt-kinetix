@@ -2,8 +2,8 @@
 
 use crossbeam_channel::bounded;
 use tpt_kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
-#[cfg(feature = "codec-h264")]
-use tpt_kinetix_pipeline::stage::DecodeStage;
+#[cfg(feature = "codec-vp9")]
+use tpt_kinetix_pipeline::stage::Vp9DecodeStage;
 use tpt_kinetix_pipeline::{
     channel::PipelineMessage,
     stage::{FilterStage, SinkStage, Stage},
@@ -64,15 +64,15 @@ fn test_passthrough_pipeline() {
     assert_eq!(collected[0].height, 10);
 }
 
-/// Verify that a [`PipelineMessage::Flush`] sent into a [`DecodeStage`]
+/// Verify that a [`PipelineMessage::Flush`] sent into a [`Vp9DecodeStage`]
 /// propagates to the output channel, allowing downstream stages to terminate.
-#[cfg(feature = "codec-h264")]
+#[cfg(feature = "codec-vp9")]
 #[test]
 fn test_pipeline_flush_propagates() {
     let (input_tx, input_rx) = bounded::<PipelineMessage>(16);
     let (output_tx, output_rx) = bounded::<PipelineMessage>(16);
 
-    let handle = Box::new(DecodeStage).spawn(input_rx, output_tx);
+    let handle = Box::new(Vp9DecodeStage).spawn(input_rx, output_tx);
 
     input_tx.send(PipelineMessage::Flush).expect("send flush");
     drop(input_tx);
@@ -179,71 +179,6 @@ fn test_scale_filter_resizes_frames() {
         }
         other => panic!("expected scaled frame, got {other:?}"),
     }
-}
-
-/// End-to-end: decode (H.264 scaffold) → scale filter → AV1 encode → packet sink.
-///
-/// This exercises the full Phase 4/5 chain, including the H.264 → AV1 transcode
-/// path (Phase 4.8). The H.264 decoder currently emits placeholder frames, so
-/// this validates plumbing and that the AV1 encoder produces compressed packets;
-/// it is not a pixel-conformance test.
-#[cfg(feature = "codec-h264")]
-#[test]
-fn test_decode_scale_encode_pipeline() {
-    use tpt_kinetix_core::{
-        encode::{EncodeConfig, SpeedPreset},
-        packet::Packet,
-        timestamp::Timestamp as Ts,
-    };
-    use tpt_kinetix_pipeline::stage::{DecodeStage, EncodeStage, PacketSinkStage};
-    use tpt_kinetix_test_utils::synthetic::minimal_h264_annexb_sps_pps;
-
-    // Build an Annex B packet: SPS + PPS + a slice NAL so the decoder emits a frame.
-    let mut data = minimal_h264_annexb_sps_pps();
-    // Append a non-IDR slice NAL (type 1).
-    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00]);
-    let packet = Packet {
-        pts: Ts::new(0, (1, 90_000)),
-        dts: Ts::new(0, (1, 90_000)),
-        data,
-        stream_index: 0,
-        is_key_frame: true,
-    };
-
-    // Wire: src -> Decode -> Scale -> Encode -> PacketSink
-    let (dec_in_tx, dec_in_rx) = bounded::<PipelineMessage>(16);
-    let (dec_out_tx, dec_out_rx) = bounded::<PipelineMessage>(16);
-    let (flt_out_tx, flt_out_rx) = bounded::<PipelineMessage>(16);
-    let (enc_out_tx, enc_out_rx) = bounded::<PipelineMessage>(16);
-    let (sink_out_tx, _sink_out_rx) = bounded::<PipelineMessage>(1);
-
-    let (psink, packets) = PacketSinkStage::new();
-
-    let cfg = EncodeConfig {
-        speed: SpeedPreset::Fastest,
-        keyframe_interval: 1,
-        ..Default::default()
-    };
-
-    let dec_h = Box::new(DecodeStage).spawn(dec_in_rx, dec_out_tx);
-    let flt_h = Box::new(FilterStage::scale(32, 32)).spawn(dec_out_rx, flt_out_tx);
-    let enc_h = Box::new(EncodeStage::new(cfg)).spawn(flt_out_rx, enc_out_tx);
-    let sink_h = Box::new(psink).spawn(enc_out_rx, sink_out_tx);
-
-    dec_in_tx.send(PipelineMessage::Packet(packet)).unwrap();
-    dec_in_tx.send(PipelineMessage::Flush).unwrap();
-    drop(dec_in_tx);
-
-    dec_h.join().unwrap().unwrap();
-    flt_h.join().unwrap().unwrap();
-    enc_h.join().unwrap().unwrap();
-    sink_h.join().unwrap().unwrap();
-
-    let produced = packets.lock().unwrap();
-    assert!(
-        !produced.is_empty(),
-        "expected the AV1 encoder to emit at least one packet"
-    );
 }
 
 /// A [`PipelineMessage::Error`] flowing into a sink must surface as a stage

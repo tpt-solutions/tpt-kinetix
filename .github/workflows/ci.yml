@@ -137,7 +137,7 @@ jobs:
         working-directory: tpt-kinetix-av1
       - name: Check fuzz targets compile (h264)
         run: cargo fuzz build fuzz_h264_nal
-        working-directory: tpt-kinetix-h264
+        working-directory: out-kinetix-h264
       - name: Check fuzz targets compile (vp9)
         run: cargo fuzz build fuzz_vp9_frame
         working-directory: tpt-kinetix-vp9
@@ -165,7 +165,7 @@ jobs:
         # assertions (previously silently skipped when ffmpeg was absent).
         run: |
           cargo nextest run \
-            -p tpt-kinetix-h264 \
+            -p out-kinetix-h264 \
             -p tpt-kinetix-av1 \
             -p tpt-kinetix-stream \
             -p tpt-kinetix-test-utils

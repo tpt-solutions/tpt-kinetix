@@ -15191,6 +15191,10 @@ before the colours are read, so drop it from the comparison).
 
 Still open: film grain on odd-width frames (skipped by design); FATE samples not on disk.
 
+> **Both of the above are now RESOLVED** — see sessions #13b/#13c (FATE samples
+> re-fetched, 204/204 bit-exact) and #13d (odd-dimension film grain fixed and
+> regression-tested). Left as written because this is a historical session log.
+
 ### Addendum: 10/12-bit 4:2:2 and 4:4:4 (same day)
 Added `Yuv422p10le/12le` and `Yuv444p10le/12le` to `tpt-kinetix-core::PixelFormat` (only the AV1
 crate matched on it, so the blast radius was two files). An 18-case sweep (10/12-bit x
@@ -15201,6 +15205,235 @@ crate matched on it, so the blast radius was two files). An 18-case sweep (10/12
   clamped to 0. Affects 4:2:0 12-bit too.
 Note: ffmpeg's lavfi/libaom path may hand you 332x210 when you ask for 333x211 -- check the
 decoded frame size before analysing diffs (an hour was lost to a wrong-geometry diff script).
+
+## Session 2026-09-30 #13d -- odd-dimension film grain FIXED (the long-standing "skipped by design" gap)
+
+The last explicitly-open functional item: film grain on odd-width frames was
+skipped by design in `apply_grain_to_frame` (`decoder.rs`), guarded by
+`ssx == 1 && w % 2 != 0`. That guard was simply wrong.
+
+**The skip was unnecessary.** The chroma geometry the grain code already used is
+`(w + ssx) >> ssx` by `(h + ssy) >> ssy` — ceil, which is exactly what an odd
+dimension needs, and the same rule the rest of the decoder uses. The grain loop
+in `film_grain::apply_film_grain` iterates that plane with the same `cw`, and
+generates noise on 82x82 luma blocks with the chroma index scaled by the
+subsampling factors, so a trailing odd column simply reads the same generated
+noise. Removing the one condition was the entire fix.
+
+Measured against libdav1d on libaom `film-grain-test=4` streams:
+
+| stream | before | after |
+|--------|--------|-------|
+| 211x143 | ~39k differing bytes EVERY frame | 0 |
+| 213x145 | ~39k every frame | 0 |
+| 165x83  | ~39k every frame | 0 |
+| 101x67  | ~39k every frame | 0 |
+| 333x211 | ~39k every frame | 0 |
+
+**Tooling note that cost time (repeat of the #11 trap):** ffmpeg's lavfi +
+libaom path silently rounds an odd `size=` DOWN to even — asking for 211x143
+encodes **210x142**. So the existing `libaom_crosscheck` can never produce an
+odd-dimension stream and this gap was structurally untestable there. To get a
+real odd stream, generate planar frames with lavfi, trim to the ceil-chroma
+frame size (`w*h + 2*ceil(w/2)*ceil(h/2)` — note ffmpeg's own rawvideo writer
+emits a truncated final frame, so the byte count is not a clean multiple), and
+feed it to the encoder through the **`rawvideo` demuxer** with an explicit
+`-s WxH`, which preserves the odd geometry.
+
+New permanent regression test
+`tpt-kinetix-av1/tests/libaom_crosscheck.rs::libaom_film_grain_on_odd_dimensions_matches_libdav1d`
+(4 sizes: odd/odd, and widths that stay odd at several magnitudes). It asserts
+the encoded IVF header really is the odd size, so a future round-to-even makes
+it skip loudly rather than pass vacuously. Verified it is NOT vacuous: re-
+inserting the `ssx == 1 && w % 2 != 0` guard makes it fail on all four sizes
+(195210 / 199689 / 88557 / 43507 differing bytes).
+
+**Build-artifact trap worth remembering on this machine:** restoring a file with
+`Copy-Item` preserves the *source* mtime, so cargo does not rebuild and you get
+a stale binary that reproduces the OLD failure exactly — which reads as "my fix
+doesn't work". Confirmed by `cargo clean -p tpt-kinetix-av1` (removed 5.0 GiB)
+fixing it. When restoring a file after an A/B experiment, also stamp
+`(Get-Item $f).LastWriteTime = Get-Date` (there is no `touch` in this shell), or
+just `cargo clean -p <crate>`.
+
+Gates: `cargo test -p tpt-kinetix-av1` green (173 lib + 13 integration — the
+crosscheck file is now 2 tests, ~101 s); FATE conformance still 204/204;
+randomized sweeps seeds 7/11/42 clean (576/576 frames bit-exact); fmt + clippy
+`-D warnings` clean.
+
+## Session 2026-09-30 #13c -- FATE harness FIXED: geometry-aware reference, 204/204, and the test now actually asserts
+
+Continues #13b, which identified the two harness bugs but left them in place. Both
+are now fixed and the corpus is a real gate instead of a report-only tracker.
+
+**`tpt-kinetix-test-utils/src/reference.rs`** — new, additive (no existing caller
+changed):
+- `Av1StreamInfo` + `probe_av1_stream()`: probes a stream's `pix_fmt` and
+  per-frame `(w, h)` with `ffprobe` (temp file, not stdin — some builds cannot
+  demux from a pipe). `ffprobe_available()` for gating.
+- `pixel_format_from_str()`: ffmpeg pix_fmt name -> `PixelFormat`
+  (420/422/444 x 8/10/12-bit + grey).
+- `planar_frame_len()`: per-format frame byte length, using the same
+  ceil-the-odd-dimension chroma rule the decoders use.
+- `decode_av1_with_dav1d_auto(ivf, fallback_w, fallback_h)`: probes, runs ffmpeg
+  with the real `-pix_fmt` **and `-noautoscale`**, then slices the flat buffer
+  per frame. Falls back to the old 8-bit constant-size path when ffprobe is
+  absent, so it can never *break* a machine the old path handled.
+- `decode_av1_with_dav1d()` kept, now documented as assuming 8-bit 4:2:0 +
+  constant size, with a pointer to the new function. Its ~20 existing callers
+  are untouched.
+
+**`tests/conformance.rs` — `av1_fate_real_samples_vs_dav1d_when_available`:**
+- Uses `decode_av1_with_dav1d_auto`.
+- `EXPECTED_UNSUPPORTED` reduced to `["annexb"]`. `film_grain` and
+  `decode_model` were excused as "dav1d applies grain / honours a decoder
+  model, so they can never match" — **that belief was wrong**; the cause was
+  the harness's own 8-bit/constant-size assumption. Both now decode
+  bit-exactly and are scored normally, which is strictly stronger.
+- Mismatch reporting now prints both geometries + a geometry ok/MISMATCH flag
+  and the raw differing-byte count, because `psnr_yuv420p` only understands
+  8-bit 4:2:0 and silently reports `0.00` for a 10-bit stream even when the
+  frames are close.
+- **A Kinetix decode error is now a failure, not a skip.** The old `continue`
+  made a hard decode error on an official (well-formed-by-construction) sample
+  look like a pass.
+- **A dav1d-shortfall is detected**: if the reference produced fewer frames
+  than the stream has packets, status is `reference-truncated` and the file is
+  excluded from the assertion. Without this a corrupt stream scored its 1-frame
+  prefix as "1/1 exact" — a false pass I hit and fixed while testing.
+- The test now **asserts** rather than only printing. Verified both directions:
+  the real corpus passes 204/204, and inverting `within_tolerance` makes it
+  fail and name all six diverging files.
+
+Result with `KINETIX_AV1_FATE_DIR=%LOCALAPPDATA%/Temp/fate_av1`:
+
+    [decode_model] 24/24 exact   [film_grain] 10/10 exact
+    [frames_refs_short_signaling] 50/50 exact   [non_uniform_tiling] 24/24 exact
+    [seq_hdr_op_param_info] 64/64 exact   [switch_frame] 32/32 exact
+    AV1 FATE real samples: 204/204 comparable frames bit-exact vs dav1d
+
+**`pixel_exact` is still `false` and I did not flip it.** 204/204 on 6 streams
+of up to 64 frames is real evidence but it is a small corpus: no B-frames/
+alt-ref chains, no monochrome, no 4:2:2/4:4:4 FATE vector, no tile/superres
+stress beyond `non_uniform_tiling`, and FATE's own AV1 set is 6 files. Flipping
+it would assert more than the evidence supports and would make
+`NotPixelExact`-based strict-mode fallbacks disappear across the crate. The
+honest next step is widening coverage, not the flag.
+
+Gates: `cargo test -p tpt-kinetix-test-utils` green with AND without
+`KINETIX_AV1_FATE_DIR` (skips cleanly, no panic); `cargo test -p tpt-kinetix-av1`
+green (173 lib + 12 integration incl. the ~96 s libaom crosscheck);
+`cargo fmt --check` clean; `cargo clippy --all-targets -D warnings` clean;
+`RUSTDOCFLAGS=-D warnings cargo doc` clean.
+
+## Session 2026-09-30 #13b -- FATE samples RE-FETCHED; 204/204 bit-exact, and two "failures" in the conformance test are HARNESS bugs
+
+Follow-up to #13. The FATE samples could be re-fetched: they are plain public
+HTTP files at `https://fate-suite.ffmpeg.org/av1/`, no auth, no FATE client
+needed. All 7 downloaded into `%LOCALAPPDATA%/Temp/fate_av1` (sizes verified
+against the server's index listing; `annexb.obu` is the 26K Annex-B one):
+
+    decode_model.ivf 22360 (240x100)   film_grain.ivf 6827 (320x240)
+    frames_refs_short_signaling.ivf 71538 (640x360)   non_uniform_tiling.ivf 37986 (720x300)
+    seq_hdr_op_param_info.ivf 85459 (320x176)        switch_frame.ivf 273838 (852x480)
+    annexb.obu 26590
+
+`KINETIX_AV1_FATE_DIR=%LOCALAPPDATA%/Temp/fate_av1 cargo run --release -p
+tpt-kinetix-av1 --example av1_fate_score`:
+
+    decode_model 24/24, film_grain 10/10, frames_refs_short_signaling 50/50,
+    non_uniform_tiling 24/24, seq_hdr_op_param_info 64/64, switch_frame 32/32
+    AGGREGATE: 204/204 frames bit-exact vs dav1d
+
+This matches the best result ever recorded (204/204, earlier sessions) and
+confirms #13's conclusion on the official corpus: the inter-stream mismatch is
+gone. `av1_fate_score` correctly picks 10-bit for `film_grain` by probing
+`sequence_header().color_config.high_bitdepth`.
+
+**The conformance test disagrees (192/204) and IT is the harness that is wrong,
+in two independent ways. Both verified by hand, not assumed:**
+
+1. **`film_grain` 0/10 — the test hard-codes 8-bit.** `film_grain.ivf` is
+   `yuv420p10le` (ffprobe). `conformance.rs::av1_fate_real_samples_vs_dav1d_when_available`
+   calls `decode_av1_with_dav1d(&bytes, width, height)`, which pipes
+   `-pix_fmt yuv420p` (8-bit) — so it compares 230400-byte 10-bit Kinetix
+   frames against 115200-byte 8-bit reference frames, and every frame "mismatches"
+   with `first_byte=Some(0)`. Re-run with `-pix_fmt yuv420p10le`:
+   **differing bytes = 0, maxabs = 0 — all 10 frames bit-exact.** The test's
+   `EXPECTED_UNSUPPORTED` list already excused this file as "grain, can never
+   match", so the wrong score was never noticed; the grain is in fact fine and
+   the cause was the pixel format, not the grain.
+2. **`switch_frame` 30/32 — constant-frame-size assumption, as already recorded.**
+   Kinetix correctly emits frames 30/31 at the switched 426x240. The harness
+   slices the dav1d raw output at the IVF header's constant 852x480, so those
+   two frames are read at the wrong offset. With `-noautoscale` the reference is
+   18709920 bytes = 30*613440 + 2*153360, and Kinetix's output is **byte-identical
+   (0 differing bytes across the whole 32-frame stream)**. This is the
+   "per-frame-size awareness" item already listed as open in the todo; it is a
+   harness limitation, NOT a decoder gap — do not re-chase it as a decode bug.
+
+Pitfall recorded: when diffing AV1 by hand, always pass `-noautoscale` AND the
+stream's true pixel format to the ffmpeg reference. Omitting either produced two
+false "regressions" here that cost real time (one looked like a 2x frame-size
+mismatch suggesting a 4:4:4 output bug, the other a resolution-switch bug).
+
+Gates: `cargo test -p tpt-kinetix-av1` green (173 lib + 12 integration incl. the
+~100 s libaom crosscheck); fmt and clippy `-D warnings` clean.
+
+Next real work, now that the official corpus is measurable again: the harness
+fixes above (10-bit pixel format + per-frame size), after which `pixel_exact`
+for AV1 can be considered on evidence rather than left false by default. Still
+open: film grain on odd-width frames (skipped by design).
+
+## Session 2026-09-30 #13 -- the "libaom inter streams mismatch from frame 1" premise does NOT reproduce
+
+Asked to re-run session #12's three committed fixes (`e2f3309`) against a dav1d
+sweep, because the "libaom-encoded inter streams still mismatch from frame 1
+onward" claim had not been re-measured. **Measured: it is already fixed. No code
+change was needed or made.**
+
+The existing `tests/libaom_crosscheck.rs` corpus (15 libaom-encoded cases, 100 s)
+passes fully, and that corpus is largely *inter* streams (2.5 s at 10 fps, so
+frame 0 is the keyframe and frames 1..24 are inter). Full `cargo test -p
+tpt-kinetix-av1` is green: 173 lib + 12 integration.
+
+To rule out a corpus gap (fixed vectors can all be intra-heavy or keyframe-
+dominated), added `tpt-kinetix-av1/examples/dbg_inter_sweep.rs`: a randomized
+sweep over 6 lavfi sources x 5 pixel formats (420 8/10/12-bit, 422, 444) x
+cpu-used 0..6 x random geometries up to 480x400, which prints the differing-byte
+count **per frame** rather than a stream total, so a cascade starting at frame 1
+is directly visible instead of being hidden inside a bulk mismatch. It skips
+(does not panic) when ffmpeg lacks libaom-av1/libdav1d.
+
+Results, all against ffmpeg+libdav1d:
+
+| sweep | streams | frames bit-exact |
+|-------|---------|------------------|
+| seed 7, 20 streams | 0 diverge | 240/240 |
+| seed 11, 16 streams | 0 diverge | 192/192 |
+| seed 42, 16 streams | 0 diverge | 192/192 |
+| seed 99, 16 streams | 0 diverge | 192/192 |
+
+Plus a 60-frame `testsrc2 352x288` clip with `-g 12` (5 keyframes, long inter
+runs) through the new `--fixed` mode: per-frame diffs are `0:0 1:0 ... 59:0` --
+**every frame bit-exact, including frame 1 onward**.
+
+Conclusion: the three #12 fixes (trailing_bits stop bit, double `filter4_clamp`,
+inter chroma `TxBlockCtx` block size) did resolve the inter-stream mismatch; the
+claim was stale, almost certainly carried over from the pre-`e2f3309` state. The
+lesson recorded in the #11 pitfalls applies: ffmpeg's libaom encodes are NOT
+deterministic across invocations here, so any future "regression" on this corpus
+must be A/B'd per-vector (HEAD vs the older binary on the SAME ivf) before being
+believed -- a fresh vector failing does not mean HEAD regressed.
+
+Gates: `cargo fmt -p tpt-kinetix-av1 -- --check` clean, `cargo clippy -p
+tpt-kinetix-av1 --all-targets -- -D warnings` clean, `cargo test -p
+tpt-kinetix-av1` green (173 lib + 12 integration). New file is
+`examples/dbg_inter_sweep.rs` (uncommitted, dev tooling). Not addressed, still
+open: film grain on odd-width frames (skipped by design); FATE samples not on
+disk, so the FATE-frame items cannot be measured here. `pixel_exact` remains
+false for AV1 (unchanged, correct -- the FATE/official evidence for it is
+absent).
 
 ## Session 2026-09-30 #12 -- three residual bugs found by the dav1d `r=` desync walk
 

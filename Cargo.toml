@@ -3,7 +3,7 @@ resolver = "2"
 members = [
   "tpt-kinetix-core",
   "tpt-kinetix-demux",
-  "tpt-kinetix-h264",
+  "out-kinetix-h264",
   "tpt-kinetix-av1",
   "tpt-kinetix-vp9",
   "tpt-kinetix-kg",
@@ -21,7 +21,7 @@ members = [
   "tpt-kinetix-cli",
   "tpt-kinetix-test-utils",
 ]
-exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "tpt-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz", "tpt-kinetix-vision/fuzz"]
+exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "out-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz", "tpt-kinetix-vision/fuzz"]
 
 [workspace.package]
 edition = "2021"
@@ -58,7 +58,7 @@ crossbeam-channel = "0.5"
 # Internal crates (path for local dev; version required for crates.io publish)
 tpt-kinetix-core = { path = "tpt-kinetix-core", version = "0.1.0" }
 tpt-kinetix-demux = { path = "tpt-kinetix-demux", version = "0.1.0" }
-tpt-kinetix-h264 = { path = "tpt-kinetix-h264", version = "0.1.0" }
+out-kinetix-h264 = { path = "out-kinetix-h264", version = "0.1.0" }
 tpt-kinetix-av1 = { path = "tpt-kinetix-av1", version = "0.1.0" }
 tpt-kinetix-vp9 = { path = "tpt-kinetix-vp9", version = "0.1.0" }
 tpt-kinetix-lean = { path = "tpt-kinetix-lean", version = "0.1.0" }
@@ -90,7 +90,7 @@ opt-level = 3
 
 # TEMPORARY diagnostic override (session #31, todo-h264.md): works around a
 # reproducible lld-link "undefined symbol: anon.*" cross-CGU failure when
-# linking the tpt-kinetix-h264 lib-test binary on this machine. Remove once
+# linking the out-kinetix-h264 lib-test binary on this machine. Remove once
 # the lld-link issue is resolved or the lockstep test lands elsewhere.
-[profile.dev.package.tpt-kinetix-h264]
+[profile.dev.package.out-kinetix-h264]
 codegen-units = 1

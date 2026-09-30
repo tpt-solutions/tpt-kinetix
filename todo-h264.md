@@ -35,7 +35,7 @@ frame-colocated bottom Bs went near-exact (display 18 nd 11259→69, 36
 regressions to chase: frame 4 nd 70→2505, 61 950→2231, 82 600→2251, 64
 652→872, 67 638→852, 6 66→203. CVPA1_TOSHIBA_B: 56/90. ITU conformance
 suite passes; gates on the probe-free tree: fmt, clippy `-D warnings`,
-`cargo test -p tpt-kinetix-h264` 388/0.
+`cargo test -p out-kinetix-h264` 388/0.
 
 **Next session:**
 1. Consumption-point diff (`JM_COL` gate framepoc==5, ours `current_poc ==
@@ -683,7 +683,7 @@ the field-pair frames' wrong-sample counts dropped sharply — frame 42
 720→105, frame 69 39864→16624, frame 79 173→26; total wrong luma samples
 ~87.0k → ~52.7k (-40%), no frame regressed. CVPA1_TOSHIBA_B likewise 56/90.
 ITU conformance suite passes; gates on the clean tree: fmt, clippy
-`-D warnings`, `cargo test -p tpt-kinetix-h264` 388/0.
+`-D warnings`, `cargo test -p out-kinetix-h264` 388/0.
 
 **Next session:**
 1. The large field-pair frames (CAPA1 18: nd≈11.3k, 36: ≈16.2k, 69: ≈16.6k)
@@ -815,7 +815,7 @@ The implementation is recorded here for the retry.
 
 **Housekeeping:** all probes reverted (`git checkout` of mv.rs,
 decoder/mod.rs, decoder/interlaced.rs; the committed fix d826697 is the
-only h264 delta). Gates: fmt clean, `cargo test -p tpt-kinetix-h264`
+only h264 delta). Gates: fmt clean, `cargo test -p out-kinetix-h264`
 388/0. JM binaries updated in `/tmp/jm-oracle/jm`: `ldecod_col3.exe`
 (`JM_COL` gate framepoc==134), `ldecod_pred2.exe` (`JM_PRED` rows 0/5/13),
 `ldecod_grid138.exe` (`JMG` poc==138), plus `col134.log`, `grid138.log`,
@@ -904,7 +904,7 @@ small-fraction diffs. Candidates, in rough priority:
 
 **Housekeeping:** all probes reverted (mv.rs keeps only the fix + comment;
 decoder/mod.rs clean). Gates on the clean tree: `cargo fmt --check`,
-`clippy -D warnings`, `cargo test -p tpt-kinetix-h264` 388/0,
+`clippy -D warnings`, `cargo test -p out-kinetix-h264` 388/0,
 `itu_conformance` ok. JM tooling in `/tmp/jm-oracle/jm`:
 `ldecod_col2.exe` (`JM_COL`, rows 0/5/13), `ldecod_pred2.exe` (`JM_PRED`,
 rows 0/5/13), `ldecod_grid.exe` (`JMG` full-picture poc 10),
@@ -1015,11 +1015,11 @@ wrong colocated motion.
   `framepoc == 10 && mb.y == 13` today — widen `framepoc`/`mb.y` to the
   field picture's values when re-targeting).
 
-**Housekeeping:** all temporary probes in `tpt-kinetix-h264` were reverted
+**Housekeeping:** all temporary probes in `out-kinetix-h264` were reverted
 before this entry (`git checkout` of `mv.rs`, `decoder/mod.rs`,
 `slice_data/cabac_b.rs`, `decoder/interlaced.rs`); `cargo fmt --check`,
-`cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings`, full
-`cargo test -p tpt-kinetix-h264` (388/0) and `--test itu_conformance` all
+`cargo clippy -p out-kinetix-h264 --all-targets -- -D warnings`, full
+`cargo test -p out-kinetix-h264` (388/0) and `--test itu_conformance` all
 pass on the clean tree. The JM tooling above is left in place per the
 session-tooling convention.
 
@@ -1433,7 +1433,7 @@ same session, using tooling that turned out to already exist:
 - This codebase's own `decoder/mod.rs` **already has** a
   `KINETIX_DUMP_PREDEBLOCK_POC` env hook (~line 1144, in the multi-slice
   finalize path) that dumps `recon.luma` to `predeblock_poc<N>.gray` (written
-  to the crate's own working directory, `tpt-kinetix-h264/`) right before the
+  to the crate's own working directory, `out-kinetix-h264/`) right before the
   per-MB deblock loop runs. Not documented anywhere in this todo file before
   now — worth remembering for the next reconstruction-stage investigation.
 
@@ -1973,7 +1973,7 @@ PAFF SPS has `pic_height_pixels` = 32 while the reconstruction buffer is
 Frame-coded P/B pictures of an interlaced stream still need the field-aware
 ref-list construction / weighted prediction / deblocking that only the
 interlaced path performs, hence the intra-only gate above. The 44-byte
-reproducer is `tpt-kinetix-h264/fuzz_crash_input.bin` (restored to its
+reproducer is `out-kinetix-h264/fuzz_crash_input.bin` (restored to its
 committed bytes — it is a *seed corpus* file, not a new crash artifact).
 
 **Measured (offline, vs ffmpeg, 352x288):** CAPA1_TOSHIBA_B 30 → **90/90
@@ -3173,12 +3173,12 @@ bottom 5,400 wrong pixels, first mismatch MB(38,23) — the error is no
 longer systematic.
 
 **Verification**: per-frame triage via `FIELD_CLIP=… FIELD_DISPLAY_ORDER=1
-FIELD_DUMP_OUT=<f> cargo test -p tpt-kinetix-h264 --test dbg_field_triage
+FIELD_DUMP_OUT=<f> cargo test -p out-kinetix-h264 --test dbg_field_triage
 --release -- --nocapture` (harness gained `FIELD_DUMP_OUT`, flush handling,
 and a per-frame top/bottom-field diff summary); full ITU suite re-run after
 every commit — 33/33 hard-checked BitExact, CAPA1/CVPA1 numbers unchanged;
-`cargo fmt --all -- --check`, `cargo clippy -p tpt-kinetix-h264
---all-targets -- -D warnings`, `cargo test -p tpt-kinetix-h264 --release
+`cargo fmt --all -- --check`, `cargo clippy -p out-kinetix-h264
+--all-targets -- -D warnings`, `cargo test -p out-kinetix-h264 --release
 --lib` (270 tests) all green. New debug hook:
 `KINETIX_B_FIELD_MB_DBG` in `decode_interlaced_b_field` (per-MB type/skip/
 4×4-cell MV+ref grid dump + ref-list contents + slice-header modification
@@ -3261,8 +3261,8 @@ via `ITU_PER_FRAME=1`). `CAPA1_TOSHIBA_B`/`CVPA1_TOSHIBA_B` (also mixed
 frame/field streams) improved the same way (`first_bad_frame` `0 → 3`
 on both). **No regressions**: ITU conformance still 33/33 hard-checked
 BitExact. `cargo fmt --all -- --check`, `cargo clippy -p
-tpt-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
-tpt-kinetix-h264 --release --lib --bins --tests` all green.
+out-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
+out-kinetix-h264 --release --lib --bins --tests` all green.
 
 This is a real architectural fix, not a Sharp-specific patch — it
 applies to any stream mixing PAFF field pairs with frame pictures under
@@ -3383,7 +3383,7 @@ JM's own textual residual/mode dump per MB for direct comparison; not
 tried yet this session, the `_final.gray` pixel oracle was enough for this
 level of localization). Reproduce via: `KINETIX_P_MB_DBG=1
 FIELD_DISPLAY_ORDER=1 FIELD_CLIP=Sharp_MP_PAFF_1r2 cargo test -p
-tpt-kinetix-h264 --test dbg_field_triage --release -- --nocapture` (dumps
+out-kinetix-h264 --test dbg_field_triage --release -- --nocapture` (dumps
 `all16_mv` per MB — added this session) plus a fresh
 `JM_DUMP_DIR=<dir> JM_DUMP_POC=6 <jm-oracle>/ldecod.exe -p
 InputFile=<Sharp_MP_PAFF_1r2.jvt copied to in.264> -p OutputFile=out.yuv`
@@ -3424,7 +3424,7 @@ where prior sessions left it (see the memory system's
 `project_h264_current_open_work` note and this file's CANLMA2 sections).
 
 New debug hooks added this continuation (all env-gated, all in
-`tpt-kinetix-h264/src/decoder/mod.rs`): `KINETIX_B_MB_DBG` (B-slice
+`out-kinetix-h264/src/decoder/mod.rs`): `KINETIX_B_MB_DBG` (B-slice
 MB types/CABAC-vs-CAVLC/direct-mode header dump, both the multi-slice and
 legacy single-slice B paths), `KINETIX_PPS_DBG` (every parsed PPS's key
 fields, immediately would have saved time on the FM1_BT_B misdirection had
@@ -3433,8 +3433,8 @@ per-4×4-cell MVs (not just cell 0) so both partitions of a P8x16/P16x8/P8x8
 MB are visible.
 
 Regression check: `cargo fmt --all -- --check`, `cargo clippy -p
-tpt-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
-tpt-kinetix-h264 --release --lib --bins --tests`, and the full ITU
+out-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
+out-kinetix-h264 --release --lib --bins --tests`, and the full ITU
 conformance suite (33/33 hard-checked BitExact, 0 failures, unchanged from
 addendum 1 — this continuation was pure investigation + tooling, no
 decoder logic changed) all pass.
@@ -3455,7 +3455,7 @@ run, even with a freshly-rebuilt binary from the current patch; root cause
 not chased further, noted as a live gap in the JM-oracle tooling for
 whoever needs per-MB JM dumps next — the plain per-frame `ldecod.exe`
 table output is still fully usable and was enough for this session).
-New Kinetix-side debug hooks (all in `tpt-kinetix-h264/src/decoder/mod.rs`
+New Kinetix-side debug hooks (all in `out-kinetix-h264/src/decoder/mod.rs`
 / `ref_pic.rs` / `tests/dbg_field_triage.rs`, all committed, all
 env-gated): `KINETIX_P_HDR_DBG` (slice_qp/idc/nref/deblock-idc for the
 legacy single-buffer P path), `KINETIX_P_MB_DBG` (first-24-MB types/MVs +
@@ -3592,8 +3592,8 @@ is still exactly where it was left; see the memory system's
 for where to pick it up.
 
 Regression check: `cargo fmt --all -- --check`, `cargo clippy -p
-tpt-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
-tpt-kinetix-h264 --release --lib --bins --tests` (269+ lib tests + every
+out-kinetix-h264 --all-targets -- -D warnings`, `cargo test -p
+out-kinetix-h264 --release --lib --bins --tests` (269+ lib tests + every
 integration test, all green, including the pre-existing `poc_type2_*` unit
 tests — unaffected by the accumulator fix since they only exercise a
 single call each), and the full ITU conformance suite (33/33 hard-checked
@@ -3618,13 +3618,13 @@ between the handoff being written and this session starting:
   are already correct (17/17, 400/400) — the handoff's "20/17" and "971/400"
   numbers were stale too.
 
-Re-baselined via `cargo test -p tpt-kinetix-h264 --test itu_conformance
+Re-baselined via `cargo test -p out-kinetix-h264 --test itu_conformance
 --release -- --nocapture`: **32 hard-checked BitExact, 0 failures** (up from
 29 at #32bz's own end — HCHP2_HHI_A and FRExt3_Panasonic_E were promoted by
 addendum 20/24 in between, already reflected in the MANIFEST).
 
 **Real bug found and fixed this session:** `Sharp_MP_PAFF_1r2` triaged with
-`FIELD_CLIP=Sharp_MP_PAFF_1r2 DIFF_FRAME=1 cargo test -p tpt-kinetix-h264
+`FIELD_CLIP=Sharp_MP_PAFF_1r2 DIFF_FRAME=1 cargo test -p out-kinetix-h264
 --test dbg_field_triage -- --nocapture` (`KINETIX_PAFF_DBG=1` to see the
 dispatch trace). Frame 0 (the IDR field pair) is byte-exact; frame 1 — the
 first P picture — decodes via `DECODE_INTERLACED: field_pic=false ...`, i.e.
@@ -3710,14 +3710,14 @@ introduced by whatever session added POC-type-1 support to `sps.rs`):**
 - `tests/dbg_field_triage.rs`'s unused `parity` loop variable.
 
 **`just check` / workspace-wide status:** `cargo fmt --all -- --check` and
-`cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings` are both
+`cargo clippy -p out-kinetix-h264 --all-targets -- -D warnings` are both
 clean. `cargo clippy --workspace --all-targets -- -D warnings` currently
 fails, but **only in `tpt-kinetix-av1`** (`redundant_field_names`,
 `manual_div_ceil` ×6, `too_many_arguments` on `decode_tile_group`) —
 pre-existing, untouched by this session, unrelated to any h264 file; not
 fixed here (out of scope, and the memory notes flag a concurrent process
 with independent push access that may already be mid-edit on that crate).
-`cargo test -p tpt-kinetix-h264 --release --lib --bins --tests` and the ITU
+`cargo test -p out-kinetix-h264 --release --lib --bins --tests` and the ITU
 suite both pass (269+ lib tests, 32/32 hard-checked ITU clips).
 
 Working-tree note: this session also picked up and committed the
@@ -4611,9 +4611,9 @@ EXACT (was 38/41); poc 110 TOP 253/50 -> 78/2; 117 BOT 344/71 -> 132/2;
 119 BOT 661/135 -> 99/2; 124 TOP 314/84 -> 54/2; 125 BOT 152/77 -> 47/2;
 130 TOP 123/48 -> 40/3; 131 BOT 339/95 -> 88/2. `fields with post max > 10:
 0` (was 8). P-field control group unchanged at 25/25 exact. Gates: `cargo
-test -p tpt-kinetix-h264` all suites 388 passed / 0 failed (full 33-clip ITU
+test -p out-kinetix-h264` all suites 388 passed / 0 failed (full 33-clip ITU
 conformance suite included - no regression anywhere), lib 273/273, `cargo
-fmt -p tpt-kinetix-h264 --check` clean, `cargo clippy -p tpt-kinetix-h264
+fmt -p out-kinetix-h264 --check` clean, `cargo clippy -p out-kinetix-h264
 --all-targets` clean (the workspace-wide clippy run currently trips on the
 CONCURRENT session's in-flight tpt-kinetix-av1 edits, not on h264).
 
@@ -4923,7 +4923,7 @@ aggregates). Reproduce with:
 ```
 $env:KINETIX_FIELD_BUF_OUT="$env:TEMP\capa1f\f"
 $env:FIELD_CLIP='CAPA1_TOSHIBA_B'
-cargo test -p tpt-kinetix-h264 --test dbg_field_triage -- --nocapture
+cargo test -p out-kinetix-h264 --test dbg_field_triage -- --nocapture
 python tools/capa1_field_census.py
 ```
 
@@ -5412,7 +5412,7 @@ built toward. Reach for it earlier next time. The probe's exact output format
 is quoted above; the census tool prints the dirty-MB map it must be joined
 against.
 
-**Housekeeping:** probe removed (`git checkout -- tpt-kinetix-h264/src/mv.rs`);
+**Housekeeping:** probe removed (`git checkout -- out-kinetix-h264/src/mv.rs`);
 no decoder source change in this session or the previous one. Only
 `todo-h264.md` modified plus `tools/capa1_field_census.py`. Env vars unset.
 
@@ -5445,10 +5445,10 @@ temporal-direct inputs** — not a structural rewrite.
    be re-examined; per addendum 29 they are probably the same bug with a
    bigger POC error, not a second bug.
 
-**Housekeeping:** probe removed (`git checkout -- tpt-kinetix-h264/src/mv.rs`);
+**Housekeeping:** probe removed (`git checkout -- out-kinetix-h264/src/mv.rs`);
 no decoder source change. Only `todo-h264.md` modified plus the
 `tools/capa1_field_census.py` analysis tool. `cargo fmt --all --check` clean,
-`cargo test -p tpt-kinetix-h264 --lib` 273/273.
+`cargo test -p out-kinetix-h264 --lib` 273/273.
 
 
    `mvdScale = 6`. **Check the `(2^(mvdScale-1)) >> mvdScale` rounding term
@@ -5557,8 +5557,8 @@ the oracle working, this is now a one-command check on both sides:
   the environment; do not inherit claims about it.
 
 **Housekeeping:** no decoder source change. Probes still reverted.
-`cargo fmt --all --check` clean, `cargo clippy -p tpt-kinetix-h264
---all-targets -- -D warnings` clean, `cargo test -p tpt-kinetix-h264 --lib`
+`cargo fmt --all --check` clean, `cargo clippy -p out-kinetix-h264
+--all-targets -- -D warnings` clean, `cargo test -p out-kinetix-h264 --lib`
 ## SESSION #32d4 ADDENDUM 34 (2026-09-28, continuation) — WITH THE ORACLE
 RESTORED, THE WHOLE "BIN 7" MYSTERY IS GONE: our poc-119 bottom-field parse is
 bin-identical to JM for all 33,340 of JM's decision bins. Addenda 21/22/26 were
@@ -5660,8 +5660,8 @@ questions that twenty addenda of inference could not.
 `decoder/interlaced.rs`). No decoder source change. Extracted traces kept at
 `%TEMP%\ours119.txt` (126,484 lines) and `%TEMP%\jm119.txt` (33,340 lines) for
 re-analysis without re-running. `cargo fmt --all --check` clean, `cargo clippy
--p tpt-kinetix-h264 --all-targets -- -D warnings` clean, `cargo test -p
-tpt-kinetix-h264 --lib` 273/273.
+-p out-kinetix-h264 --all-targets -- -D warnings` clean, `cargo test -p
+out-kinetix-h264 --lib` 273/273.
 
 
 273/273. JM artifacts under `%TEMP%\jmrun\` (`capa1.264`, `bin91.txt`,
@@ -5845,7 +5845,7 @@ shape is not semantic. The recurring lesson across this whole investigation
 cause.
 
 **Housekeeping:** probe reverted; no decoder source change. `cargo fmt --all
---check` clean, `cargo test -p tpt-kinetix-h264 --lib` 273/273. Capture at
+--check` clean, `cargo test -p out-kinetix-h264 --lib` 273/273. Capture at
 `%TEMP%\mbdetail.txt`.
 
 
@@ -5858,8 +5858,8 @@ cause.
 
 **Housekeeping:** no decoder source change this session (analysis only, on
 already-captured traces). `cargo fmt --all --check` clean, `cargo clippy -p
-tpt-kinetix-h264 --all-targets -- -D warnings` clean, `cargo test -p
-tpt-kinetix-h264 --lib` 273/273. Inputs: `%TEMP%\ourslices.txt`,
+out-kinetix-h264 --all-targets -- -D warnings` clean, `cargo test -p
+out-kinetix-h264 --lib` 273/273. Inputs: `%TEMP%\ourslices.txt`,
 `%TEMP%\ours119.txt`, `%TEMP%\jm119.txt`, `%TEMP%\orbbins.log`.
 
 
@@ -5872,7 +5872,7 @@ tpt-kinetix-h264 --lib` 273/273. Inputs: `%TEMP%\ourslices.txt`,
 **Housekeeping:** no decoder source change this session;
 `tools/capa1_field_census.py` extended (P-field control group + per-sample
 localisation). `cargo fmt --all --check` clean, `cargo test -p
-tpt-kinetix-h264 --lib` 273/273. Full output at `%TEMP%\census6.txt`.
+out-kinetix-h264 --lib` 273/273. Full output at `%TEMP%\census6.txt`.
 
 
 specifically the *field* instantiation that is wrong, not temporal direct
@@ -5886,9 +5886,9 @@ guesses: frame-coded B slices exercise it and come out exact.
 **Housekeeping:** no source change landed this session. All probes (the
 `KINETIX_SKIPPROBE` header dump in `cabac_b.rs`, `MbSkipFlagContext::
 debug_states`, `entropy::init_pb_ctx_public`) were reverted — `git status`
-shows `tpt-kinetix-h264/` clean. Gates re-run on the clean tree:
-`cargo fmt --all --check` clean, `cargo clippy -p tpt-kinetix-h264
---all-targets -- -D warnings` clean, `cargo test -p tpt-kinetix-h264` all
+shows `out-kinetix-h264/` clean. Gates re-run on the clean tree:
+`cargo fmt --all --check` clean, `cargo clippy -p out-kinetix-h264
+--all-targets -- -D warnings` clean, `cargo test -p out-kinetix-h264` all
 suites pass (0 failures). Analysis inputs are preserved in
 `%TEMP%\capa1_ours.yuv`, `%TEMP%\capa1_ff.yuv`, `%TEMP%\mbtype.log`,
 `%TEMP%\skipprobe.log`.
@@ -6247,7 +6247,7 @@ The first bad samples are MB0, cell 0:
 - Kinetix runtime reconstruction produces the expected vertical-basis residual.
 - The reference field requires a different, varying residual pattern.
 
-The JM oracle input `tpt-kinetix-h264/jmtrace/in.264` is an exact byte prefix
+The JM oracle input `out-kinetix-h264/jmtrace/in.264` is an exact byte prefix
 of the full `CVFI1_Sony_D.jsv` fixture (101,805 bytes versus 524,421 bytes), so
 its first-picture trace is valid but it cannot establish the full-stream
 frame-1 result. The earlier “POC 3” JM coefficient comparison must not be used
@@ -6866,7 +6866,7 @@ implementation — not reimplemented, just instrumented). Rebuilt with
 `gcc -DTRACE=1` and re-ran against `CANLMA2_Sony_C.jsv`.
 
 Cross-referencing this against a `KINETIX_BINTRACE=1` dump of
-`tpt-kinetix-h264/tests/dbg_canlma2_mb4_bintrace.rs` (new, throwaway oracle
+`out-kinetix-h264/tests/dbg_canlma2_mb4_bintrace.rs` (new, throwaway oracle
 test that calls `parse_p_slice_cabac` directly on the real fixture's POC-1
 NAL) proved **`MB(4,0)`'s entire residual walk — all 4 luma 4×4
 `coded_block_flag` contexts/values in luma group 0, both chroma-DC
@@ -6993,7 +6993,7 @@ skipped, `skip_flag = !value1`; also the "look-ahead" bottom-of-pair
 following bottom MB)` lines must not be confused with the current MB's own
 `mb_skip_flag` line by a naive `grep`/`awk` match — cost an hour of false
 leads before being caught), and cross-referenced against
-`KINETIX_BINTRACE=1 cargo test -p tpt-kinetix-h264 --test
+`KINETIX_BINTRACE=1 cargo test -p out-kinetix-h264 --test
 dbg_canlma2_mb4_bintrace -- --nocapture` (harness already dumps MB8..180).
 JM's raw CABAC `mb_type` codeword (the `act_sym` from
 `readMB_typeInfo_CABAC_p_slice`, values 1/2/3/4) maps to this crate's shape
@@ -7101,7 +7101,7 @@ above) to confirm no *other* divergence hides between pair 71 and pair 86
 before declaring `CANLMA2_Sony_C` fixed.
 
 No Kinetix source was changed this session (fix was not landed with enough
-confidence) — `cargo test -p tpt-kinetix-h264 --lib` (269 passed) and the
+confidence) — `cargo test -p out-kinetix-h264 --lib` (269 passed) and the
 full ITU conformance suite (27 hard-checked bit-exact, 0 failures) were
 re-verified unchanged as a baseline check only.
 
@@ -7653,7 +7653,7 @@ Kinetix's basic P `mb_type` binarization — is *not* buggy**: wrote a
 from-scratch Python CABAC arithmetic decoder
 (`scripts`/scratch, not committed) that parses `RANGE_TAB_LPS`, `TRANS_IDX_LPS`,
 `TRANS_IDX_MPS`, and `CABAC_CTX_INIT_PB0` directly out of
-`tpt-kinetix-h264/src/entropy.rs` / `cabac_tables.rs` via regex (not
+`out-kinetix-h264/src/entropy.rs` / `cabac_tables.rs` via regex (not
 hand-transcribed) and replays the real `CANLMA2_Sony_C.jsv` bytes for POC 1's
 P slice starting at RBSP byte 6 (`local bit 48` — computed independently from
 the slice-header bit widths, cabac-byte-aligned). Init `codIOffset` computed
@@ -7676,9 +7676,9 @@ raw trace superficially suggested.
 
 **Where this leaves the real bug**: still open, still unlocated. Kinetix's
 actual failure point this session (`KINETIX_BINTRACE=1 cargo test -p
-tpt-kinetix-h264 --test dbg_canlma2_mb4_bintrace -- --nocapture`, harness
+out-kinetix-h264 --test dbg_canlma2_mb4_bintrace -- --nocapture`, harness
 range widened to `8..180`) is deterministic and precise:
-`parse_p_macroblock_cabac` (`tpt-kinetix-h264/src/slice_data/cabac_b.rs` —
+`parse_p_macroblock_cabac` (`out-kinetix-h264/src/slice_data/cabac_b.rs` —
 shared P/B macroblock body, despite the name; `parse_p_slice_cabac` dispatches
 into it) returns `SliceDataError::Unsupported("ref_idx overflow")` while
 decoding `MB173` = `MB(41,3)` (pair 86, bottom half)'s `P_8x8` `ref_idx_l0`
@@ -7687,7 +7687,7 @@ reachable because `nctx.ref_idx_field_mismatch()` is true for this MB — the
 slice's `num_ref_idx_l0_active_minus1==0` means `ref_idx_l0` wouldn't be read
 at all otherwise). **This is a concrete, oracle-independent lead for next
 session**: audit `NeighbourCtx::ref_idx_field_mismatch()` and
-`NeighbourCtx::effective_ref_idx_active()` (`tpt-kinetix-h264/src/slice_data/`
+`NeighbourCtx::effective_ref_idx_active()` (`out-kinetix-h264/src/slice_data/`
 — `cabac_b.rs` call sites, defined in `ctx.rs`) for pair 86 specifically — is
 this MB genuinely in a field/frame-mismatched-neighbour configuration (in
 which case `effective_ref_idx_active` should double to 2, and a decoded `ri`
@@ -7998,7 +7998,7 @@ compare mvd/sub_mb_type/cbp element-by-element.
 
 ## SESSION #32az — ITU suite re-verified on this machine; remaining KnownGaps mapped
 
-Ran `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`
+Ran `cargo test -p out-kinetix-h264 --test itu_conformance -- --nocapture`
 against the real ITU fixtures already present under `tests/fixtures/itu/`
 (64 clips). **22 hard-checked bit-exact, 0 failures, ~31s.** All of #32ax's
 temporal-direct movers (`CABA3_Sony_C`, `CANL3_Sony_C`, `CVBS3_Sony_C`,
@@ -8248,9 +8248,9 @@ promoted from `Expect::KnownGap` to `Expect::BitExact` in
 `itu_conformance.rs`. Full suite: **22 hard-checked bit-exact, 0
 failures** (was 20/0). No regression on any of the previously-exact 20 —
 re-ran the full `itu_conformance` suite and `cargo test -p
-tpt-kinetix-h264 --lib --tests` after the fix, both clean.
-`cargo fmt -p tpt-kinetix-h264 --check` and `cargo clippy -p
-tpt-kinetix-h264 --all-targets -- -D warnings` both clean; `cargo build
+out-kinetix-h264 --lib --tests` after the fix, both clean.
+`cargo fmt -p out-kinetix-h264 --check` and `cargo clippy -p
+out-kinetix-h264 --all-targets -- -D warnings` both clean; `cargo build
 --workspace` clean. (Workspace-wide `just fmt-check` fails on a pre-existing,
 untouched `tpt-kinetix-test-utils/tests/dbg_av1_testsrc2.rs` formatting
 issue belonging to the concurrent AV1 session's in-progress work — unrelated
@@ -8351,8 +8351,8 @@ went diff_bytes 520 → **0**, confirmed by the conformance harness itself
 fixes in one run). Both manifest entries flipped to `Expect::BitExact` in
 `tests/itu_conformance.rs`. `ITU conformance: 64 clip(s) present, 20
 hard-checked bit-exact, 0 failure(s)` (was 18). Full
-`cargo test -p tpt-kinetix-h264 --lib --tests` and
-`cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings` both clean;
+`cargo test -p out-kinetix-h264 --lib --tests` and
+`cargo clippy -p out-kinetix-h264 --all-targets -- -D warnings` both clean;
 `cargo fmt` clean.
 
 **Dead ends / notes for next time**: (1) `ffmpeg -debug mb_type` prints
@@ -8444,7 +8444,7 @@ the quadrant and calls `derive_temporal_direct` once per sub-cell with that
 cell's own colocated `MvCell`, committing each via a 4×4 (not 8×8)
 `commit_rect`.
 
-**Result — before/after (`cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`):**
+**Result — before/after (`cargo test -p out-kinetix-h264 --test itu_conformance -- --nocapture`):**
 
 | clip | before | after |
 |---|---|---|
@@ -8467,7 +8467,7 @@ the harness's general vocabulary (see the enum's doc comment).
 Zero regressions: every previously-bit-exact fixture (`BA1_Sony_D`,
 `BA2_Sony_F`, `CANL1_Sony_E`, `CANL2_Sony_E`, `NL1/2/3`, `SVA_NL2_E`,
 `CABA1/2`, `CABAST3_Sony_E`, `CABASTBR3_Sony_B`, `CVPCMNL1/2_SVA_C`) stayed
-at `diff_bytes=0`. Full `cargo test -p tpt-kinetix-h264 --lib --tests`
+at `diff_bytes=0`. Full `cargo test -p out-kinetix-h264 --lib --tests`
 (66 test binaries) still all pass. `just check` (fmt, clippy -D warnings,
 build, full workspace test) is clean.
 
@@ -8547,7 +8547,7 @@ way, so identical `ref_idx` values that were already comparable stay
 comparable — only genuinely cross-slice-type comparisons change).
 
 **Verification** (master, this session, before → after):
-- Baseline: `cargo test -p tpt-kinetix-h264 --lib --tests`: 66/66 test
+- Baseline: `cargo test -p out-kinetix-h264 --lib --tests`: 66/66 test
   binaries `test result: ok`, 0 failures. `itu_conformance`: "12
   hard-checked bit-exact, 0 failure(s)" (matching #32av's session-end state).
 - After the fix: still 66/66 binaries, 0 failures. `itu_conformance`: **"14
@@ -8575,9 +8575,9 @@ comparable — only genuinely cross-slice-type comparisons change).
     `CACQP3_Sony_D`), not a second instance of this session's bug. Manifest
     entry updated with this evidence; stays `Expect::Limitation`.
 
-**Files touched**: `tpt-kinetix-h264/src/decoder/mod.rs` (new
+**Files touched**: `out-kinetix-h264/src/decoder/mod.rs` (new
 `PictureAccumulator::ref_poc_per_slice` field + 3 push sites + the
-`finalize_picture` remap loop), `tpt-kinetix-h264/tests/itu_conformance.rs`
+`finalize_picture` remap loop), `out-kinetix-h264/tests/itu_conformance.rs`
 (2 fixtures promoted to `BitExact`, `CABACI3_Sony_B`'s `Limitation` message
 updated with fresh evidence). No changes to `deblock.rs`, `mv.rs`, or any
 CABAC parser. All temporary `KINETIX_DBG_MBROW`/`KINETIX_DBG_REFLIST`
@@ -8663,7 +8663,7 @@ decode, mirroring `b299291`'s P-slice accumulator shape exactly.
    picture mixing any combination of I/P/B slice types.
 
 **Verification** (master, this session, before → after):
-- Baseline: `cargo test -p tpt-kinetix-h264 --lib --tests`: 66/66 test
+- Baseline: `cargo test -p out-kinetix-h264 --lib --tests`: 66/66 test
   binaries `test result: ok`. `itu_conformance`: "64 clip(s) present, 12
   hard-checked bit-exact, 0 failure(s)".
 - After implementation: identical — 66/66 binaries pass, `itu_conformance`
@@ -8845,7 +8845,7 @@ remembering before trusting any per-frame diffmap on a stream with B
 pictures.
 
 **Verification** (master, this session, before → after):
-- Baseline (session start): `cargo test -p tpt-kinetix-h264 --lib --tests`:
+- Baseline (session start): `cargo test -p out-kinetix-h264 --lib --tests`:
   66/66 binaries `test result: ok`, 269 lib unit tests, 0 failures.
   `itu_conformance`: "64 clip(s) present, 12 hard-checked bit-exact, 0
   failure(s)".
@@ -8857,7 +8857,7 @@ pictures.
   `SVA_NL2_E`, `CVPCMNL1_SVA_C`, `CVPCMNL2_SVA_C` — none of which are
   multi-slice or P-heavy enough to exercise this session's new code path
   much, but all confirmed byte-identical, zero regression) remain exact.
-  `cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings` and
+  `cargo clippy -p out-kinetix-h264 --all-targets -- -D warnings` and
   `cargo fmt --all --check` both clean.
 - Direct evidence the new P multi-slice path is genuinely correct: a
   throwaway diffmap test decoding `CABAST3_Sony_E` (4 slices/picture, mixed
@@ -8930,10 +8930,10 @@ here with an accurate map is better than a rushed, unverified attempt at an
 11,000+ line, deeply stateful change.
 
 **Baseline reconfirmed clean** (exact numbers, `master` at `ed9ff77`):
-- `cargo test -p tpt-kinetix-h264 --lib --tests`: 66/66 test binaries
+- `cargo test -p out-kinetix-h264 --lib --tests`: 66/66 test binaries
   `test result: ok`, 0 failures anywhere in the run (`grep -c "test result: ok"`
   = 66, no `FAILED`/`panicked` lines). Lib unit tests: 269 passed.
-- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`:
+- `cargo test -p out-kinetix-h264 --test itu_conformance -- --nocapture`:
   `ITU conformance: 64 clip(s) present, 12 hard-checked bit-exact, 0
   failure(s)` — identical to SESSION #32as's own reported baseline, confirms
   nothing regressed between sessions.
@@ -9114,7 +9114,7 @@ that work now, under the banner of "fixing CABACI3_Sony_B," would just be
 that same large project with extra steps; better tracked as what it is.
 
 **What changed**: no `src/` changes. Corrected
-`tpt-kinetix-h264/tests/itu_conformance.rs`'s `CABACI3_Sony_B` manifest entry
+`out-kinetix-h264/tests/itu_conformance.rs`'s `CABACI3_Sony_B` manifest entry
 reason string (was the misleading bare `"4 slices per picture"`, now
 documents that it's an IPB stream and points at this entry) and added a
 comment above it recording the true numbers (mb 25..98 of 99 undecoded per
@@ -9124,9 +9124,9 @@ diagnosis correction only).
 
 **Verification**: `cargo build --workspace` / `cargo clippy --workspace
 --all-targets -- -D warnings` / `cargo fmt --all -- --check`: clean.
-`cargo test -p tpt-kinetix-h264 --lib --tests`: same as baseline, 0
+`cargo test -p out-kinetix-h264 --lib --tests`: same as baseline, 0
 failures (this session touched no decode logic, only a test manifest string
-and this doc). `cargo test -p tpt-kinetix-h264 --test itu_conformance --
+and this doc). `cargo test -p out-kinetix-h264 --test itu_conformance --
 --nocapture`: all 12 `Expect::BitExact` fixtures remain bit-exact; the
 diagnostic-corrected `CABACI3_Sony_B` line is unchanged numerically
 (`max_diff=186 diff_bytes=9315027/11404800`, `first_bad=Some(1)`) since no
@@ -9153,7 +9153,7 @@ one shared buffer, a macroblock's neighbour across a slice boundary was read
 as a real (available) prediction reference even though §6.4.9 requires it be
 treated as unavailable, exactly like an off-picture neighbour.
 
-**What changed** (`tpt-kinetix-h264/src/reconstruct.rs`): a new `SliceAvail`
+**What changed** (`out-kinetix-h264/src/reconstruct.rs`): a new `SliceAvail`
 struct (`slice_id_grid: &[u16]`, `mb_cols`, `cur_slice_id`, `mb_size` — 16 for
 luma, 8 for chroma) plus `SliceAvail::same_slice(x, y)`, converting an
 absolute pixel position to a macroblock index and comparing its slice id
@@ -9188,12 +9188,12 @@ summarized):
 - `cargo build --workspace` and `cargo clippy --workspace --all-targets -- -D
   warnings`: clean.
 - `cargo fmt --all -- --check`: clean.
-- `cargo test -p tpt-kinetix-h264 --lib --tests`: all 66 test binaries, 0
+- `cargo test -p out-kinetix-h264 --lib --tests`: all 66 test binaries, 0
   failures — `grep -c "test result: ok"` → 66, `grep -i "FAILED\|panicked"` →
   no matches. Lib unit tests went 268 → 269 (the one new test added below).
 - `just corpus-check` (regenerate + diff the synthetic testsrc corpus):
   `testsrc_{48x32,64x48,96x64,128x96}.h264` all `OK max_abs_diff=0`.
-- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture`: all
+- `cargo test -p out-kinetix-h264 --test itu_conformance -- --nocapture`: all
   12 `Expect::BitExact` fixtures remain exactly bit-exact (0 failures,
   "12 hard-checked bit-exact, 0 failure(s)"), specifically confirming zero
   regression on `BA1_Sony_D`, `CANL1_Sony_E`, `CABA1_Sony_D`, `CABA2_Sony_E`
@@ -9326,7 +9326,7 @@ P/B were not attempted" below.
   `flush()` finalizes any still-pending accumulator.
 
 **Verification**: `cargo check`/`clippy -D warnings`/`fmt` clean;
-`cargo test -p tpt-kinetix-h264 --lib --tests` — all 66 test binaries pass,
+`cargo test -p out-kinetix-h264 --lib --tests` — all 66 test binaries pass,
 zero failures/regressions. Fetched `CABA1_Sony_D`/`CABA2_Sony_E`/
 `BA1_Sony_D`/`CANL1_Sony_E` (closest related, previously-`BitExact` fixtures
 touching this exact code) plus the three multi-slice targets and ran
@@ -9648,7 +9648,7 @@ gap, not a decode failure (`grep`-ing the trace for "parse error" /
 conformant decoder must synthesize a "non-existing" short-term reference
 picture for every skipped `frame_num` value and run them through the same
 sliding-window process — `grep -rn "gaps_in_frame_num\|non.existing\|NonExisting\|fill_gap"
-tpt-kinetix-h264/src` turns up only the SPS flag's own parse, no such
+out-kinetix-h264/src` turns up only the SPS flag's own parse, no such
 synthesis anywhere. Confirmed via `REFLIST P L0` trace: at `frame_num=16`,
 the DPB holds exactly one real entry (the frame-60 IDR: `pic_num=0
 frame_num=0 poc=0`), and `build_ref_list_l0`'s documented "pad by
@@ -10082,7 +10082,7 @@ YUV) is freely downloadable from `www.itu.int/wftp3/av-arch/jvt-site/draft_confo
 
 - **`tools/fetch-h264-conformance.sh`** + `just fetch-h264-conformance` — fetches
   a curated ~70-clip subset (covering exactly what `pixel_exact` claims + a few
-  negatives) into `tpt-kinetix-h264/tests/fixtures/itu/<CLIP>/`, discards the
+  negatives) into `out-kinetix-h264/tests/fixtures/itu/<CLIP>/`, discards the
   multi-MB `trace.txt`. Git-ignored (`*.264`, `*.jsv`, the `itu/` dir).
 - **`tests/itu_conformance.rs`** — decodes each clip NAL-by-NAL + `flush()`,
   compares **byte-exact** against the clip's own `_rec.yuv` (no third-party
@@ -10162,7 +10162,7 @@ Branch `h264/progressive-8x8-strict-mode`, commit `824b144`.
   scaffold (untrue since `pixel_exact` flipped in `820fd24`) — was failing on
   master. Now decodes a baseline clip NAL-by-NAL and asserts bit-exact vs ffmpeg
   in both modes.
-- **Regression:** full `tpt-kinetix-h264` suite (373 tests) + `tpt-kinetix-h264`
+- **Regression:** full `out-kinetix-h264` suite (373 tests) + `out-kinetix-h264`
   clippy `--all-targets -D warnings` + `tpt-kinetix-test-utils` conformance (11)
   all green.
 - **NOT touched (concurrent AV1 process's area):** `cargo clippy --workspace` is
@@ -10277,7 +10277,7 @@ touched here.
 
 **A5 status:** committed in `fd77230` (g6 clips + assertions + `cabac_p.rs`
 8×8 scan-perm fix). `dbg_g6_mbaff_deblock` `g6_cabac_ip`/`g6_cabac_ibp` I+P+B
-pins all green. Full `tpt-kinetix-h264` test suite green (incl. the 8 repaired
+pins all green. Full `out-kinetix-h264` test suite green (incl. the 8 repaired
 diagnostic tests).
 
 ### REMAINING WORK (supersedes #32ae's BUG 1/BUG 3 lists)
@@ -11227,8 +11227,8 @@ CABAC inter parse path) are now gated behind
 `if std::env::var("KINETIX_BINTRACE").is_ok() { ... }`, matching the convention
 used in `cabac_i.rs`, `cabac_p.rs`, `cavlc.rs`, `mv.rs`, `deblock.rs`, and
 `ctx.rs`. This was flagged in #32q as a prerequisite before MBAFF P/B is a
-supported path. `cargo clippy -p tpt-kinetix-h264 --all-targets -- -D warnings`
-clean; `cargo test -p tpt-kinetix-h264 --lib` 246/246 green.
+supported path. `cargo clippy -p out-kinetix-h264 --all-targets -- -D warnings`
+clean; `cargo test -p out-kinetix-h264 --lib` 246/246 green.
 
 ## SESSION #32q (2026-08-28) — CABAC MBAFF P/B slice: pair-scan addressing bug fixed
 
@@ -11435,14 +11435,14 @@ Re-audit of the long-open "conformance_matrix.rs cabac_p / cabac_b cells fail
 work (the #32b amvd-neighbour-convention fix and the #32j CAVLC/CABAC inter-MB
 `transform_size_8x8_flag` fix, most likely):
 
-- `cargo test -p tpt-kinetix-h264 --test conformance_matrix` → `[PASS] cabac_p`
+- `cargo test -p out-kinetix-h264 --test conformance_matrix` → `[PASS] cabac_p`
   / `[PASS] cabac_b`, both deblock variants, `max_abs_diff=0
   differing_samples=0/4608`. `high8x8_i` (High/8×8 CABAC I) also `[PASS]`.
 - `examples/dbg_cabac_p_matrix` — all 16 repro cases (incl. the qp18/qp21
   streams that straddled the preCtxState 63/64 boundary and used to hit
   "end_of_slice_flag mismatch (P-CABAC)") now decode bit-exact; every P slice
   reaches MB11 with `eos=true is_last=true`.
-- Full `cargo test -p tpt-kinetix-h264` suite green (all integration binaries,
+- Full `cargo test -p out-kinetix-h264` suite green (all integration binaries,
   0 failed); lib 246/246.
 
 Toolchain note (invalidates the old "no C toolchain on the Windows dev box"
@@ -11975,7 +11975,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
 
 ## SESSION #32 (2026-08-24) — DECISIVE NARROWING of the c_p8x8 P/B gap
 
-> New harness: `tpt-kinetix-h264/tests/dbg_qpel_brute.rs` (qpel SAD brute
+> New harness: `out-kinetix-h264/tests/dbg_qpel_brute.rs` (qpel SAD brute
 > force + variant matrix + pixel forensics). All work compared PRE-deblock on
 > both sides (`KINETIX_SKIP_DEBLOCK=1` + `ffmpeg -skip_loop_filter all`).
 
@@ -12172,7 +12172,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
      remaining G.4 work; syntax layer is complete and correct.
 
    - **PHASE G.5 BASELINE ESTABLISHED:** new corpus harness
-     `tpt-kinetix-h264/tests/dbg_g5_interlaced.rs` encodes genuinely
+     `out-kinetix-h264/tests/dbg_g5_interlaced.rs` encodes genuinely
      interlaced x264 streams (`interlaced=1:tff=1`, i.e. MBAFF) across
      4 configurations (CABAC I-only / IP / IBP / CAVLC IP at 64x64) and
      measures per-frame SAD vs ffmpeg (`-skip_loop_filter all`).
@@ -12207,7 +12207,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
      instead (documented in the test; oracle kept for MB0-8 differentials).
 
    - **DONE (same day) — engine-level differential BUILT and PASSED:**
-     `tpt-kinetix-h264/tests/dbg_engine_diff.rs` mechanically ports ffmpeg's
+     `out-kinetix-h264/tests/dbg_engine_diff.rs` mechanically ports ffmpeg's
      REAL engine arithmetic (cabac_functions.h @ n5.1: refill/refill2/
      get_cabac_inline/bypass/terminate) and parses `ff_h264_cabac_tables`
      OUT OF THE VENDORED SOURCE (`cabac_ref.c`, kept at repo root) at test
@@ -12288,7 +12288,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
       row/column of macroblocks). `cavlc_iframe_no_deblock_is_bitexact` and
       `cavlc_iframe_with_deblock_tracks_progress` are now both bit-exact
       (max_diff=0, not just <=20), and an ad hoc corpus of 8 MB-aligned
-      clips (`tpt-kinetix-h264/examples/corpus_check.rs`, varied resolution
+      clips (`out-kinetix-h264/examples/corpus_check.rs`, varied resolution
       48x32..128x96, testsrc/smptebars content) all decode bit-exact.
       Remaining known gap: non-16-aligned picture dimensions still show
       small (≤53) pixel diffs clustered at the partial right/bottom
@@ -12500,7 +12500,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
       \
       `cabac_conformance.rs`'s two tests (Main-profile CABAC I-frame,
       deblocking on/off, real `testsrc` content at 64×48) are un-`#[ignore]`d
-      and pass bit-exact; all 191 `tpt-kinetix-h264` unit tests still pass.
+      and pass bit-exact; all 191 `out-kinetix-h264` unit tests still pass.
 - [x] Validate bit-exact Main/High CABAC decode vs `ffmpeg` — done, see above.
 
   #### Phase D.1 — remaining context-index tables
@@ -13005,7 +13005,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
       F.4 above (`predict_8x8` neighbour-clamping / dequant-IDCT wiring),
       unaffected by this fix and confirmed via `git stash` to pre-date it.
 
-      **Further localization (uncommitted scratch harness, `tpt-kinetix-h264/
+      **Further localization (uncommitted scratch harness, `out-kinetix-h264/
       examples/dbg_8x8_localize.rs`, per-macroblock max/avg diff dump — not
       committed, recreate similarly if needed):** on the same 64×48
       `mandelbrot` clip at `8x8dct=1`, **every** macroblock in the frame shows
@@ -13074,10 +13074,10 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
   (a skip P-field MB with zero MV copies the reference field verbatim into the
   half-height output — the field analogue of `inter_skip_copies_reference`), and
   `decoder::tests::interleave_fields_places_top_and_bottom_parity`. All three
-  pass; the rest of the `tpt-kinetix-h264` lib suite is unaffected (the only two
+  pass; the rest of the `out-kinetix-h264` lib suite is unaffected (the only two
   failures are the pre-existing `field_mv_scaling_same_parity_doubles` and
   `predict_8x8_vertical`, which fail on `master` unmodified). `cargo clippy -p
-  tpt-kinetix-h264` is clean.
+  out-kinetix-h264` is clean.
 
   **Remaining gaps (not yet done):**
   - B-field pictures still `Fallback` (same structure as P-field — add
@@ -13160,7 +13160,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
 
 ### H.264 — Phase H: conformance & capability flip
 
-- [x] Cross-codec conformance harness vs `ffmpeg`: `tpt-kinetix-h264/tests/conformance_matrix.rs`
+- [x] Cross-codec conformance harness vs `ffmpeg`: `out-kinetix-h264/tests/conformance_matrix.rs`
       enumerates a profile × entropy × frame-structure × deblock × resolution
       matrix (CAVLC/CABAC I/P/B, 4:2:0, progressive, 16-px-aligned, no 8×8) and
       asserts **bit-exact** (`max_abs_diff == 0`) decode vs `ffmpeg` for every
@@ -13176,7 +13176,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
       non-16-aligned still open). Stale claim that B-frames, CABAC P/B, and
       weighted prediction were unimplemented — contradicting the passing
       conformance suites — has been corrected. `tpt-kinetix-core` `capabilities.rs`
-      and `tpt-kinetix-h264/README.md` status sections updated to match.
+      and `out-kinetix-h264/README.md` status sections updated to match.
 - [~] **Global `pixel_exact` flip — gated (NOT flipped).** The decoder is
       bit-exact for its supported subset, but `pixel_exact` is a *global* honesty
       flag, and genuine gaps remain: the 8×8 transform / High profile (Phase F),
@@ -13197,7 +13197,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
       - **2026-08-23 session — root cause narrowed substantially; the failure
         is a real CABAC *desync* inside `parse_p_slice_cabac`, not an
         unimplemented live-decoder path.** Reproduced minimally with
-        `tpt-kinetix-h264/examples/dbg_cabac_p_matrix.rs` (generates the exact
+        `out-kinetix-h264/examples/dbg_cabac_p_matrix.rs` (generates the exact
         matrix-cell clip via ffmpeg, decodes, reports): the P slice fails with
         `Unsupported("end_of_slice_flag mismatch (P-CABAC)")`, i.e. the parser
         reaches MB11 but its terminate bin reads 0 instead of 1 → the
@@ -13485,7 +13485,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
            threads the caller's tracer through all slice parsing and B/P
            reconstruction, so `on_motion_comp`/`on_mb_parsed`/coefficient hooks
            now fire on real CABAC P/B streams via `decode_with_tracer`.
-        3. **New harnesses** in `tpt-kinetix-h264/tests/dbg_b_implied_pred.rs`:
+        3. **New harnesses** in `out-kinetix-h264/tests/dbg_b_implied_pred.rs`:
            (a) `p_boxmv_minimal` — a pure-IP CABAC clip with a moving box
            (nonzero MVDs over a static background) asserted BIT-EXACT vs
            ffmpeg. This is a new regression guard for the mvd path that every
@@ -13607,7 +13607,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
            takes the 16x8/8x16 branch before failing, so it is not THE cell
            blocker), regression-tested in `entropy.rs`
            (`shared_ctx17/32_is_initialised_identically_*`).
-        2. **New oracle harness** `tpt-kinetix-h264/tests/dbg_p_oracle_replay.rs`:
+        2. **New oracle harness** `out-kinetix-h264/tests/dbg_p_oracle_replay.rs`:
            FFmpeg-convention engine (`ff_init_cabac_decoder` + decision/
            terminate/bypass, validated bin-for-bin against the crate's own
            `CabacDecoder`) + ffmpeg-exact P-slice element walk over the exact
@@ -14404,7 +14404,7 @@ CABAC MBAFF residual desync (#32e item 6), MBAFF P reconstruction (#32f item
          NEXT STEPS: (1) run dbg_mvp_trace's qpel brute force (prescribed
             earlier) against the post-fix build to decide (b); (2) extend
             the same lockstep technique to the B slice payload.
-         ALSO THIS SESSION: temporary `[profile.dev.package.tpt-kinetix-h264]
+         ALSO THIS SESSION: temporary `[profile.dev.package.out-kinetix-h264]
          codegen-units = 1` in root Cargo.toml works around a reproducible
          lld-link "undefined symbol: anon.*" cross-CGU link failure for the
          h264 lib-test binary on this machine; remove when toolchain fixed.
@@ -14544,16 +14544,16 @@ reference trace showing a divergent edge; the 34 hard-checked bit-exact ITU
 clips plus the CAVLC/CABAC P/B suites are the authority here.
 
 ### Verified state at this commit
-- `cargo test -p tpt-kinetix-h264 --lib` — **273 passed**, 0 failed.
-- `cargo test -p tpt-kinetix-h264 --test conformance_matrix` — **15 bit-exact,
+- `cargo test -p out-kinetix-h264 --lib` — **273 passed**, 0 failed.
+- `cargo test -p out-kinetix-h264 --test conformance_matrix` — **15 bit-exact,
   0 unexpected failures** (needs `--nocapture`; see the warning in the
   `todo.md` preamble about tests that silently skip).
-- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture` —
+- `cargo test -p out-kinetix-h264 --test itu_conformance -- --nocapture` —
   **64 clips present, 34 hard-checked bit-exact, 0 failures** (up from the 33
   cited in the index row). The fixtures ARE on disk in
-  `tpt-kinetix-h264/tests/fixtures/itu/`, so the earlier "no fixtures, cannot
+  `out-kinetix-h264/tests/fixtures/itu/`, so the earlier "no fixtures, cannot
   verify" caveat in `todo.md` no longer applies on this machine.
-- `cargo clippy -p tpt-kinetix-h264 -p tpt-kinetix-av1 --all-targets` — clean.
+- `cargo clippy -p out-kinetix-h264 -p tpt-kinetix-av1 --all-targets` — clean.
 
 ### Remaining (H.264) — SUPERSEDED by the 2026-09-29 2nd-session note at the
 ### end of this file; several items below were measured and are now closed
@@ -14577,16 +14577,16 @@ clips plus the CAVLC/CABAC P/B suites are the authority here.
 
 The previous session's "Remaining (H.264)" list was stale, so this session
 re-measured everything from scratch against the fixtures actually on disk (31
-clip directories under `tpt-kinetix-h264/tests/fixtures/itu/`, and `ffmpeg`
+clip directories under `out-kinetix-h264/tests/fixtures/itu/`, and `ffmpeg`
 2023-12-28 on `PATH`).
 
 ### Baseline (all re-run, clean environment)
-- `cargo test -p tpt-kinetix-h264 --lib` — **273 passed**, 0 failed.
-- `cargo test -p tpt-kinetix-h264 --test conformance_matrix -- --nocapture` —
+- `cargo test -p out-kinetix-h264 --lib` — **273 passed**, 0 failed.
+- `cargo test -p out-kinetix-h264 --test conformance_matrix -- --nocapture` —
   **15 bit-exact, 0 unexpected failures**.
-- `cargo test -p tpt-kinetix-h264 --test itu_conformance -- --nocapture` —
+- `cargo test -p out-kinetix-h264 --test itu_conformance -- --nocapture` —
   **64 clips present, 34 hard-checked bit-exact, 0 failures**.
-- `cargo clippy -p tpt-kinetix-h264 -p tpt-kinetix-av1 --all-targets
+- `cargo clippy -p out-kinetix-h264 -p tpt-kinetix-av1 --all-targets
   -- -D warnings` — clean. `cargo fmt --check` — clean.
 
 ### Corrections to the prior "Remaining (H.264)" list (measured, not assumed)
@@ -14611,7 +14611,7 @@ clip directories under `tpt-kinetix-h264/tests/fixtures/itu/`, and `ffmpeg`
 This clip (PAFF, CAVLC B) is by far the closest ITU clip to bit-exact:
 `max_diff=4`, only **2348 differing bytes of 15,552,000**, and 21 of 30
 reference frames byte-identical. A new harness
-(`tpt-kinetix-h264/tests/dbg_itu_localize.rs`, driven by `ITU_CLIP` so it
+(`out-kinetix-h264/tests/dbg_itu_localize.rs`, driven by `ITU_CLIP` so it
 reuses for any near-miss clip) localises it precisely:
 
 | frame | 1 | 5 | 7 | 11 | 13 | 17 | 19 | 23 | 25 |
@@ -14757,7 +14757,7 @@ within 3px of a macroblock edge" was consistent with this; this is the proof.
    `-skip_loop_filter all` dump to get a pre-deblock oracle, or at a plain
    dump to get the post-deblock comparison. Skips when unset.
 
-       ITU_EXT_REF=<path>  cargo test -p tpt-kinetix-h264 \
+       ITU_EXT_REF=<path>  cargo test -p out-kinetix-h264 \
            --test dbg_itu_localize compare_against_external_ref -- --nocapture
 
 2. `KINETIX_FORCE_BS="mb_x,mb_y,dir,ei[,b0,b1,b2,b3]"` in `deblock_luma_mb`
@@ -14921,13 +14921,13 @@ miss and that our implementation may not replicate:
 
 The workspace is currently **not** workspace-wide buildable: another process is
 mid-refactor in `tpt-kinetix-av1` (`cannot find type Px`, `pix_max`, …).
-`tpt-kinetix-h264`'s own **lib** builds clean and `cargo fmt -p
-tpt-kinetix-h264 --check` passes, but its `--tests` targets pull in
+`out-kinetix-h264`'s own **lib** builds clean and `cargo fmt -p
+out-kinetix-h264 --check` passes, but its `--tests` targets pull in
 `tpt-kinetix-test-utils` -> `tpt-kinetix-av1`, so **`cargo test -p
-tpt-kinetix-h264` cannot run** until that lands. The findings above are from
+out-kinetix-h264` cannot run** until that lands. The findings above are from
 source analysis plus the traces captured earlier in session (b); the
 candidate-(1) fix is **not yet implemented or measured** and must be validated
-with `cargo test -p tpt-kinetix-h264 --test conformance_matrix -- --nocapture`
+with `cargo test -p out-kinetix-h264 --test conformance_matrix -- --nocapture`
 (expect 15 bit-exact / 0 unexpected failures) and the 123-sample frame-1
 `dbg_itu_localize` baseline before being believed.
 
@@ -14940,22 +14940,22 @@ built around (a single wrong per-segment bS, most likely in `derive_bs_pair`'s
 
 ### Session 2026-09-29 (d) — measurement unblocked; new data narrows it to BOUNDARY edges
 
-`cargo test -p tpt-kinetix-h264` was still blocked by the other process's
+`cargo test -p out-kinetix-h264` was still blocked by the other process's
 broken `tpt-kinetix-av1` (its `--tests` targets pull in
 `tpt-kinetix-test-utils` -> `tpt-kinetix-av1`). **`dbg_itu_localize` does not
 use `test-utils`**, so it can be compiled and run standalone against the
 already-built rlibs, which restores measurement without touching anyone's WIP:
 
     # from the workspace root, with CARGO_MANIFEST_DIR set to the crate dir
-    $env:CARGO_MANIFEST_DIR='<repo>\tpt-kinetix-h264'
-    rustc --edition 2021 -O --test tpt-kinetix-h264\tests\dbg_itu_localize.rs `
+    $env:CARGO_MANIFEST_DIR='<repo>\out-kinetix-h264'
+    rustc --edition 2021 -O --test out-kinetix-h264\tests\dbg_itu_localize.rs `
       -L target\debug\deps `
-      --extern tpt_kinetix_h264=target\debug\deps\libtpt_kinetix_h264-<hash>.rlib `
+      --extern out_kinetix_h264=target\debug\deps\libout_kinetix_h264-<hash>.rlib `
       --extern tpt_kinetix_core=target\debug\deps\libtpt_kinetix_core-<hash>.rlib `
       -o target\dbg_itu.exe
     .\target\dbg_itu.exe localize_clip --nocapture --exact
 
-Pick the newest `libtpt_kinetix_h264-*.rlib` by `LastWriteTime`; several stale
+Pick the newest `libout_kinetix_h264-*.rlib` by `LastWriteTime`; several stale
 hashes from older builds are present. Confirmed this reproduces the known
 baseline exactly (`frame 1: y_bad=123 c_bad=55 max_diff=4`). (Do **not** make
 the `test-utils` dev-dependency `optional` to achieve this — cargo rejects
@@ -15005,7 +15005,7 @@ could not converge either, which argues the boundary-edge **QP** or
 B-slice mirrored-list branch) is now measurably wrong.**
 
 **1. The stale "no fixtures / no ffmpeg" caveats in `todo.md` are FALSE.**
-`tpt-kinetix-h264/tests/fixtures/itu/cavlc_mot_picaff0_full_B/` contains both
+`out-kinetix-h264/tests/fixtures/itu/cavlc_mot_picaff0_full_B/` contains both
 `cvmp_mot_picaff0_full_B.26l` and `cvmp_mot_picaff0_full_B_rec.yuv`, and
 `ffmpeg` is on `PATH` here. Fixtures and tooling both work in this container.
 
@@ -15016,7 +15016,7 @@ decode with `KINETIX_SKIP_DEBLOCK=1`:
     ffmpeg -skip_loop_filter all -i cvmp_mot_picaff0_full_B.26l \
         -f rawvideo -pix_fmt yuv420p predeb.yuv
     KINETIX_SKIP_DEBLOCK=1 ITU_EXT_REF=<predeb.yuv> cargo test \
-        -p tpt-kinetix-h264 --test dbg_itu_localize \
+        -p out-kinetix-h264 --test dbg_itu_localize \
         compare_against_external_ref -- --nocapture
     => frame 0..29: EXACT (all 30);  total differing samples: 0
 
@@ -15154,7 +15154,7 @@ low-QP content** (a QP below ~16 gives `alpha == 0` for the whole edge), where
 it is currently a real, untested divergence. Do not expect it to move this
 clip's numbers.
 
-`cargo clippy -p tpt-kinetix-h264 --lib -- -D warnings` clean.
+`cargo clippy -p out-kinetix-h264 --lib -- -D warnings` clean.
 
 ### Next step (chroma-first, then back to luma control flow)
 
@@ -15189,18 +15189,18 @@ green `conformance_matrix` alone does not prove no regression here).
 
 ### Measurement harness — use this while `tpt-kinetix-av1` is broken
 
-`cargo test -p tpt-kinetix-h264` cannot run while av1 fails to compile (its
+`cargo test -p out-kinetix-h264` cannot run while av1 fails to compile (its
 `--tests` targets need `tpt-kinetix-test-utils` -> `tpt-kinetix-av1`).
 `dbg_itu_localize` does **not** use test-utils, so compile it directly:
 
     cd <workspace root>
-    $env:CARGO_MANIFEST_DIR='<root>\tpt-kinetix-h264'      # env!() needs this
-    $h = (Get-ChildItem target\debug\deps -Filter 'libtpt_kinetix_h264-*.rlib' |
+    $env:CARGO_MANIFEST_DIR='<root>\out-kinetix-h264'      # env!() needs this
+    $h = (Get-ChildItem target\debug\deps -Filter 'libout_kinetix_h264-*.rlib' |
           Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
     $c = (Get-ChildItem target\debug\deps -Filter 'libtpt_kinetix_core-*.rlib' |
           Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
-    rustc --edition 2021 -O --test tpt-kinetix-h264\tests\dbg_itu_localize.rs `
-      -L target\debug\deps --extern "tpt_kinetix_h264=target\debug\deps\$h" `
+    rustc --edition 2021 -O --test out-kinetix-h264\tests\dbg_itu_localize.rs `
+      -L target\debug\deps --extern "out_kinetix_h264=target\debug\deps\$h" `
       --extern "tpt_kinetix_core=target\debug\deps\$c" -o target\dbg_itu.exe
     .\target\dbg_itu.exe localize_clip --nocapture --exact
     # env overrides still work: $env:KINETIX_FORCE_QP="36,12,1,0,36"
@@ -15240,9 +15240,9 @@ two were indistinguishable in the log — an edge localized in the failing B
 field was indistinguishable from the correct P field's edge at the same place.
 (I initially misread P-field entries as B-field ones because of this.)
 
-- `tpt-kinetix-h264/src/deblock.rs`: new `set_deblock_pic_tag(&'static str)`
+- `out-kinetix-h264/src/deblock.rs`: new `set_deblock_pic_tag(&'static str)`
   (thread-local) + a `pic=` prefix on both `idx0` trace lines.
-- `tpt-kinetix-h264/src/decoder/interlaced.rs`, `decoder/mod.rs`: every
+- `out-kinetix-h264/src/decoder/interlaced.rs`, `decoder/mod.rs`: every
   `deblock_luma_mb` call site is now tagged `"P"`, `"B"` or `"FRAME"`.
 
 Purely additive debug output; no behavioural change. Verified: 273 lib tests,
@@ -15277,7 +15277,7 @@ outside `tests/fixtures/`, or delete them before re-running.
   reason the reference skips that edge. The unfiltered trace of all pictures is
   too noisy to attribute to frame 1's B field; a per-picture tag on the chroma
   trace (like `set_deblock_pic_tag` for luma) is needed before it is useful.
-- `cargo test -p tpt-kinetix-h264 --lib` is still blocked: `tpt-kinetix-av1`
+- `cargo test -p out-kinetix-h264 --lib` is still blocked: `tpt-kinetix-av1`
   (concurrent process, uncommitted edits) fails to compile. H.264 lib clippy
   `-D warnings` is clean.
 

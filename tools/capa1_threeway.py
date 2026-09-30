@@ -17,7 +17,7 @@ from collections import defaultdict
 
 TEMP = os.environ["TEMP"]
 DUMP = os.path.join(TEMP, "capa1f")
-ITU = "tpt-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B_dec.yuv"
+ITU = "out-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B_dec.yuv"
 FFN = os.path.join(TEMP, "capa1_nolf.yuv")
 W, H = 352, 288
 FW, FH = W, H // 2

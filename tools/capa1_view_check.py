@@ -11,7 +11,7 @@ from collections import defaultdict
 
 TEMP = os.environ["TEMP"]
 VIEWS = os.path.join(TEMP, "capa1views")
-REF = "tpt-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B_dec.yuv"
+REF = "out-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B_dec.yuv"
 W, H = 352, 288
 FW, FH = W, H // 2
 FRAME_LEN = W * H * 3 // 2

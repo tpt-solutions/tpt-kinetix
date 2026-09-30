@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use tpt_kinetix_av1::entropy::{BlockMarker, SymbolTraceEntry};
-use tpt_kinetix_h264::TracePlane;
+use out_kinetix_h264::TracePlane;
 
 use crate::trace_dump::{MapTracer, MbInfo, Stage};
 
@@ -239,7 +239,7 @@ pub fn first_divergence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tpt_kinetix_h264::DecodeTracer;
+    use out_kinetix_h264::DecodeTracer;
 
     #[test]
     fn map_tracer_round_trips_json() {

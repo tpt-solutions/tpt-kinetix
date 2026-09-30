@@ -12,9 +12,9 @@ When opening a GitHub issue from one of these, copy the **Issue** text and add t
 ## 1. H.264 CABAC entropy decoding
 
 - **Difficulty:** hard
-- **Pointer:** `tpt-kinetix-h264/src/entropy.rs` (CAVLC scaffold at
-  `tpt-kinetix-h264/src/cavlc.rs`), slice header parsing in
-  `tpt-kinetix-h264/src/nal.rs`
+- **Pointer:** `out-kinetix-h264/src/entropy.rs` (CAVLC scaffold at
+  `out-kinetix-h264/src/cavlc.rs`), slice header parsing in
+  `out-kinetix-h264/src/nal.rs`
 - **Why good-first-ish:** CABAC is a self-contained spec module (ITU-T H.264
   Annex 9); can be unit-tested against the spec's decoding-engine examples
   independently of prediction.
@@ -25,8 +25,8 @@ When opening a GitHub issue from one of these, copy the **Issue** text and add t
 ## 2. H.264 intra prediction
 
 - **Difficulty:** medium
-- **Pointer:** `tpt-kinetix-h264/src/prediction.rs`, transform/IQ scaffold in
-  `tpt-kinetix-h264/src/transform.rs`, `DecoderCapabilities` in
+- **Pointer:** `out-kinetix-h264/src/prediction.rs`, transform/IQ scaffold in
+  `out-kinetix-h264/src/transform.rs`, `DecoderCapabilities` in
   `tpt-kinetix-core/src/capabilities.rs`
 - **Issue:** "Implement H.264 intra prediction modes (4x4 + 8x8 + 16x16) and flip
   `supports_intra_prediction` to true once tested."
@@ -34,7 +34,7 @@ When opening a GitHub issue from one of these, copy the **Issue** text and add t
 ## 3. H.264 deblocking filter
 
 - **Difficulty:** medium
-- **Pointer:** `tpt-kinetix-h264/src/deblock.rs`
+- **Pointer:** `out-kinetix-h264/src/deblock.rs`
 - **Issue:** "Implement the H.264 in-loop deblocking filter (BS derivation +
   edge filtering) and update `DecoderCapabilities::supports_deblocking`."
 
@@ -42,7 +42,7 @@ When opening a GitHub issue from one of these, copy the **Issue** text and add t
 
 - **Difficulty:** easy (test wiring)
 - **Pointer:** `tpt-kinetix-test-utils/src/reference.rs`,
-  `tpt-kinetix-h264/tests/`
+  `out-kinetix-h264/tests/`
 - **Issue:** "Wire the pixel-diff harness to run over a small set of real H.264
   clips (baseline/main/high) and assert PSNR ≥ 60 dB once reconstruction lands."
 

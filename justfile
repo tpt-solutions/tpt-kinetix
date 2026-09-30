@@ -23,10 +23,10 @@ clippy:
 build:
     cargo build --workspace
 
-# Build without the patent-encumbered codecs (drops tpt-kinetix-h264
-# from the pipeline/CLI dependency graphs). See PATENTS.md.
+# Build the published engine crates (pipeline + CLI); neither depends on the
+# unpublished, patent-encumbered out-kinetix-h264. See PATENTS.md.
 build-royalty-free:
-    cargo build -p tpt-kinetix-pipeline -p tpt-kinetix-cli --no-default-features
+    cargo build -p tpt-kinetix-pipeline -p tpt-kinetix-cli
 
 # Run the whole test suite. Prefers cargo-nextest when installed.
 test:
@@ -52,7 +52,7 @@ coverage:
 fuzz-build:
     cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mkv_ebml
     cd tpt-kinetix-av1 && cargo fuzz build fuzz_obu_parse
-    cd tpt-kinetix-h264 && cargo fuzz build fuzz_h264_nal
+    cd out-kinetix-h264 && cargo fuzz build fuzz_h264_nal
     cd tpt-kinetix-vp9 && cargo fuzz build fuzz_vp9_frame
     cd tpt-kinetix-stream && cargo fuzz build fuzz_rtmp_chunk && cargo fuzz build fuzz_rtmp_amf && cargo fuzz build fuzz_rtmp_flv && cargo fuzz build fuzz_hls_playlist
 
@@ -69,7 +69,7 @@ wasm-demo:
 # C source (requires network access to fetch the pinned commit; see
 # docs/adding-a-codec.md "Extracting spec tables").
 verify-tables:
-    cargo run -p tpt-kinetix-kg -- verify-tables tpt-kinetix-h264/src/cabac_tables.rs
+    cargo run -p tpt-kinetix-kg -- verify-tables out-kinetix-h264/src/cabac_tables.rs
 
 # The full local pre-commit gate: format check, lint, build, test, spec tables.
 check: fmt-check clippy build test verify-tables
@@ -95,8 +95,8 @@ conformance-strict:
 
 # Generate the ad-hoc test-src corpus, then decode/diff every file in it.
 corpus-check:
-    cargo run -p tpt-kinetix-h264 --example gen_corpus
-    cargo run -p tpt-kinetix-h264 --example corpus_check
+    cargo run -p out-kinetix-h264 --example gen_corpus
+    cargo run -p out-kinetix-h264 --example corpus_check
 
 # AV1 differential-trace harness: decode a corpus entry (default `mandelbrot`,
 # or `--all`) with both dav1d and Av1Decoder, diff pixels, and report the
@@ -151,7 +151,7 @@ av1-oracle-tile ENTRY="testsrc":
     {{ if os() == "windows" { "python" } else { "python3" } }} tools/av1_oracle/intra_decode.py av1_tile_trace.json
 
 # Fetch the curated ITU-T H.264.1 conformance bitstream subset (~1 GB, git-ignored)
-# into tpt-kinetix-h264/tests/fixtures/itu/. The `itu_conformance` test then
+# into out-kinetix-h264/tests/fixtures/itu/. The `itu_conformance` test then
 # decodes each clip and compares byte-exact against the standard's reference YUV.
 # Re-running skips clips already present. CLIPS="A B" or GROUP=frext narrows it.
 fetch-h264-conformance:
@@ -159,7 +159,7 @@ fetch-h264-conformance:
 
 # Run every Criterion bench in the workspace.
 bench:
-    cargo bench -p tpt-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-pipeline
+    cargo bench -p out-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-pipeline
 
 # Run the benches and print a consolidated timing report.
 bench-report:

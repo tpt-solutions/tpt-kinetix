@@ -8,7 +8,7 @@ a bottom delta, and what POCs does 8.2.1 derive per picture?
 import sys
 
 path = sys.argv[1] if len(sys.argv) > 1 else (
-    "tpt-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B.264")
+    "out-kinetix-h264/tests/fixtures/itu/CAPA1_TOSHIBA_B/CAPA1_TOSHIBA_B.264")
 data = open(path, "rb").read()
 
 
