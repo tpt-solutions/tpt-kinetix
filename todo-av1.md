@@ -15125,3 +15125,22 @@ to FAIL when the fix is reverted (asserts on "U sample r2 c0") and pass with it.
 
 Still open: the ±3/±6 4:2:2 chroma residue; 4:4:4 (unchanged, diff=6260
 maxabs=12); `pixel_exact` false; FATE samples not on disk.
+
+## Session 2026-09-30 #11 -- 4:2:2 chroma residue LOCALISED to chroma deblocking (not fixed)
+
+Repro: `ffmpeg -f lavfi -i testsrc2=size=192x128 -frames:v 1 -pix_fmt yuv422p -c:v libaom-av1
+-cpu-used 4 -f ivf k.ivf`, decode with `--example dbg_dump_frame`, diff vs `ffmpeg -i k.ivf
+-pix_fmt yuv422p`. Result: Y exact, U 1963 / V 2139 differing bytes, all +-1..3.
+
+Bisect: re-encoding with `-aom-params enable-cdef=0:enable-restoration=0` drops the diff to
+U 259 / V 252 (Y still 0) -- so CDEF (1700 bytes) and the residue (250) are two separate
+things. The residue clusters at chroma x%8 in {7,0} and y%8 in {7,0}, i.e. on 8-sample edges.
+
+Cause (read, not yet fixed): `deblock_plane` for chroma is hard-wired to 4:2:0 geometry --
+`step = 4`, grid `meta.w8 x meta.h8` ("8x8-luma cell = 4x4 chroma cell"), `lf_shift = 1`. In
+4:2:2 an 8x8-luma cell is 4 wide x 8 tall chroma, so the tx-size/edge/level metadata
+(`record_chroma`, `mark_chroma_edges`, `lf_level_u4`) has half the vertical resolution the
+plane needs. Proper fix = give chroma its own w x h metadata grid parameterised by (ss_x, ss_y)
+and pass step_x/step_y to `deblock_plane`; not a local patch.
+The CDEF 1700-byte part is separate (`CDEF_UV_DIR[1][0]` matches the spec table; look at
+`cdef_plane_chroma` 4x8 block handling / skip-gate index `luma_skip` for sub_y=0 next).
