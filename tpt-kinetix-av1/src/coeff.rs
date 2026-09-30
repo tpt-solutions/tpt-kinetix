@@ -436,6 +436,9 @@ pub struct TxBlockCtx {
     pub reduced_tx_set: bool,
     /// Frame-level `Lossless`.
     pub lossless: bool,
+    /// `SegQMLevel[plane][segment_id]` (§5.9.12): the quantizer-matrix level for
+    /// this block, 15 meaning "no matrix" (also used when `using_qmatrix == 0`).
+    pub qm_level: u8,
     /// Spec `IsInter`: selects `transform_type()`'s inter branch (a real
     /// `inter_tx_type` symbol read, using `get_tx_set`'s inter sets) over
     /// the intra branch (`intra_dir`-contextualized, using the intra sets)
@@ -1331,6 +1334,7 @@ mod tests {
             qindex_positive: true,
             reduced_tx_set: false,
             lossless: false,
+            qm_level: 15,
             is_inter: false,
             coincident_luma_tx_type: DCT_DCT,
         };
@@ -1651,6 +1655,7 @@ mod tests {
             qindex_positive: true,
             reduced_tx_set: false,
             lossless: false,
+            qm_level: 15,
             is_inter: false,
             coincident_luma_tx_type: DCT_DCT,
         }

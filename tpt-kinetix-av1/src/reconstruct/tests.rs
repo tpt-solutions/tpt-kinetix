@@ -2532,6 +2532,7 @@ fn no_seg() -> SegTile<'static> {
         last_active: 0,
         params: crate::frame::SegParams::default(),
         lossless: [false; 8],
+        qm: None,
         prev: None,
     }
 }

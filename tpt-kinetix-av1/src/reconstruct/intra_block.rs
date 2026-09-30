@@ -576,6 +576,7 @@ impl<'a> TileDecodeState<'a> {
                         qindex_positive: self.qidx_pos,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
+                        qm_level: self.cur_qm[0],
                         is_inter: false,
                         coincident_luma_tx_type: av1::DCT_DCT,
                     };
@@ -839,6 +840,7 @@ impl<'a> TileDecodeState<'a> {
                                 qindex_positive: self.qidx_pos,
                                 reduced_tx_set: self.reduced_tx_set,
                                 lossless: self.lossless,
+                                qm_level: self.cur_qm[1],
                                 is_inter: false,
                                 coincident_luma_tx_type: av1::DCT_DCT,
                             };
@@ -2319,6 +2321,7 @@ impl<'a> TileDecodeState<'a> {
                 qindex_positive: self.qidx_pos,
                 reduced_tx_set: self.reduced_tx_set,
                 lossless: self.lossless,
+                qm_level: self.cur_qm[0],
                 is_inter: true,
                 // Irrelevant for plane 0 (`read_coeffs` only consults this
                 // field for `plane > 0`).
@@ -2345,12 +2348,13 @@ impl<'a> TileDecodeState<'a> {
                     }
                 }
                 if coeffs.eob > 0 {
-                    let dequant = dequantize_coeffs(
+                    let dequant = dequantize_coeffs_qm(
                         &coeffs.quant,
                         leaf_tx,
                         y_qindex_dc,
                         y_qindex_ac,
                         self.bit_depth,
+                        qm_for(self.cur_qm[0], 0, leaf_tx, coeffs.tx_type),
                     );
                     inverse_transform(
                         &dequant,
@@ -2519,6 +2523,7 @@ impl<'a> TileDecodeState<'a> {
                             qindex_positive: self.qidx_pos,
                             reduced_tx_set: self.reduced_tx_set,
                             lossless: self.lossless,
+                            qm_level: self.cur_qm[1],
                             is_inter: true,
                             coincident_luma_tx_type,
                         };
@@ -2535,12 +2540,13 @@ impl<'a> TileDecodeState<'a> {
                                     &blk_u,
                                 )?;
                                 if cu.eob > 0 {
-                                    let dq = dequantize_coeffs(
+                                    let dq = dequantize_coeffs_qm(
                                         &cu.quant,
                                         c_tx,
                                         u_qindex_dc,
                                         u_qindex_ac,
                                         self.bit_depth,
+                                        qm_for(self.cur_qm[1], 1, c_tx, cu.tx_type),
                                     );
                                     inverse_transform(
                                         &dq,
@@ -2571,12 +2577,13 @@ impl<'a> TileDecodeState<'a> {
                                     &blk_v,
                                 )?;
                                 if cv.eob > 0 {
-                                    let dq = dequantize_coeffs(
+                                    let dq = dequantize_coeffs_qm(
                                         &cv.quant,
                                         c_tx,
                                         v_qindex_dc,
                                         v_qindex_ac,
                                         self.bit_depth,
+                                        qm_for(self.cur_qm[2], 2, c_tx, cv.tx_type),
                                     );
                                     inverse_transform(
                                         &dq,

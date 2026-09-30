@@ -76,6 +76,7 @@ fn decode_with(
             last_active: 0,
             params: SegParams::default(),
             lossless: [false; 8],
+            qm: None,
             prev: None,
         },
         false, // coded_lossless

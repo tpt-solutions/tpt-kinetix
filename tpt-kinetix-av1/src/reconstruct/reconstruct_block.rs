@@ -163,12 +163,13 @@ pub(super) fn reconstruct_tx_block(
                 );
         }
         if coeffs.eob > 0 {
-            let dequant = dequantize_coeffs(
+            let dequant = dequantize_coeffs_qm(
                 &coeffs.quant,
                 internal_tx_size,
                 qindex_dc,
                 qindex_ac,
                 bit_depth,
+                qm_for(blk.qm_level, blk.plane, internal_tx_size, coeffs.tx_type),
             );
             if dbg {
                 eprintln!(

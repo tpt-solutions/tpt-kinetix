@@ -191,6 +191,18 @@ fn libaom_streams_match_libdav1d() {
             aom: &["-cpu-used", "4", "-aom-params", "film-grain-test=8"],
         },
         Case {
+            // Quantizer matrices (rectangular sizes are stored transposed).
+            name: "testsrc2 320x240 4:2:0 quantizer matrices",
+            lavfi: "testsrc2=size=320x240:rate=10",
+            pix_fmt: "yuv420p",
+            aom: &[
+                "-cpu-used",
+                "4",
+                "-aom-params",
+                "enable-qm=1:qm-min=0:qm-max=15",
+            ],
+        },
+        Case {
             name: "testsrc2 192x128 4:4:4 (unsubsampled chroma planes and refs)",
             lavfi: "testsrc2=size=192x128:rate=10",
             pix_fmt: "yuv444p",

@@ -26,6 +26,7 @@ mod palette;
 mod partition;
 mod predict;
 mod qlookup_hbd;
+mod qm_tables;
 mod reconstruct_block;
 mod segmentation;
 mod transform;
@@ -794,6 +795,8 @@ pub struct SegTile<'a> {
     pub params: crate::frame::SegParams,
     /// `LosslessArray`.
     pub lossless: [bool; 8],
+    /// `qm_y`/`qm_u`/`qm_v` when `using_qmatrix`, else `None`.
+    pub qm: Option<[u8; 3]>,
     /// `PrevSegmentIds` (frame-wide, `mi_cols` stride); `None` = all zero.
     pub prev: Option<&'a [u8]>,
 }
@@ -833,6 +836,8 @@ struct TileDecodeState<'a> {
     seg: SegTile<'a>,
     /// `segment_id` of the block currently being decoded.
     segment_id: usize,
+    /// `SegQMLevel[plane][segment_id]` for the current block (15 = no matrix).
+    cur_qm: [u8; 3],
     /// `get_qindex(1, segment_id) > 0` for the current block (`transform_type` gate).
     qidx_pos: bool,
     /// `CodedLossless` (frame level; gates `read_cdef`).
@@ -1454,6 +1459,9 @@ impl<'a> TileDecodeState<'a> {
             tile_mi_rows,
             seg,
             segment_id: 0,
+            cur_qm: seg
+                .qm
+                .map_or([15; 3], |q| if seg.lossless[0] { [15; 3] } else { q }),
             qidx_pos: qindex > 0,
             coded_lossless,
             base_q_idx: qindex,
@@ -2472,6 +2480,11 @@ pub fn reconstruct_av1_frame(
                     last_active: usize::from(frame_header.last_active_seg_id),
                     params: frame_header.seg_params,
                     lossless: frame_header.lossless_array,
+                    qm: frame_header.using_qmatrix.then_some([
+                        frame_header.qm_y,
+                        frame_header.qm_u,
+                        frame_header.qm_v,
+                    ]),
                     prev: prev_segment_ids.map(|m| m.data.as_slice()),
                 },
                 frame_header.coded_lossless,

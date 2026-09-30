@@ -4098,6 +4098,7 @@ impl<'a> TileDecodeState<'a> {
                         qindex_positive: self.qidx_pos,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
+                        qm_level: self.cur_qm[0],
                         is_inter: true,
                         // Irrelevant for plane 0.
                         coincident_luma_tx_type: av1::DCT_DCT,
@@ -4235,12 +4236,13 @@ impl<'a> TileDecodeState<'a> {
                         // shifts generically.
                         if coeffs.eob > 0 {
                             let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
-                            let dequant = dequantize_coeffs(
+                            let dequant = dequantize_coeffs_qm(
                                 &coeffs.quant,
                                 leaf_tx,
                                 qindex_dc,
                                 qindex_ac,
                                 self.bit_depth,
+                                qm_for(self.cur_qm[0], 0, leaf_tx, coeffs.tx_type),
                             );
                             if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
                                 && mi_col == 4
@@ -4480,6 +4482,7 @@ impl<'a> TileDecodeState<'a> {
                                         qindex_positive: self.qidx_pos,
                                         reduced_tx_set: self.reduced_tx_set,
                                         lossless: self.lossless,
+                                        qm_level: self.cur_qm[plane],
                                         is_inter: true,
                                         coincident_luma_tx_type: av1::DCT_DCT,
                                     };
@@ -4512,6 +4515,7 @@ impl<'a> TileDecodeState<'a> {
                                         qindex_positive: self.qidx_pos,
                                         reduced_tx_set: self.reduced_tx_set,
                                         lossless: self.lossless,
+                                        qm_level: self.cur_qm[plane],
                                         is_inter: true,
                                         // The real co-located luma leaf's decoded type —
                                         // `get_uv_inter_txtp` needs it to pick the chroma
@@ -4561,12 +4565,13 @@ impl<'a> TileDecodeState<'a> {
                                         } else {
                                             (v_qindex_dc, v_qindex_ac)
                                         };
-                                        let dequant = dequantize_coeffs(
+                                        let dequant = dequantize_coeffs_qm(
                                             &coeffs.quant,
                                             c_tx,
                                             qindex_dc,
                                             qindex_ac,
                                             self.bit_depth,
+                                            qm_for(self.cur_qm[plane], plane, c_tx, coeffs.tx_type),
                                         );
                                         inverse_transform(
                                             &dequant,

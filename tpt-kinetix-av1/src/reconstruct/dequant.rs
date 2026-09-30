@@ -54,16 +54,75 @@ pub(super) fn dequantize_coeffs(
     qindex_ac: u8,
     bit_depth: u32,
 ) -> Vec<i32> {
+    dequantize_coeffs_qm(quant, tx_size, qindex_dc, qindex_ac, bit_depth, None)
+}
+
+/// The quantizer matrix (`Quantizer_Matrix[qmLevel][plane > 0]`, spec §7.12.3)
+/// for a transform of size `tx_size` (already clamped to at most 32 per side, as
+/// the coefficient array is), or `None` when no matrix applies: `qm_level == 15`
+/// (also used for lossless segments and frames without `using_qmatrix`) or a
+/// non-2D transform class (`PlaneTxType >= IDTX`).
+pub(super) fn qm_for(
+    qm_level: u8,
+    plane: usize,
+    tx_size: usize,
+    tx_type: usize,
+) -> Option<&'static [u8]> {
+    if qm_level >= 15 || tx_type >= av1::IDTX {
+        return None;
+    }
+    let (l, p) = (usize::from(qm_level), usize::from(plane > 0));
+    let w = av1::TX_WIDTH[tx_size].min(32);
+    let h = av1::TX_HEIGHT[tx_size].min(32);
+    // dav1d names each table `qm_tbl_{h}x{w}` for a `w`x`h` transform.
+    use qm_tables::*;
+    Some(match (w, h) {
+        (4, 4) => &QM_4X4[l][p][..],
+        (8, 8) => &QM_8X8[l][p][..],
+        (16, 16) => &QM_16X16[l][p][..],
+        (32, 32) => &QM_32X32[l][p][..],
+        (4, 8) => &QM_8X4[l][p][..],
+        (8, 4) => &QM_4X8[l][p][..],
+        (4, 16) => &QM_16X4[l][p][..],
+        (16, 4) => &QM_4X16[l][p][..],
+        (8, 16) => &QM_16X8[l][p][..],
+        (16, 8) => &QM_8X16[l][p][..],
+        (8, 32) => &QM_32X8[l][p][..],
+        (32, 8) => &QM_8X32[l][p][..],
+        (16, 32) => &QM_32X16[l][p][..],
+        (32, 16) => &QM_16X32[l][p][..],
+        _ => return None,
+    })
+}
+
+/// [`dequantize_coeffs`] with an optional quantizer matrix: each coefficient's
+/// step becomes `Round2(q * Quantizer_Matrix[..][pos], AOM_QM_BITS = 5)`.
+pub(super) fn dequantize_coeffs_qm(
+    quant: &[i32],
+    tx_size: usize,
+    qindex_dc: u8,
+    qindex_ac: u8,
+    bit_depth: u32,
+    qm: Option<&[u8]>,
+) -> Vec<i32> {
     let dc = dc_dequant(qindex_dc, bit_depth) as i64;
     let ac = ac_dequant(qindex_ac, bit_depth) as i64;
     let denom = dq_denom(tx_size) as i64;
     let clip_lo: i64 = -(1i64 << (7 + bit_depth));
     let clip_hi: i64 = (1i64 << (7 + bit_depth)) - 1;
+    let tw = av1::TX_WIDTH[tx_size].min(32);
+    let th = av1::TX_HEIGHT[tx_size].min(32);
     quant
         .iter()
         .enumerate()
         .map(|(i, &c)| {
-            let q = if i == 0 { dc } else { ac };
+            let mut q = if i == 0 { dc } else { ac };
+            if let Some(m) = qm {
+                // dav1d's tables are stored transposed relative to the raster
+                // coefficient order for rectangular transforms.
+                let pos = if tw == th { i } else { (i % tw) * th + i / tw };
+                q = (q * i64::from(m.get(pos).copied().unwrap_or(32)) + 16) >> 5;
+            }
             let dq = c as i64 * q;
             let sign: i64 = if dq < 0 { -1 } else { 1 };
             let dq2 = sign * ((dq.abs() & 0xFFFFFF) / denom);

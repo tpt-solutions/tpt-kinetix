@@ -65,6 +65,11 @@ impl<'a> TileDecodeState<'a> {
         self.lossless = self.seg.lossless[self.segment_id & 7];
         // `transform_type`'s `qidx > 0` gate uses `get_qindex(1, segment_id)` (§5.11.47).
         self.qidx_pos = self.get_qindex(true, self.segment_id) > 0;
+        // `SegQMLevel` (§5.9.12): 15 for lossless segments, else the frame's level.
+        self.cur_qm = match self.seg.qm {
+            Some(q) if !self.lossless => q,
+            _ => [15; 3],
+        };
     }
 
     /// `AvailU` / `AvailL` (tile-relative).
