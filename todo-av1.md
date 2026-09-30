@@ -14986,3 +14986,72 @@ grain, superres chroma). The 4:2:2 output-size mismatch above localises the
 - `pixel_exact` stays `false`. FATE, `switch_frame` 30/31, `non_uniform_tiling`
   6/24, `frames_refs_short_signaling` 1/50 -- all still open and unmeasurable
   without the FATE samples.
+
+## Session 2026-09-30 #9 -- 4:2:2 output layout fixed; chroma pixels localised to a
+## vertical row-duplication, NOT root-caused (one dead end recorded)
+
+Picking up from #8's "next step: 4:2:2 is the closer of the two formats".
+
+**Fixed: 4:2:2 now emits the right buffer size.** `pixel_format_for` tested
+`!ss_x && ss_y` for the `Yuv422p` arm, but the 4:2:2 case is `ss_x == 1,
+ss_y == 0` (verified: the sequence header parses to `ss_x=true ss_y=false`
+and ffprobe agrees the stream is `yuv422p`). The transposed guard meant 4:2:2
+fell through to the `Yuv444p` arm, so `crop_planes` used the 4:4:4 chroma
+extent and emitted a 73344-byte buffer for a frame that needs 49152. With
+the guard corrected, output is exactly 49152 bytes, matching libdav1d.
+
+**Measured state after the layout fix (192x128 keyframe vs libdav1d):**
+
+| plane | diff | maxabs |
+|---|---|---|
+| Y | **0 / 24576** | **0** -- luma fully bit-exact |
+| U | 8296 / 12288 | 186 |
+| V | 9355 / 12288 | 230 |
+
+So the format/geometry work is done and the whole remaining gap is chroma
+pixels. Ruled out by A/B against env toggles: deblock (18674), CDEF and the
+rest of the post-filter chain (`KINETIX_AV1_NOFILTER`, 19218) -- the
+divergence is present with ALL in-loop filters off, so it is in chroma
+reconstruction itself, not filtering.
+
+**Signature.** First differing chroma sample is U(1,2). Comparing rows:
+
+    ref  row1: 224,203,203,203    ours row1: 224,203,203,203   (match)
+    ref  row2: 224,167,167,167    ours row2: 224,203,203,203   (dup of row1)
+    ref  row3: 224,147,147,147    ours row3: 224,167,167,167   (dup of ref row2)
+    ref  row4: 224,147,147,147    ours row4: 224,167,167,167
+
+Our chroma rows are a **one-row-shifted duplicate** of the reference's from
+row 2 down: `ours[r] == ref[r-1]`. That is a vertical block-placement /
+stride bug in the 4:2:2 chroma residual extent, not a filter or entropy
+issue.
+
+**Dead end, recorded so it is not retried:** I hypothesised this was
+`chroma_tx_size`'s `BLOCK_INVALID` fallback. `SUBSAMPLED_SIZE[bsize][1][0]`
+(the 4:2:2 column) is `BLOCK_INVALID` for all 22 entries, and I fetched the
+published spec table to check whether that was a transcription error -- it is
+NOT, the spec table is byte-identical to ours, so the `BLOCK_INVALID`s are
+correct and the table needs no fix. I then made `chroma_tx_size` /
+`intra_block.rs` derive the 4:2:2 plane size as `(max(w/2,4), h)` instead of
+falling back to the un-subsampled `bsize`, reasoning that the doubled width
+would explain the duplication. **Measured: byte-for-byte no change to the
+output.** The hypothesis is wrong, so I reverted it rather than commit a
+no-op dressed as a fix. (Verified the spec also states the residual block is
+"at least 4x4" in each dimension, so the floor is not the missing piece.)
+
+**Next step for whoever picks this up:** the duplication is vertical, so look
+at where the chroma *row* origin comes from for `ss_y == 0`. The
+`base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (tile_px_y0 >> sub_y)` in
+`intra_block.rs` and the `for ty in (ccy0..((cy0+64) >> sub_y).min(
+chroma_bh)).step_by(ch)` loop both degenerate to the *unsubsampled* value
+when `sub_y == 0`, which is correct for 4:2:2 in principle -- so the bug is
+likely in the `chroma_bh`/`ch` interaction (a 4:2:2 chroma tx is twice as
+tall as the 4:2:0 one, so `step_by(ch)` and the `.min(chroma_bh)` clamp
+disagree about where the block ends) rather than in the shifts themselves.
+Verify with `KINETIX_AV1_DBG_INTRA_CXY=<x>,<y>` (the existing hook prints the
+`cpx`/`cw`/`ch` of the block covering a chroma sample) and compare against
+libdav1d's block grid before changing code.
+
+Still open and unchanged: 4:4:4 (diff=6260 maxabs=12, luma+chroma both off),
+`pixel_exact` false, FATE samples not on disk so the FATE-frame items cannot
+be measured here.

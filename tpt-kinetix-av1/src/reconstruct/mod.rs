@@ -2866,7 +2866,13 @@ pub(crate) fn pixel_format_for(
             10 => PixelFormat::Yuv420p10le,
             _ => PixelFormat::Yuv420p12le,
         },
-        (_, false) if !ss_x && ss_y => PixelFormat::Yuv422p,
+        // 4:2:2 is `subsampling_x == 1, subsampling_y == 0` — chroma is
+        // subsampled in WIDTH only. The arm previously tested
+        // `!ss_x && ss_y` (the transposed case, which is not a format AV1
+        // produces), so every 4:2:2 stream fell through to `Yuv444p` and
+        // `crop_planes` used the 4:4:4 chroma extent — emitting a 73344-byte
+        // buffer for a 192x128 frame that needs 49152.
+        (_, false) if ss_x && !ss_y => PixelFormat::Yuv422p,
         (_, false) => PixelFormat::Yuv444p,
     }
 }

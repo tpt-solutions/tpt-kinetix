@@ -2473,3 +2473,43 @@ fn crop_planes_truncates_rather_than_reading_out_of_bounds() {
 fn cw_len(w: usize) -> usize {
     w / 2
 }
+
+/// `pixel_format_for` must map the four AV1 chroma sampling cases correctly.
+/// The 4:2:2 arm previously tested `!ss_x && ss_y` -- the transposed case,
+/// which AV1 never produces -- so every real 4:2:2 stream (`ss_x == 1,
+/// `ss_y == 0`) fell through to `Yuv444p` and cropped the wrong chroma extent.
+#[test]
+fn pixel_format_for_maps_each_chroma_sampling_case() {
+    // 4:2:0: both axes subsampled.
+    assert_eq!(pixel_format_for(8, false, true, true), PixelFormat::Yuv420p);
+    assert_eq!(
+        pixel_format_for(10, false, true, true),
+        PixelFormat::Yuv420p10le
+    );
+    // 4:2:2: WIDTH subsampled only -- `ss_x == 1, ss_y == 0`. This is the case
+    // the transposed guard missed.
+    assert_eq!(
+        pixel_format_for(8, false, true, false),
+        PixelFormat::Yuv422p
+    );
+    // 4:4:4: neither axis subsampled.
+    assert_eq!(
+        pixel_format_for(8, false, false, false),
+        PixelFormat::Yuv444p
+    );
+    assert_eq!(
+        pixel_format_for(8, false, false, true),
+        PixelFormat::Yuv444p,
+        "the transposed !ss_x && ss_y case is not a real AV1 format; it must not claim 4:2:2"
+    );
+    // Monochrome is subsampling-independent.
+    assert_eq!(pixel_format_for(8, true, true, true), PixelFormat::Gray);
+    assert_eq!(
+        pixel_format_for(10, true, false, false),
+        PixelFormat::Gray10le
+    );
+    assert_eq!(
+        pixel_format_for(12, true, true, false),
+        PixelFormat::Gray12le
+    );
+}
