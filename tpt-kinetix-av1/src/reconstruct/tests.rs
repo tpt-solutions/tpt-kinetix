@@ -96,9 +96,8 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         [0i8; 8], // lf_ref_deltas
         [0i8; 2], // lf_mode_deltas
         false,    // lf_delta_enabled
-        false,
-        false,
-        false,
+        no_seg(),
+        false, // coded_lossless
         false,
         false,
         false,
@@ -647,9 +646,8 @@ fn partition_context_matches_spec_left_times_2_plus_above() {
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -745,9 +743,8 @@ fn qindex_for_plane_applies_per_plane_delta_and_clamps() {
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -843,9 +840,8 @@ fn make_cdef_delta_state<'a>(
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -929,9 +925,8 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -996,9 +991,8 @@ fn palette_colors_yu_delta_bias_is_plus_one_for_y_and_zero_for_u() {
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -1316,9 +1310,8 @@ fn read_tx_size_never_panics_and_stays_in_range() {
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -1422,9 +1415,8 @@ fn read_block_tx_size_ibc_leaves_exactly_tile_the_block_with_no_gaps_or_overlaps
                         [0i8; 8], /* lf_ref_deltas */
                         [0i8; 2], /* lf_mode_deltas */
                         false,    /* lf_delta_enabled */
-                        false,
-                        false,
-                        false,
+                        no_seg(),
+                        false, /* coded_lossless */
                         false,
                         false,
                         false,
@@ -1551,9 +1543,8 @@ fn var_tx_context_is_independent_of_the_intra_tx_context() {
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -1640,9 +1631,8 @@ fn var_tx_context_is_independent_of_the_intra_tx_context() {
         [0i8; 8], /* lf_ref_deltas */
         [0i8; 2], /* lf_mode_deltas */
         false,    /* lf_delta_enabled */
-        false,
-        false,
-        false,
+        no_seg(),
+        false, /* coded_lossless */
         false,
         false,
         false,
@@ -2530,4 +2520,18 @@ fn pixel_format_for_maps_each_chroma_sampling_case() {
         pixel_format_for(12, true, true, false),
         PixelFormat::Gray12le
     );
+}
+
+/// A `SegTile` with segmentation disabled (the pre-segmentation default).
+fn no_seg() -> SegTile<'static> {
+    SegTile {
+        enabled: false,
+        update_map: false,
+        temporal_update: false,
+        pre_skip: false,
+        last_active: 0,
+        params: crate::frame::SegParams::default(),
+        lossless: [false; 8],
+        prev: None,
+    }
 }

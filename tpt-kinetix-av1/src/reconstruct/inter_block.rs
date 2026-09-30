@@ -441,7 +441,9 @@ impl<'a> TileDecodeState<'a> {
         let left_skip = self.skip_left[mi_row] as usize;
         let above_inter = self.is_inter_above[mi_col] as usize;
         let left_inter = self.is_inter_left[mi_row] as usize;
-        let skip_mode = if self.seg_feature_skip
+        // `inter_segment_id(1)` runs before `read_skip_mode` (§5.11.18).
+        self.inter_segment_id(true, mi_row, mi_col, bsize, false);
+        let skip_mode = if self.seg_blocks_skip_mode()
             || !self.skip_mode_present
             || BLOCK_WIDTH[bsize] < 8
             || BLOCK_HEIGHT[bsize] < 8
@@ -462,6 +464,12 @@ impl<'a> TileDecodeState<'a> {
             sm
         };
         if skip_mode {
+            // skip = 1: `inter_segment_id(0)` then resolves to the spatial
+            // prediction (or `PrevSegmentIds`) without reading a symbol.
+            if !self.seg.pre_skip {
+                self.inter_segment_id(false, mi_row, mi_col, bsize, true);
+            }
+            self.store_segment_id(mi_row, mi_col, bsize);
             return self.decode_skip_mode_block(mi_row, mi_col, bsize);
         }
 
@@ -475,11 +483,15 @@ impl<'a> TileDecodeState<'a> {
                 self.mode_cdfs.skip[skip_ctx]
             );
         }
-        let skip = if self.seg_feature_skip {
+        let skip = if self.seg.pre_skip && self.seg_active(crate::frame::SEG_LVL_SKIP) {
             true
         } else {
             self.mode_cdfs.read_skip(&mut self.dec, skip_ctx) == 1
         };
+        if !self.seg.pre_skip {
+            self.inter_segment_id(false, mi_row, mi_col, bsize, skip);
+        }
+        self.store_segment_id(mi_row, mi_col, bsize);
         let dbg_b0 = std::env::var("KINETIX_AV1_DBG_B0").is_ok();
         if std::env::var("KINETIX_AV1_IBSUM").is_ok() {
             eprintln!(
@@ -536,10 +548,15 @@ impl<'a> TileDecodeState<'a> {
                 self.cur_order_hint
             );
         }
-        let is_inter = self
-            .dec
-            .read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx])
-            == 1;
+        // `read_is_inter()` (§5.11.20): segment features may decide it.
+        let is_inter = match self.seg_forced_is_inter() {
+            Some(v) => v,
+            None => {
+                self.dec
+                    .read_symbol(&mut self.map_inter_cdfs.is_inter[inter_ctx])
+                    == 1
+            }
+        };
         if dbg_b0 {
             eprintln!(
                 "DBG b0 is_inter={is_inter} ctx={inter_ctx} rng={}",
@@ -838,6 +855,7 @@ impl<'a> TileDecodeState<'a> {
                 self.lf_mode_deltas,
                 self.lf_delta_enabled,
                 self.delta_lf,
+                self.seg_lf_deltas(),
                 0,
                 0,
             );
@@ -858,7 +876,15 @@ impl<'a> TileDecodeState<'a> {
         // neighbour context.
         let cedge_a = self.comp_edge_above(mi_col);
         let cedge_l = self.comp_edge_left(mi_row);
-        let compound = if reference_select && BLOCK_WIDTH[bsize].min(BLOCK_HEIGHT[bsize]) > 4 {
+        // `read_ref_frames()` (§5.11.25) segment overrides: `SEG_LVL_REF_FRAME`
+        // names the reference; `SEG_LVL_SKIP`/`GLOBALMV` force LAST_FRAME. Either
+        // way the block is single-reference and no `comp_mode` symbol is read.
+        let seg_ref = self.seg_active(crate::frame::SEG_LVL_REF_FRAME);
+        let seg_globalmv = self.seg_active(crate::frame::SEG_LVL_SKIP)
+            || self.seg_active(crate::frame::SEG_LVL_GLOBALMV);
+        let compound = if seg_ref || seg_globalmv {
+            false
+        } else if reference_select && BLOCK_WIDTH[bsize].min(BLOCK_HEIGHT[bsize]) > 4 {
             let ctx = comp_ctx(cedge_a, cedge_l, avail_u, avail_l);
             self.dec
                 .read_symbol(&mut self.map_inter_cdfs.comp_mode[ctx])
@@ -954,6 +980,15 @@ impl<'a> TileDecodeState<'a> {
                     self.dec.raw_state().0
                 );
             }
+        } else if seg_ref {
+            // Kinetix ref names are the spec's `RefFrame` + 1.
+            ref_names[0] = (self
+                .seg
+                .params
+                .value(self.segment_id, crate::frame::SEG_LVL_REF_FRAME)
+                + 1) as u8;
+        } else if seg_globalmv {
+            ref_names[0] = crate::inter::LAST_FRAME;
         } else {
             let above_refs = (above_inter != 0).then(|| self.ref_above[mi_col]);
             let left_refs = (left_inter != 0).then(|| self.ref_left[mi_row]);
@@ -1014,10 +1049,13 @@ impl<'a> TileDecodeState<'a> {
             let refmv_ctx = ((ctx >> 4) & 15) as usize;
 
             // `new_mv` S(): 1 => NOT newmv, 0 => NEWMV.
-            let not_newmv = self
-                .dec
-                .read_symbol(&mut self.map_inter_cdfs.new_mv[newmv_ctx.min(5)])
-                == 1;
+            // `SEG_LVL_SKIP`/`GLOBALMV` force `YMode = GLOBALMV` (§5.11.23): no
+            // `new_mv`/`zero_mv` symbols are read.
+            let not_newmv = seg_globalmv
+                || self
+                    .dec
+                    .read_symbol(&mut self.map_inter_cdfs.new_mv[newmv_ctx.min(5)])
+                    == 1;
             if dbg_b0 {
                 eprintln!(
                     "DBG b0 mi=({mi_col},{mi_row}) new_mv not={not_newmv} rng={}",
@@ -1028,10 +1066,11 @@ impl<'a> TileDecodeState<'a> {
             let mode: u8;
             if not_newmv {
                 // `zero_mv` S(): 0 => GLOBALMV, 1 => near path.
-                let near_path = self
-                    .dec
-                    .read_symbol(&mut self.map_inter_cdfs.zero_mv[globalmv_ctx.min(1)])
-                    == 1;
+                let near_path = !seg_globalmv
+                    && self
+                        .dec
+                        .read_symbol(&mut self.map_inter_cdfs.zero_mv[globalmv_ctx.min(1)])
+                        == 1;
                 if dbg_b0 {
                     eprintln!(
                         "DBG b0 mi=({mi_col},{mi_row}) zero_mv near={near_path} rng={}",
@@ -2308,6 +2347,7 @@ impl<'a> TileDecodeState<'a> {
             (px_y0 + bh_px).div_ceil(4),
             ref_names[0] - 1,
             lf_mode_type,
+            self.segment_id as u8,
         );
         // §7.14.4: the block's own final chroma levels — the chroma level
         // cache is last-decoded-block-wins (dav1d `f->lf.level` chroma
@@ -2319,6 +2359,7 @@ impl<'a> TileDecodeState<'a> {
             self.lf_mode_deltas,
             self.lf_delta_enabled,
             self.delta_lf,
+            self.seg_lf_deltas(),
             ref_names[0] - 1,
             lf_mode_type,
         );
@@ -2751,6 +2792,7 @@ impl<'a> TileDecodeState<'a> {
             self.lf_mode_deltas,
             self.lf_delta_enabled,
             self.delta_lf,
+            self.seg_lf_deltas(),
             ref_names[0] - 1,
             1,
         );
@@ -2781,6 +2823,7 @@ impl<'a> TileDecodeState<'a> {
             (px_y0 + bh_px).div_ceil(4),
             ref_names[0] - 1,
             1,
+            self.segment_id as u8,
         );
         // §7.14.4: skip-mode blocks read DeltaLF just like the ordinary path
         // (`read_delta_lf` above); record the running values for this span
@@ -4036,7 +4079,7 @@ impl<'a> TileDecodeState<'a> {
                         block_h: bh * MI_SIZE,
                         intra_dir: 0,
                         uv_mode: 0,
-                        qindex_positive: !self.lossless,
+                        qindex_positive: self.qidx_pos,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                         is_inter: true,
@@ -4418,7 +4461,7 @@ impl<'a> TileDecodeState<'a> {
                                         block_h: 0,
                                         intra_dir: 0,
                                         uv_mode: 0,
-                                        qindex_positive: !self.lossless,
+                                        qindex_positive: self.qidx_pos,
                                         reduced_tx_set: self.reduced_tx_set,
                                         lossless: self.lossless,
                                         is_inter: true,
@@ -4450,7 +4493,7 @@ impl<'a> TileDecodeState<'a> {
                                         block_h: (bh * MI_SIZE) >> subsampling_y,
                                         intra_dir: 0,
                                         uv_mode: 0,
-                                        qindex_positive: !self.lossless,
+                                        qindex_positive: self.qidx_pos,
                                         reduced_tx_set: self.reduced_tx_set,
                                         lossless: self.lossless,
                                         is_inter: true,

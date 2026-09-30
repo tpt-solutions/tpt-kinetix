@@ -8,8 +8,11 @@
 
 use proptest::prelude::*;
 
+use tpt_kinetix_av1::frame::SegParams;
 use tpt_kinetix_av1::inter::RefFrames;
-use tpt_kinetix_av1::reconstruct::{decode_tile_group, CdefDeltaParams, DeltaQ, LrDecodeParams};
+use tpt_kinetix_av1::reconstruct::{
+    decode_tile_group, CdefDeltaParams, DeltaQ, LrDecodeParams, SegTile,
+};
 
 fn cases() -> u32 {
     std::env::var("PROPTEST_CASES")
@@ -65,11 +68,19 @@ fn decode_with(
         [0i8; 8], // lf_ref_deltas
         [0i8; 2], // lf_mode_deltas
         false,    // lf_delta_enabled
-        false,    // segmentation_enabled
-        false,    // seg_feature_skip
-        false,    // seg_feature_alt_q
-        false,    // enable_filter_intra
-        false,    // enable_intra_edge_filter
+        SegTile {
+            enabled: false,
+            update_map: false,
+            temporal_update: false,
+            pre_skip: false,
+            last_active: 0,
+            params: SegParams::default(),
+            lossless: [false; 8],
+            prev: None,
+        },
+        false, // coded_lossless
+        false, // enable_filter_intra
+        false, // enable_intra_edge_filter
         allow_screen_content_tools,
         true,  // subsampling_x (4:2:0)
         true,  // subsampling_y (4:2:0)

@@ -232,6 +232,11 @@ pub struct Av1Decoder {
     ref_lf_deltas: [crate::frame::LoopFilterDeltas; 8],
     /// Per-slot saved global-motion parameters (`PrevGmParams` source).
     ref_gm_params: [[[i32; 6]; 8]; 8],
+    /// Per-slot saved segmentation feature tables (`load_previous()` source).
+    ref_seg_params: [crate::frame::SegParams; 8],
+    /// Per-slot saved segmentation maps (`SavedSegmentIds`); `None` means
+    /// all-zero (segmentation was off for that frame).
+    ref_seg_maps: [Option<std::sync::Arc<crate::reconstruct::SegMap>>; 8],
     /// Per-slot saved CDF contexts (§6.8.2 context update): a frame with
     /// `primary_ref_frame != PRIMARY_REF_NONE` starts from the named slot's
     /// adapted CDFs; a `refresh_context` frame saves its adapted CDFs into the
@@ -255,6 +260,8 @@ impl Av1Decoder {
             ref_frame_dims: [(0u32, 0u32); 8],
             ref_lf_deltas: [crate::frame::LoopFilterDeltas::default(); 8],
             ref_gm_params: [crate::frame::default_gm_params(); 8],
+            ref_seg_params: [crate::frame::SegParams::default(); 8],
+            ref_seg_maps: std::array::from_fn(|_| None),
             ref_cdf_contexts: [None, None, None, None, None, None, None, None],
             ref_film_grain: std::array::from_fn(|_| None),
         }
@@ -370,6 +377,7 @@ impl Av1Decoder {
                         &self.ref_frame_dims,
                         &self.ref_lf_deltas,
                         &self.ref_gm_params,
+                        &self.ref_seg_params,
                     );
                     if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!("KIN ObuType::Frame parse_with_dpb ok={}", parsed.is_ok());
@@ -396,6 +404,7 @@ impl Av1Decoder {
                         &self.ref_frame_dims,
                         &self.ref_lf_deltas,
                         &self.ref_gm_params,
+                        &self.ref_seg_params,
                     );
                     if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                         eprintln!(
@@ -576,6 +585,22 @@ impl Av1Decoder {
         } else {
             None
         };
+        // `load_previous_segment_ids()` (§7.21): the primary reference's saved map
+        // when this frame reads it (temporal prediction, or no map update) and
+        // the mi geometry matches; otherwise every previous id is 0.
+        let prev_segment_ids: Option<std::sync::Arc<crate::reconstruct::SegMap>> = if fh
+            .segmentation_enabled
+            && fh.primary_ref_frame != 7
+            && (fh.segmentation_temporal_update || !fh.segmentation_update_map)
+        {
+            let slot = fh.ref_frame_idx[usize::from(fh.primary_ref_frame)] as usize & 7;
+            self.ref_seg_maps[slot].clone().filter(|m| {
+                m.mi_cols == 2 * ((fh.width as usize + 7) >> 3)
+                    && m.mi_rows == 2 * ((fh.height as usize + 7) >> 3)
+            })
+        } else {
+            None
+        };
         let (frame, motion_field, adapted_cdfs, padded) = match reconstruct_av1_frame(
             pairs,
             seq,
@@ -583,6 +608,7 @@ impl Av1Decoder {
             Some(&self.ref_frames),
             self.ref_order_hints,
             initial_cdfs.as_deref(),
+            prev_segment_ids.as_deref(),
         ) {
             Ok(Some(tuple)) => tuple,
             // `Ok(None)` (no tile data) and parse errors both mean no
@@ -666,6 +692,12 @@ impl Av1Decoder {
             }
         }
         let order_hint = fh.order_hint as u8;
+        // §7.20: SavedSegmentIds[i] = SegmentIds (all zero, i.e. `None`, when
+        // segmentation was disabled for this frame).
+        let saved_seg_map: Option<std::sync::Arc<crate::reconstruct::SegMap>> = padded
+            .as_ref()
+            .and_then(|p| p.segment_ids.clone())
+            .map(std::sync::Arc::new);
         // The geometry stored for a slot is the frame's own upscaled width and
         // height (not the post-superres render width) — exactly what
         // `frame_size_with_refs()`'s `RefUpscaledWidth`/`RefFrameHeight` (§5.9.8)
@@ -692,6 +724,8 @@ impl Av1Decoder {
                 self.ref_frame_dims[i] = stored_dims;
                 self.ref_lf_deltas[i] = fh.loop_filter_deltas;
                 self.ref_gm_params[i] = fh.gm_params;
+                self.ref_seg_params[i] = fh.seg_params;
+                self.ref_seg_maps[i] = saved_seg_map.clone();
             }
         }
         if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {

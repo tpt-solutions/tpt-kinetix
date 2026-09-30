@@ -99,7 +99,7 @@ fn dump_one(label: &str, width: u32, height: u32, obu: &[u8]) {
         .map(|m| format!("[{},{}]", m.trace_seq, jstr(&m.label)))
         .collect();
 
-    let seg_feature_skip = fh.seg_feature_enabled.first().copied().unwrap_or(false);
+    let seg_feature_skip = fh.seg_params.enabled[0][tpt_kinetix_av1::frame::SEG_LVL_SKIP];
     let use_128 = fh.use_128x128_superblock;
 
     println!(

@@ -561,14 +561,6 @@ impl<'a> TileDecodeState<'a> {
         (left as usize) * 2 + (above as usize)
     }
 
-    #[inline]
-    pub(super) fn segment_id_context(&self, _mi_row: usize, _mi_col: usize) -> usize {
-        // AV1 §5.11.9: context = above_seg_pred + left_seg_pred. The corpus used
-        // for Phase C validation has no segmentation, so this stays a placeholder
-        // (context 0); refine when segmentation is enabled.
-        0
-    }
-
     /// Record a just-decoded leaf block's size into the 2D `MiSizes[r][c]`
     /// array (AV1 spec §8.3.2), covering its full mi extent. Called once per
     /// leaf from [`Self::decode_block`]. The bsize index (not width/height

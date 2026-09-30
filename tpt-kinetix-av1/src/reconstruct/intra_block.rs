@@ -38,29 +38,30 @@ impl<'a> TileDecodeState<'a> {
         // first symbol read (segment_id/skip's bits were consumed as if they
         // were y_mode's). Fixed 2026-08-16.
 
-        // Segment id (AV1 spec §5.11.8 / §5.11.9). When no segmentation is
-        // active every block is segment 0 and no symbol is read. The per-segment
-        // feature override of qindex / skip is not yet applied here (the test
-        // corpus uses no segmentation), so qindex and the skip flag below fall
-        // back to the frame-level values.
-        let seg_ctx = self.segment_id_context(mi_row, mi_col);
-        let _seg_id = if self.segmentation_enabled {
-            self.mode_cdfs.read_segment_id(&mut self.dec, seg_ctx)
-        } else {
-            0
-        };
+        // Segment id (AV1 spec §5.11.8): read before `read_skip` when
+        // `SegIdPreSkip`, after it otherwise (then with the decoded `skip`).
+        if self.seg.enabled && self.seg.pre_skip {
+            self.intra_segment_id(mi_row, mi_col, false);
+        } else if !self.seg.enabled {
+            self.segment_id = 0;
+            self.apply_block_lossless();
+        }
 
-        // Skip flag (AV1 spec §5.11.11). When segmentation enables the
-        // SEG_LVL_SKIP feature for this block, skip is forced on.
+        // Skip flag (AV1 spec §5.11.11). `SEG_LVL_SKIP` forces it on (only
+        // reachable when `SegIdPreSkip`, since SKIP >= REF_FRAME).
         let above_skip = self.skip_above[mi_col] as usize;
         let left_skip = self.skip_left[mi_row] as usize;
-        let skip = if self.seg_feature_skip {
+        let skip = if self.seg.pre_skip && self.seg_active(crate::frame::SEG_LVL_SKIP) {
             true
         } else {
             self.mode_cdfs
                 .read_skip(&mut self.dec, (above_skip + left_skip).min(2))
                 == 1
         };
+        if self.seg.enabled && !self.seg.pre_skip {
+            self.intra_segment_id(mi_row, mi_col, skip);
+        }
+        self.store_segment_id(mi_row, mi_col, bsize);
         if std::env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
                 "KTRACE SKIP bx={mi_col} by={mi_row} skip={skip} r={}",
@@ -440,6 +441,7 @@ impl<'a> TileDecodeState<'a> {
         };
 
         self.luma_overhang.clear();
+        let seg_lf = self.seg_lf_deltas();
         let y_plane = &mut *self.y_plane;
         let u_plane = &mut *self.u_plane;
         let v_plane = &mut *self.v_plane;
@@ -516,6 +518,7 @@ impl<'a> TileDecodeState<'a> {
                         (px_y + luma_tx_h).div_ceil(4),
                         0,
                         0,
+                        self.segment_id as u8,
                     );
                     let (lu, lv) = chroma_lf_levels_snapshot(
                         self.lf_frame_levels,
@@ -523,6 +526,7 @@ impl<'a> TileDecodeState<'a> {
                         self.lf_mode_deltas,
                         self.lf_delta_enabled,
                         self.delta_lf,
+                        seg_lf,
                         0,
                         0,
                     );
@@ -563,7 +567,7 @@ impl<'a> TileDecodeState<'a> {
                         block_h: bh * MI_SIZE,
                         intra_dir: luma_intra_dir,
                         uv_mode,
-                        qindex_positive: !self.lossless,
+                        qindex_positive: self.qidx_pos,
                         reduced_tx_set: self.reduced_tx_set,
                         lossless: self.lossless,
                         is_inter: false,
@@ -822,7 +826,7 @@ impl<'a> TileDecodeState<'a> {
                                 block_h: chroma_bh,
                                 intra_dir: uv_mode,
                                 uv_mode,
-                                qindex_positive: !self.lossless,
+                                qindex_positive: self.qidx_pos,
                                 reduced_tx_set: self.reduced_tx_set,
                                 lossless: self.lossless,
                                 is_inter: false,
@@ -2255,6 +2259,7 @@ impl<'a> TileDecodeState<'a> {
                 (px_y + leaf_tx_h).div_ceil(4),
                 0,
                 0,
+                self.segment_id as u8,
             );
             // 8×8-luma-grid loop-filter metadata (see `record_luma`'s doc
             // comment) — per leaf, using the leaf's own span, since leaves
@@ -2301,7 +2306,7 @@ impl<'a> TileDecodeState<'a> {
                 block_h: bh * MI_SIZE,
                 intra_dir: DC_PRED as usize,
                 uv_mode: DC_PRED as usize,
-                qindex_positive: !self.lossless,
+                qindex_positive: self.qidx_pos,
                 reduced_tx_set: self.reduced_tx_set,
                 lossless: self.lossless,
                 is_inter: true,
@@ -2497,7 +2502,7 @@ impl<'a> TileDecodeState<'a> {
                             block_h: chroma_bh,
                             intra_dir: DC_PRED as usize,
                             uv_mode: DC_PRED as usize,
-                            qindex_positive: !self.lossless,
+                            qindex_positive: self.qidx_pos,
                             reduced_tx_set: self.reduced_tx_set,
                             lossless: self.lossless,
                             is_inter: true,

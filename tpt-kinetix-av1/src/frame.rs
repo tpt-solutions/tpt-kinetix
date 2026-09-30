@@ -290,6 +290,36 @@ impl TileLayout {
     }
 }
 
+/// Segmentation feature table (`FeatureEnabled[8][8]` / `FeatureData[8][8]`,
+/// §5.9.14): `enabled[segment][feature]` / `data[segment][feature]`. Saved with
+/// every reference slot (§7.20) and restored by `load_previous()` (§7.21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SegParams {
+    pub enabled: [[bool; 8]; 8],
+    pub data: [[i16; 8]; 8],
+}
+
+/// `SEG_LVL_*` feature indices (§3).
+pub const SEG_LVL_ALT_Q: usize = 0;
+pub const SEG_LVL_ALT_LF_Y_V: usize = 1;
+pub const SEG_LVL_REF_FRAME: usize = 5;
+pub const SEG_LVL_SKIP: usize = 6;
+pub const SEG_LVL_GLOBALMV: usize = 7;
+
+impl SegParams {
+    /// `seg_feature_active_idx(segment, feature)` (§5.11.14) for an enabled
+    /// segmentation frame.
+    #[inline]
+    pub fn active(&self, segment: usize, feature: usize) -> bool {
+        self.enabled[segment & 7][feature]
+    }
+    /// `FeatureData[segment][feature]`.
+    #[inline]
+    pub fn value(&self, segment: usize, feature: usize) -> i32 {
+        i32::from(self.data[segment & 7][feature])
+    }
+}
+
 /// Parsed AV1 uncompressed frame header (§5.9).
 #[derive(Debug, Clone, Default)]
 pub struct FrameHeader {
@@ -357,8 +387,15 @@ pub struct FrameHeader {
     pub segmentation_enabled: bool,
     pub segmentation_update_map: bool,
     pub segmentation_temporal_update: bool,
-    pub seg_feature_enabled: [bool; 8],
-    pub seg_feature_data: [[i16; 8]; 8],
+    /// `FeatureEnabled` / `FeatureData` (cleared when segmentation is off).
+    pub seg_params: SegParams,
+    /// `SegIdPreSkip` (§5.9.14): any enabled feature at or above `SEG_LVL_REF_FRAME`.
+    pub seg_id_pre_skip: bool,
+    /// `LastActiveSegId` (§5.9.14): highest segment with any enabled feature.
+    pub last_active_seg_id: u8,
+    /// `LosslessArray[segment]` (§5.9.17): `get_qindex(1, seg) == 0` and all
+    /// quantizer deltas zero.
+    pub lossless_array: [bool; 8],
 
     // Loop filter
     pub loop_filter_level: [u8; 4],
@@ -492,6 +529,7 @@ impl FrameHeader {
             ref_frame_dims_dpb,
             &[LoopFilterDeltas::default(); 8],
             &[default_gm_params(); 8],
+            &[SegParams::default(); 8],
         )
     }
 
@@ -506,6 +544,7 @@ impl FrameHeader {
         ref_frame_dims_dpb: &[(u32, u32); 8],
         ref_lf_deltas_dpb: &[LoopFilterDeltas; 8],
         ref_gm_params_dpb: &[[[i32; 6]; 8]; 8],
+        ref_seg_dpb: &[SegParams; 8],
     ) -> Result<(Self, usize), KinetixError> {
         let mut br = BitReader::new(data);
 
@@ -978,12 +1017,32 @@ impl FrameHeader {
 
         // --- segmentation_params ---
         let segmentation_enabled = read_flag(&mut br)?;
-        let (
-            segmentation_update_map,
-            segmentation_temporal_update,
-            seg_feature_enabled,
-            seg_feature_data,
-        ) = parse_segmentation(&mut br, primary_ref_frame, segmentation_enabled)?;
+        let (segmentation_update_map, segmentation_temporal_update, seg_params) =
+            parse_segmentation(
+                &mut br,
+                primary_ref_frame,
+                segmentation_enabled,
+                // `load_previous()` (§7.21): the primary reference's saved features.
+                if primary_ref_frame == 7 {
+                    SegParams::default()
+                } else {
+                    ref_seg_dpb[usize::from(ref_frame_idx[usize::from(primary_ref_frame)]) & 7]
+                },
+            )?;
+        let mut seg_id_pre_skip = false;
+        let mut last_active_seg_id = 0u8;
+        if segmentation_enabled {
+            for i in 0..8 {
+                for j in 0..8 {
+                    if seg_params.enabled[i][j] {
+                        last_active_seg_id = i as u8;
+                        if j >= SEG_LVL_REF_FRAME {
+                            seg_id_pre_skip = true;
+                        }
+                    }
+                }
+            }
+        }
         if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
             eprintln!("FHSEG seg={}", br.bits_read());
         }
@@ -999,14 +1058,23 @@ impl FrameHeader {
             eprintln!("FHSEC dlq={}", br.bits_read());
         }
 
-        // --- CodedLossless ---
-        let coded_lossless = base_q_idx == 0
-            && delta_q_y_dc == 0
-            && delta_q_u_dc == 0
-            && delta_q_u_ac == 0
-            && delta_q_v_dc == 0
-            && delta_q_v_ac == 0
-            && !using_qmatrix;
+        // --- CodedLossless / LosslessArray (§5.9.17) ---
+        let mut lossless_array = [false; 8];
+        let mut coded_lossless = true;
+        for (seg, slot) in lossless_array.iter_mut().enumerate() {
+            let qindex = if segmentation_enabled && seg_params.active(seg, SEG_LVL_ALT_Q) {
+                (i32::from(base_q_idx) + seg_params.value(seg, SEG_LVL_ALT_Q)).clamp(0, 255)
+            } else {
+                i32::from(base_q_idx)
+            };
+            *slot = qindex == 0
+                && delta_q_y_dc == 0
+                && delta_q_u_dc == 0
+                && delta_q_u_ac == 0
+                && delta_q_v_dc == 0
+                && delta_q_v_ac == 0;
+            coded_lossless &= *slot;
+        }
 
         // --- loop_filter_params ---
         let (
@@ -1220,8 +1288,10 @@ impl FrameHeader {
                 segmentation_enabled,
                 segmentation_update_map,
                 segmentation_temporal_update,
-                seg_feature_enabled,
-                seg_feature_data,
+                seg_params,
+                seg_id_pre_skip,
+                last_active_seg_id,
+                lossless_array,
                 loop_filter_level,
                 loop_filter_sharpness,
                 loop_filter_delta_enabled,
@@ -1441,59 +1511,61 @@ fn read_interpolation_filter(br: &mut BitReader<'_>) -> Result<(u8, bool), Kinet
     }
 }
 
-/// `segmentation_params()` (§5.9.14) minus the `update_data` gating wrapper.
-type SegmentationResult = Result<(bool, bool, [bool; 8], [[i16; 8]; 8]), KinetixError>;
+/// `segmentation_params()` (§5.9.14). Returns `(update_map, temporal_update,
+/// features)`; `prev` is the `load_previous()` feature table used when
+/// `segmentation_update_data == 0`.
+type SegmentationResult = Result<(bool, bool, SegParams), KinetixError>;
 
 fn parse_segmentation(
     br: &mut BitReader<'_>,
     primary_ref_frame: u8,
     enabled: bool,
+    prev: SegParams,
 ) -> SegmentationResult {
-    let mut update_map = false;
-    let mut temporal_update = false;
-    let mut feature_enabled = [false; 8];
-    let mut feature_data = [[0i16; 8]; 8];
-    if enabled {
-        if primary_ref_frame == 7 {
-            // PRIMARY_REF_NONE: update_map=1, update_data=1 (implied).
-            update_map = true;
-            read_segmentation_features(br, &mut feature_enabled, &mut feature_data)?;
-        } else {
-            update_map = read_flag(br)?;
-            if update_map {
-                temporal_update = read_flag(br)?;
-            }
-            let update_data = read_flag(br)?;
-            if update_data {
-                read_segmentation_features(br, &mut feature_enabled, &mut feature_data)?;
-            }
-        }
+    if !enabled {
+        return Ok((false, false, SegParams::default()));
     }
-    Ok((update_map, temporal_update, feature_enabled, feature_data))
+    let mut update_map = true;
+    let mut temporal_update = false;
+    let update_data = if primary_ref_frame == 7 {
+        // PRIMARY_REF_NONE: update_map = 1, temporal_update = 0, update_data = 1.
+        true
+    } else {
+        update_map = read_flag(br)?;
+        if update_map {
+            temporal_update = read_flag(br)?;
+        }
+        read_flag(br)?
+    };
+    let mut params = prev;
+    if update_data {
+        params = SegParams::default();
+        read_segmentation_features(br, &mut params)?;
+    }
+    Ok((update_map, temporal_update, params))
 }
 
 /// Read the `MAX_SEGMENTS × SEG_LVL_MAX` feature grid (§5.9.14).
 fn read_segmentation_features(
     br: &mut BitReader<'_>,
-    enabled: &mut [bool; 8],
-    data: &mut [[i16; 8]; 8],
+    params: &mut SegParams,
 ) -> Result<(), KinetixError> {
     const BITS: [u8; 8] = [8, 6, 6, 6, 6, 3, 0, 0];
     const SIGNED: [bool; 8] = [true, true, true, true, true, false, false, false];
-    for row in data.iter_mut() {
+    const MAX: [i32; 8] = [255, 63, 63, 63, 63, 7, 0, 0];
+    for i in 0..8 {
         for j in 0..8 {
-            let en = read_flag(br)?;
-            if en {
-                enabled[j] = true;
+            if read_flag(br)? {
+                params.enabled[i][j] = true;
                 let bits = BITS[j];
                 let val = if bits == 0 {
-                    0i16
+                    0
                 } else if SIGNED[j] {
-                    read_su(br, bits + 1)? as i16
+                    read_su(br, bits + 1)?.clamp(-MAX[j], MAX[j])
                 } else {
-                    read_f(br, bits)? as i16
+                    (read_f(br, bits)? as i32).clamp(0, MAX[j])
                 };
-                row[j] = val;
+                params.data[i][j] = val as i16;
             }
         }
     }

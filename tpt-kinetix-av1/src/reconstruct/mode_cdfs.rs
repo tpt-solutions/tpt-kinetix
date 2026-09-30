@@ -50,6 +50,8 @@ pub(crate) struct ModeCdfs {
     /// `use_intrabc` flag on intra frames with `allow_intrabc`.
     pub(super) intrabc: [u16; 3],
     pub(super) segment_id: [[u16; 9]; 3],
+    /// `segment_id_predicted` CDF (§5.11.9), by `AboveSegPredContext + LeftSegPredContext`.
+    pub(super) segment_id_predicted: [[u16; 3]; 3],
     /// `TileDeltaQCdf` (§8.3.2 `delta_q_abs`'s cdf selection) — one shared
     /// adaptive CDF for the whole tile, not indexed by context.
     pub(super) delta_q: [u16; 5],
@@ -353,11 +355,13 @@ impl ModeCdfs {
             skip_mode: DEFAULT_SKIP_MODE_CDF,
             // `Default_Intrabc_Cdf` (§ "Default CDF tables"): `{ 30531 }`.
             intrabc: [30531, 32768, 0],
-            // AV1 default `segment_id_cdf` is not yet transcribed into
-            // `cdf_tables_gen`; a uniform 8-way CDF is used as a placeholder so
-            // segmentation-enabled frames stay bit-aligned. Replace with the
-            // exact spec table before relying on pixel-exact seg decode.
-            segment_id: [[4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768, 0]; 3],
+            // `Default_Segment_Id_Cdf` / `Default_Segment_Id_Predicted_Cdf` (§ default CDFs).
+            segment_id: [
+                [5622, 7893, 16093, 18233, 27809, 28373, 32533, 32768, 0],
+                [14274, 18230, 22557, 24935, 29980, 30851, 32344, 32768, 0],
+                [27527, 28487, 28723, 28890, 32397, 32647, 32679, 32768, 0],
+            ],
+            segment_id_predicted: [[16384, 32768, 0]; 3],
             delta_q: DEFAULT_DELTA_Q_CDF,
             delta_lf: DEFAULT_DELTA_Q_CDF,
             delta_lf_multi: [DEFAULT_DELTA_Q_CDF; 4],
@@ -843,6 +847,14 @@ impl ModeCdfs {
         dec.read_symbol(&mut self.segment_id[ctx])
     }
 
+    pub(super) fn read_seg_id_predicted(
+        &mut self,
+        dec: &mut SymbolDecoder<'_>,
+        ctx: usize,
+    ) -> bool {
+        dec.read_symbol(&mut self.segment_id_predicted[ctx]) == 1
+    }
+
     pub(super) fn read_delta_q_abs(&mut self, dec: &mut SymbolDecoder<'_>) -> usize {
         dec.read_symbol(&mut self.delta_q)
     }
@@ -995,6 +1007,9 @@ impl ModeCdfs {
         }
         self.intrabc[self.intrabc.len() - 1] = 0;
         for a in &mut self.segment_id {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.segment_id_predicted {
             a[a.len() - 1] = 0;
         }
         self.delta_q[self.delta_q.len() - 1] = 0;

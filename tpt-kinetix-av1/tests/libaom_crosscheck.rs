@@ -156,6 +156,20 @@ fn libaom_streams_match_libdav1d() {
             aom: &["-cpu-used", "4"],
         },
         Case {
+            // Segmentation: alt-Q features, spatially-predicted segment ids.
+            name: "testsrc2 384x256 4:2:0 aq-mode=1 (segmentation, alt-Q)",
+            lavfi: "testsrc2=size=384x256:rate=10",
+            pix_fmt: "yuv420p",
+            aom: &["-cpu-used", "4", "-aom-params", "aq-mode=1"],
+        },
+        Case {
+            // Cyclic refresh: temporal segment-id prediction + PrevSegmentIds.
+            name: "testsrc2 384x256 4:2:2 aq-mode=3 (temporal segmentation)",
+            lavfi: "testsrc2=size=384x256:rate=10",
+            pix_fmt: "yuv422p",
+            aom: &["-cpu-used", "4", "-aom-params", "aq-mode=3"],
+        },
+        Case {
             name: "testsrc2 192x128 4:4:4 (unsubsampled chroma planes and refs)",
             lavfi: "testsrc2=size=192x128:rate=10",
             pix_fmt: "yuv444p",

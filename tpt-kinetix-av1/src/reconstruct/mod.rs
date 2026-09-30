@@ -27,6 +27,7 @@ mod partition;
 mod predict;
 mod qlookup_hbd;
 mod reconstruct_block;
+mod segmentation;
 mod transform;
 mod warp;
 mod wedge;
@@ -770,6 +771,23 @@ fn build_rp_proj(
     (rp, w8, mfmv_refs.len())
 }
 
+/// Frame-level segmentation state a tile decoder needs (§5.9.14 / §5.11.9).
+#[derive(Clone, Copy)]
+pub struct SegTile<'a> {
+    pub enabled: bool,
+    pub update_map: bool,
+    pub temporal_update: bool,
+    /// `SegIdPreSkip`.
+    pub pre_skip: bool,
+    /// `LastActiveSegId`.
+    pub last_active: usize,
+    pub params: crate::frame::SegParams,
+    /// `LosslessArray`.
+    pub lossless: [bool; 8],
+    /// `PrevSegmentIds` (frame-wide, `mi_cols` stride); `None` = all zero.
+    pub prev: Option<&'a [u8]>,
+}
+
 /// Per-tile decode state: entropy decoder, CDF state, coefficient contexts,
 /// and the neighbour-context arrays (partition / luma-mode / chroma-mode /
 /// tx-size) the syntax elements read from.
@@ -802,10 +820,18 @@ struct TileDecodeState<'a> {
     ymode_left: Vec<u8>,
     uv_above: Vec<u8>,
     uv_left: Vec<u8>,
-    segmentation_enabled: bool,
-    seg_feature_skip: bool,
-    #[allow(dead_code)]
-    seg_feature_alt_q: bool,
+    seg: SegTile<'a>,
+    /// `segment_id` of the block currently being decoded.
+    segment_id: usize,
+    /// `get_qindex(1, segment_id) > 0` for the current block (`transform_type` gate).
+    qidx_pos: bool,
+    /// `CodedLossless` (frame level; gates `read_cdef`).
+    coded_lossless: bool,
+    /// `base_q_idx`.
+    base_q_idx: u8,
+    /// `AboveSegPredContext` / `LeftSegPredContext` (§5.11.9).
+    seg_pred_above: Vec<u8>,
+    seg_pred_left: Vec<u8>,
     /// Sequence-header `enable_filter_intra` (§5.11.24 gate).
     enable_filter_intra: bool,
     /// Sequence-header `enable_intra_edge_filter` (§7.11.2.4 gate).
@@ -1164,9 +1190,8 @@ impl<'a> TileDecodeState<'a> {
         lf_ref_deltas: [i8; 8],
         lf_mode_deltas: [i8; 2],
         lf_delta_enabled: bool,
-        segmentation_enabled: bool,
-        seg_feature_skip: bool,
-        #[allow(dead_code)] seg_feature_alt_q: bool,
+        seg: SegTile<'a>,
+        coded_lossless: bool,
         enable_filter_intra: bool,
         enable_intra_edge_filter: bool,
         allow_screen_content_tools: bool,
@@ -1202,7 +1227,7 @@ impl<'a> TileDecodeState<'a> {
     ) -> Self {
         let mi_cols = width.div_ceil(MI_SIZE);
         let mi_rows = height.div_ceil(MI_SIZE);
-        let lossless = qindex == 0;
+        let lossless = seg.lossless[0];
         // §5.9.15: the mode-info grid rounds up to 8-pixel multiples
         // (`MiCols = 2*ceil(W/8)`, `MiRows = 2*ceil(H/8)`), not plain
         // MI_SIZE=4 rounding — this is the same grid_w/grid_h the caller
@@ -1417,9 +1442,13 @@ impl<'a> TileDecodeState<'a> {
             tile_ch,
             tile_mi_cols,
             tile_mi_rows,
-            segmentation_enabled,
-            seg_feature_skip,
-            seg_feature_alt_q,
+            seg,
+            segment_id: 0,
+            qidx_pos: qindex > 0,
+            coded_lossless,
+            base_q_idx: qindex,
+            seg_pred_above: vec![0u8; mi_cols],
+            seg_pred_left: vec![0u8; mi_rows],
             enable_filter_intra,
             enable_intra_edge_filter,
             allow_screen_content_tools,
@@ -1503,6 +1532,9 @@ impl<'a> TileDecodeState<'a> {
         for s in self.skip_mode_left.iter_mut() {
             *s = 0;
         }
+        for s in self.seg_pred_left.iter_mut() {
+            *s = 0;
+        }
         for s in self.tx_left.iter_mut() {
             *s = 0;
         }
@@ -1564,7 +1596,7 @@ impl<'a> TileDecodeState<'a> {
     /// feature override in when segmentation support lands for real.
     fn qindex_for_plane(&self, plane: usize) -> (u8, u8) {
         let clamp = |v: i32| v.clamp(0, 255) as u8;
-        let q = self.current_q_index as i32;
+        let q = i32::from(self.get_qindex(false, self.segment_id));
         match plane {
             0 => (clamp(q + self.delta_q.y_dc), clamp(q)),
             1 => (clamp(q + self.delta_q.u_dc), clamp(q + self.delta_q.u_ac)),
@@ -1590,7 +1622,7 @@ impl<'a> TileDecodeState<'a> {
     /// 64×64 unit per superblock (zero bits, hence a true no-op, whenever
     /// `cdef_bits == 0` — the only case the current corpus exercises).
     fn read_cdef(&mut self, mi_row: usize, mi_col: usize, bsize: usize, skip: bool) {
-        if skip || self.lossless || !self.enable_cdef || self.allow_intrabc {
+        if skip || self.coded_lossless || !self.enable_cdef || self.allow_intrabc {
             return;
         }
         const CDEF_SIZE4: usize = 16; // Num_4x4_Blocks_Wide[BLOCK_64X64]
@@ -1717,6 +1749,7 @@ pub(crate) fn chroma_lf_levels_snapshot(
     lf_mode_deltas: [i8; 2],
     lf_delta_enabled: bool,
     delta_lf: [i8; 4],
+    seg_delta: [i32; 2],
     ref_idx: u8,
     mode_type: u8,
 ) -> (i32, i32) {
@@ -1727,6 +1760,7 @@ pub(crate) fn chroma_lf_levels_snapshot(
             &lf_ref_deltas,
             &lf_mode_deltas,
             i32::from(delta_lf[2]),
+            seg_delta[0],
             ref_idx as usize,
             mode_type as usize,
         ),
@@ -1736,6 +1770,7 @@ pub(crate) fn chroma_lf_levels_snapshot(
             &lf_ref_deltas,
             &lf_mode_deltas,
             i32::from(delta_lf[3]),
+            seg_delta[1],
             ref_idx as usize,
             mode_type as usize,
         ),
@@ -1766,9 +1801,8 @@ pub fn decode_tile_group(
     lf_ref_deltas: [i8; 8],
     lf_mode_deltas: [i8; 2],
     lf_delta_enabled: bool,
-    segmentation_enabled: bool,
-    seg_feature_skip: bool,
-    seg_feature_alt_q: bool,
+    seg: SegTile<'_>,
+    coded_lossless: bool,
     enable_filter_intra: bool,
     enable_intra_edge_filter: bool,
     allow_screen_content_tools: bool,
@@ -1827,6 +1861,9 @@ pub fn decode_tile_group(
     let sb_row_start = y0 / sb_size;
     let sb_row_end = (y0 + tile_h).div_ceil(sb_size);
 
+    if seg.enabled && seg.update_map {
+        meta.segment_ids = vec![0u8; mi_cols * mi_rows];
+    }
     let mut state = TileDecodeState::new(
         data,
         0,
@@ -1854,9 +1891,8 @@ pub fn decode_tile_group(
         lf_ref_deltas,
         lf_mode_deltas,
         lf_delta_enabled,
-        segmentation_enabled,
-        seg_feature_skip,
-        seg_feature_alt_q,
+        seg,
+        coded_lossless,
         enable_filter_intra,
         enable_intra_edge_filter,
         allow_screen_content_tools,
@@ -1950,6 +1986,7 @@ pub fn decode_tile_group(
         }
     }
     if capture_tile {
+        let segmentation_enabled = seg.enabled;
         let params_json = format!(
             "{{\"width\":{width},\"height\":{height},\"mi_cols\":{mi_cols},\"mi_rows\":{mi_rows},\
              \"sb_size\":{sb_size},\"use_128\":{use_128},\"subsampling_x\":true,\"subsampling_y\":true,\
@@ -2164,7 +2201,18 @@ pub type ReconstructOutput = (
 /// superblock row reconstructs into the padding rows too, and motion
 /// compensation for bottom-edge blocks reads them (dav1d's references are
 /// padded the same way). The visible crop is `real_width × real_height`.
+/// A frame's per-4x4 segment-id map (`SegmentIds`, §7.20), saved with each
+/// reference slot for `load_previous_segment_ids()`.
+#[derive(Debug, Clone)]
+pub struct SegMap {
+    pub data: Vec<u8>,
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+}
+
 pub struct PaddedPlanes {
+    /// `SegmentIds` for this frame when segmentation is enabled.
+    pub segment_ids: Option<SegMap>,
     pub y: Vec<Px>,
     pub u: Vec<Px>,
     pub v: Vec<Px>,
@@ -2187,6 +2235,7 @@ pub fn reconstruct_av1_frame(
     ref_store: Option<&RefFrameStore>,
     dpb_order_hints: [u8; 8],
     initial_cdfs: Option<&FrameCdfContext>,
+    prev_segment_ids: Option<&SegMap>,
 ) -> Result<Option<ReconstructOutput>, KinetixError> {
     let frame_is_intra = frame_header.frame_type.is_intra();
     if std::env::var("KINETIX_AV1_DBG").is_ok() {
@@ -2405,9 +2454,17 @@ pub fn reconstruct_av1_frame(
                 frame_header.loop_filter_deltas.loop_filter_ref_deltas,
                 frame_header.loop_filter_deltas.loop_filter_mode_deltas,
                 frame_header.loop_filter_delta_enabled,
-                frame_header.segmentation_enabled,
-                false, // seg_feature_skip: per-segment SEG_LVL_SKIP not yet wired
-                false, // seg_feature_alt_q: per-segment SEG_LVL_ALT_Q not yet wired
+                SegTile {
+                    enabled: frame_header.segmentation_enabled,
+                    update_map: frame_header.segmentation_update_map,
+                    temporal_update: frame_header.segmentation_temporal_update,
+                    pre_skip: frame_header.seg_id_pre_skip,
+                    last_active: usize::from(frame_header.last_active_seg_id),
+                    params: frame_header.seg_params,
+                    lossless: frame_header.lossless_array,
+                    prev: prev_segment_ids.map(|m| m.data.as_slice()),
+                },
+                frame_header.coded_lossless,
                 seq.enable_filter_intra,
                 seq.enable_intra_edge_filter,
                 frame_header.allow_screen_content_tools,
@@ -2485,6 +2542,15 @@ pub fn reconstruct_av1_frame(
     let mut full_mf_cells = vec![MotionFieldCell::default(); mi_cols * mi_rows];
     let mut frame_cdf_context: Option<FrameCdfContext> = None;
     let mut frame_meta = FrameMeta::new_ss(grid_w, grid_h, ss_x as usize, ss_y as usize);
+    // `SegmentIds` (§7.20): the decoded map when it is being updated, else the
+    // (possibly absent = zero) previous map.
+    let seg_on = frame_header.segmentation_enabled;
+    let seg_update = seg_on && frame_header.segmentation_update_map;
+    let mut seg_map_data = if seg_update {
+        vec![0u8; mi_cols * mi_rows]
+    } else {
+        Vec::new()
+    };
     // §6.8.2: the saved context comes from the `contextUpdateTileId` tile —
     // not necessarily tile 0 — when that tile's group was delivered.
     let cdf_tile = tile_payloads
@@ -2519,6 +2585,13 @@ pub fn reconstruct_av1_frame(
             if cell.refs[0] != NONE_FRAME {
                 if let Some(dst) = full_mf_cells.get_mut(i) {
                     *dst = *cell;
+                }
+            }
+        }
+        if seg_update {
+            for r in (tile.y0 / MI_SIZE)..tile.y1.div_ceil(MI_SIZE).min(mi_rows) {
+                for c in (tile.x0 / MI_SIZE)..tile.x1.div_ceil(MI_SIZE).min(mi_cols) {
+                    seg_map_data[r * mi_cols + c] = tile.meta.segment_ids[r * mi_cols + c];
                 }
             }
         }
@@ -2606,6 +2679,22 @@ pub fn reconstruct_av1_frame(
         None
     };
 
+    let frame_segment_ids = if seg_on {
+        let data = if seg_update {
+            seg_map_data
+        } else {
+            prev_segment_ids
+                .map(|m| m.data.clone())
+                .unwrap_or_else(|| vec![0u8; mi_cols * mi_rows])
+        };
+        Some(SegMap {
+            data,
+            mi_cols,
+            mi_rows,
+        })
+    } else {
+        None
+    };
     let padded = PaddedPlanes {
         y: y_plane.clone(),
         u: u_plane.clone(),
@@ -2619,6 +2708,7 @@ pub fn reconstruct_av1_frame(
         grid_height: grid_h,
         real_width,
         real_height: height,
+        segment_ids: frame_segment_ids,
     };
     if std::env::var("KINETIX_AV1_DUMP_GRID").is_ok() {
         let nm = std::env::var("KINETIX_AV1_DUMP_GRID").unwrap_or_default();

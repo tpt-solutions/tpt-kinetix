@@ -214,6 +214,9 @@ pub struct FrameMeta {
     /// `(plane, unit_row, unit_col)`. Populated during tile decode
     /// (`read_lr_unit`) and applied in `apply_post_filters`.
     pub lr_units: std::collections::HashMap<(usize, usize, usize), LrUnitData>,
+    /// `SegmentIds` (frame-wide, `mi_cols` stride). Populated by a tile decode
+    /// when the segmentation map is being updated; empty otherwise.
+    pub segment_ids: Vec<u8>,
 }
 
 /// Parsed loop-restoration parameters for one restoration unit (§7.17).
@@ -285,6 +288,7 @@ impl FrameMeta {
             lf_mode4: vec![0u8; len4],
             cdef_idx: std::collections::HashMap::new(),
             lr_units: std::collections::HashMap::new(),
+            segment_ids: Vec::new(),
         }
     }
 
@@ -578,7 +582,20 @@ impl FrameMeta {
         }
     }
 
-    pub fn record_lf4(&mut self, bx0: usize, by0: usize, bx1: usize, by1: usize, r: u8, m: u8) {
+    /// `seg` (the block's `segment_id`) is packed into the upper bits of
+    /// `lf_mode4` (`mode_type | seg << 1`) so the deblock level derivation
+    /// can apply the per-segment `SEG_LVL_ALT_LF_*` features.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_lf4(
+        &mut self,
+        bx0: usize,
+        by0: usize,
+        bx1: usize,
+        by1: usize,
+        r: u8,
+        m: u8,
+        seg: u8,
+    ) {
         let by1c = by1.min(self.h4);
         let bx1c = bx1.min(self.w4);
         if std::env::var("KINETIX_AV1_DBG_LFCELL").is_ok()
@@ -596,7 +613,7 @@ impl FrameMeta {
             for bx in bx0..bx1c {
                 let i = self.idx4(bx, by);
                 self.lf_ref4[i] = r;
-                self.lf_mode4[i] = m;
+                self.lf_mode4[i] = (m & 1) | (seg << 1);
             }
         }
     }
@@ -685,17 +702,21 @@ impl FrameMeta {
 /// shared core of [`compute_level`] and the chroma level cache recording
 /// (`FrameMeta::lf_level_u4`/`_v4`), which runs from the tile decode state
 /// (which snapshots these parameters instead of holding a `FrameHeader`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_level_parts(
     base: u8,
     delta_enabled: bool,
     ref_deltas: &[i8; 8],
     mode_deltas: &[i8; 2],
     delta_lf: i32,
+    seg_delta: i32,
     ref_idx: usize,
     mode_type: usize,
 ) -> i32 {
     let base = base as i32;
     let base = (base + delta_lf).clamp(0, MAX_LOOP_FILTER);
+    // §7.14.4: `lvlSeg` picks up the segment's `SEG_LVL_ALT_LF_*` feature.
+    let base = (base + seg_delta).clamp(0, MAX_LOOP_FILTER);
     let mut lvl = base;
     if delta_enabled {
         let shift = if base >= 32 { 1 } else { 0 };
@@ -715,8 +736,11 @@ fn compute_level(
     pass: usize,
     delta_lf: i32,
     ref_idx: usize,
-    mode_type: usize,
+    mode_packed: usize,
 ) -> i32 {
+    // `lf_mode4` packs `modeType | segment_id << 1` (see `FrameMeta::record_lf4`).
+    let mode_type = mode_packed & 1;
+    let segment = mode_packed >> 1;
     // i = (plane == 0) ? pass : (plane + 1)
     let i = if plane == 0 { pass } else { plane + 1 };
     let base = if i < FRAME_LF_COUNT {
@@ -729,6 +753,18 @@ fn compute_level(
     // (`lf_mask.c`), which computes `base = iclip(base_lvl + lf_delta, 0,
     // 63)` first, then a separate final `iclip` after adding the delta.
     let base = (base + delta_lf).clamp(0, MAX_LOOP_FILTER);
+    let base = if fh.segmentation_enabled
+        && fh
+            .seg_params
+            .active(segment, crate::frame::SEG_LVL_ALT_LF_Y_V + i)
+    {
+        (base
+            + fh.seg_params
+                .value(segment, crate::frame::SEG_LVL_ALT_LF_Y_V + i))
+        .clamp(0, MAX_LOOP_FILTER)
+    } else {
+        base
+    };
     let mut lvl = base;
     if fh.loop_filter_delta_enabled {
         // §7.14.4's ref-delta term is `loop_filter_ref_deltas[ref] <<
