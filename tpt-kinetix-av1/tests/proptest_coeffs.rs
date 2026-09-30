@@ -71,6 +71,9 @@ fn decode_with(
         false,    // enable_filter_intra
         false,    // enable_intra_edge_filter
         allow_screen_content_tools,
+        true,  // subsampling_x (4:2:0)
+        true,  // subsampling_y (4:2:0)
+        false, // monochrome
         false, // allow_intrabc
         LrDecodeParams::default(),
         CdefDeltaParams::default(),

@@ -764,6 +764,90 @@ pub struct InterCdfs {
     pub mv_bit: [[[u16; 3]; 10]; 2],
     pub mv_fr: [[u16; 5]; 2],
     pub mv_hp: [[u16; 3]; 2],
+    /// The `MvCtx == 1` (intra-block-copy) copy of every MV CDF above. The
+    /// spec (and dav1d's `dmv`) keeps it fully separate from the ordinary
+    /// inter set, and both are saved/loaded with the frame context; sharing
+    /// one set made an IntraBC keyframe hand adapted-by-IBC MV CDFs to every
+    /// later inter frame that restored its context.
+    pub dmv: MvCdfSet,
+}
+
+/// One complete set of MV CDFs (`TileMv*Cdf[MvCtx]`).
+#[derive(Clone)]
+pub struct MvCdfSet {
+    pub joint: [u16; 5],
+    pub sign: [[u16; 3]; 2],
+    pub class: [[u16; 12]; 2],
+    pub class0_bit: [[u16; 3]; 2],
+    pub class0_fr: [[[u16; 5]; 2]; 2],
+    pub class0_hp: [[u16; 3]; 2],
+    pub bit: [[[u16; 3]; 10]; 2],
+    pub fr: [[u16; 5]; 2],
+    pub hp: [[u16; 3]; 2],
+}
+
+impl MvCdfSet {
+    fn defaults() -> Self {
+        MvCdfSet {
+            joint: defaults::DEFAULT_MV_JOINT_CDF,
+            sign: [defaults::DEFAULT_MV_SIGN_CDF; 2],
+            class: defaults::DEFAULT_MV_CLASS_CDF,
+            class0_bit: [defaults::DEFAULT_MV_CLASS0_BIT_CDF; 2],
+            class0_fr: defaults::DEFAULT_MV_CLASS0_FR_CDF,
+            class0_hp: [defaults::DEFAULT_MV_CLASS0_HP_CDF; 2],
+            bit: [defaults::DEFAULT_MV_BIT_CDF; 2],
+            fr: defaults::DEFAULT_MV_FR_CDF,
+            hp: [defaults::DEFAULT_MV_HP_CDF; 2],
+        }
+    }
+}
+
+impl InterCdfs {
+    /// Exchange the ordinary MV CDFs with the intra-block-copy (`MvCtx == 1`)
+    /// set, so the shared `read_mv*` code runs against whichever is active.
+    fn reset_mv_counts(&mut self) {
+        self.mv_joint[self.mv_joint.len() - 1] = 0;
+        for a in &mut self.mv_sign {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_class {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_class0_bit {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_class0_fr {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.mv_class0_hp {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_bit {
+            for b in a.iter_mut() {
+                b[b.len() - 1] = 0;
+            }
+        }
+        for a in &mut self.mv_fr {
+            a[a.len() - 1] = 0;
+        }
+        for a in &mut self.mv_hp {
+            a[a.len() - 1] = 0;
+        }
+    }
+
+    fn swap_mv_ctx(&mut self) {
+        std::mem::swap(&mut self.mv_joint, &mut self.dmv.joint);
+        std::mem::swap(&mut self.mv_sign, &mut self.dmv.sign);
+        std::mem::swap(&mut self.mv_class, &mut self.dmv.class);
+        std::mem::swap(&mut self.mv_class0_bit, &mut self.dmv.class0_bit);
+        std::mem::swap(&mut self.mv_class0_fr, &mut self.dmv.class0_fr);
+        std::mem::swap(&mut self.mv_class0_hp, &mut self.dmv.class0_hp);
+        std::mem::swap(&mut self.mv_bit, &mut self.dmv.bit);
+        std::mem::swap(&mut self.mv_fr, &mut self.dmv.fr);
+        std::mem::swap(&mut self.mv_hp, &mut self.dmv.hp);
+    }
 }
 
 impl InterCdfs {
@@ -799,6 +883,7 @@ impl InterCdfs {
             mv_bit: [defaults::DEFAULT_MV_BIT_CDF; 2],
             mv_fr: defaults::DEFAULT_MV_FR_CDF,
             mv_hp: [defaults::DEFAULT_MV_HP_CDF; 2],
+            dmv: MvCdfSet::defaults(),
         }
     }
 }
@@ -883,6 +968,15 @@ pub fn read_mv(
     allow_hp: bool,
     force_integer_mv: bool,
 ) -> Result<Mv, KinetixError> {
+    if std::env::var("KINETIX_AV1_DBG_MVJOINT").is_ok() {
+        eprintln!(
+            "MVJOINT pre rng={} cdf={:?} class0={:?} class={:?}",
+            dec.raw_state().0,
+            cdfs.mv_joint,
+            cdfs.mv_sign,
+            cdfs.mv_class[0]
+        );
+    }
     let joint = dec.read_symbol(&mut cdfs.mv_joint);
     let mut row = 0i32;
     let mut col = 0i32;
@@ -893,6 +987,15 @@ pub fn read_mv(
         col = read_mv_component(dec, cdfs, 1, allow_hp, force_integer_mv)?;
     }
     Ok(Mv::new(row, col))
+}
+
+/// `read_mv` for an intra-block-copy displacement vector: integer-pel, no
+/// high-precision bit, and the separate `MvCtx == 1` CDF set.
+pub fn read_mv_ibc(dec: &mut SymbolDecoder<'_>, cdfs: &mut InterCdfs) -> Result<Mv, KinetixError> {
+    cdfs.swap_mv_ctx();
+    let mv = read_mv(dec, cdfs, false, true);
+    cdfs.swap_mv_ctx();
+    mv
 }
 
 // --- Reference-frame-name decoding (§6.8.2) --------------------------------
@@ -1119,35 +1222,10 @@ impl InterCdfs {
         for a in &mut self.comp_inter_mode {
             a[a.len() - 1] = 0;
         }
-        self.mv_joint[self.mv_joint.len() - 1] = 0;
-        for a in &mut self.mv_sign {
-            a[a.len() - 1] = 0;
-        }
-        for a in &mut self.mv_class {
-            a[a.len() - 1] = 0;
-        }
-        for a in &mut self.mv_class0_bit {
-            a[a.len() - 1] = 0;
-        }
-        for a in &mut self.mv_class0_fr {
-            for b in a.iter_mut() {
-                b[b.len() - 1] = 0;
-            }
-        }
-        for a in &mut self.mv_class0_hp {
-            a[a.len() - 1] = 0;
-        }
-        for a in &mut self.mv_bit {
-            for b in a.iter_mut() {
-                b[b.len() - 1] = 0;
-            }
-        }
-        for a in &mut self.mv_fr {
-            a[a.len() - 1] = 0;
-        }
-        for a in &mut self.mv_hp {
-            a[a.len() - 1] = 0;
-        }
+        self.reset_mv_counts();
+        self.swap_mv_ctx();
+        self.reset_mv_counts();
+        self.swap_mv_ctx();
     }
 }
 

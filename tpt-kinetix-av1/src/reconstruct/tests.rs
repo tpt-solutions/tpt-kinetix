@@ -102,6 +102,9 @@ fn decode(data: &[u8], width: usize, height: usize, qindex: u8) -> DecodeResult 
         false,
         false,
         false,
+        true,  // subsampling_x (4:2:0)
+        true,  // subsampling_y (4:2:0)
+        false, // monochrome
         false, // allow_intrabc
         LrDecodeParams::default(),
         CdefDeltaParams::default(),

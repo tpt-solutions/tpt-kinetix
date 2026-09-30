@@ -757,6 +757,7 @@ fn level_params(lvl: i32, sharpness: u8) -> LevelParams {
 ///
 /// Returns a new line with the filtered positions written; unaffected samples
 /// are copied unchanged.
+#[allow(clippy::too_many_arguments)]
 fn filter_line_1d(
     line: &[i32],
     edge: usize,
@@ -765,12 +766,19 @@ fn filter_line_1d(
     thresh: i32,
     filter_size: usize,
     is_luma: bool,
+    bit_depth: u32,
 ) -> Vec<i32> {
     let mut out = line.to_vec();
     if edge == 0 || edge >= line.len() {
         return out;
     }
-    let bd_flat = 1i32; // 1 << (BitDepth - 8) -- 8-bit only
+    // §7.14.6.2: the level-derived thresholds and the flat threshold scale
+    // with the bit depth (dav1d shifts E/I/H by `bitdepth_min_8`).
+    let shift = bit_depth - 8;
+    let bd_flat = 1i32 << shift;
+    let (limit, blimit, thresh) = (limit << shift, blimit << shift, thresh << shift);
+    let half = 0x80i32 << shift; // sample-domain centre, also the |filter| bound + 1
+    let pix_max = (1i32 << bit_depth) - 1;
 
     // Gather the tap window around the edge. `get` clamps to the plane's own
     // edge sample rather than returning 0 out of bounds — CurrFrame is only
@@ -874,26 +882,26 @@ fn filter_line_1d(
     // (`128 + blimit` for `blimit = 16`) instead of leaving flat, unrelated
     // content untouched.
     if filter_size == 4 || !flat {
-        let ps1 = p1 - 128;
-        let ps0 = p0 - 128;
-        let qs0 = q0 - 128;
-        let qs1 = q1 - 128;
+        let ps1 = p1 - half;
+        let ps0 = p0 - half;
+        let qs0 = q0 - half;
+        let qs1 = q1 - half;
         // §7.14.6.3: one clip over the complete sum, not two separate clips
         let filter = clip3(
             (if hev { ps1 - qs1 } else { 0 }) + 3 * (qs0 - ps0),
-            -128,
-            127,
+            -half,
+            half - 1,
         );
-        let f1 = clip3(filter + 4, -128, 127) >> 3;
-        let f2 = clip3(filter + 3, -128, 127) >> 3;
-        let oq0 = clip3(qs0 - f1 + 128, 0, 255);
-        let op0 = clip3(ps0 + f2 + 128, 0, 255);
+        let f1 = clip3(filter + 4, -half, half - 1) >> 3;
+        let f2 = clip3(filter + 3, -half, half - 1) >> 3;
+        let oq0 = clip3(qs0 - f1 + half, 0, pix_max);
+        let op0 = clip3(ps0 + f2 + half, 0, pix_max);
         out[edge] = oq0;
         out[edge - 1] = op0;
         if !hev {
             let f = round2(f1, 1);
-            let oq1 = clip3(qs1 - f + 128, 0, 255);
-            let op1 = clip3(ps1 + f + 128, 0, 255);
+            let oq1 = clip3(qs1 - f + half, 0, pix_max);
+            let op1 = clip3(ps1 + f + half, 0, pix_max);
             // An edge can sit on the frame's last sample (e.g. the final
             // transform row of a height like 90), where q1/p1 fall outside
             // the plane — clamp the writes the same way `get` clamps reads.
@@ -933,7 +941,7 @@ fn filter_line_1d(
         }
         let f = round2(t as i32, log2);
         let idx = (edge as isize + i).clamp(0, out_len as isize - 1) as usize;
-        out[idx] = clip3(f, 0, 255);
+        out[idx] = clip3(f, 0, pix_max);
     }
     out
 }
@@ -966,6 +974,10 @@ fn deblock_plane(
     lf_shift: u32,
     grid_w: usize,
     grid_h: usize,
+    // Number of grid columns that lie inside the visible frame (dav1d builds
+    // its loop-filter masks over `f->w4`, i.e. `ceil(width / 4)` 4-sample
+    // cells, not the padded mi grid): edges at or beyond it are never filtered.
+    col_limit: usize,
     fh: &FrameHeader,
     // Chroma level cache (`FrameMeta::lf_level_u4`/`_v4`) with its stride;
     // empty for the luma pass (which derives levels per edge instead).
@@ -1024,7 +1036,7 @@ fn deblock_plane(
         // strictly inside a single wide transform where AV1 has no edge to
         // filter at all.
         for by in v0..v1 {
-            for bx in 1..grid_w {
+            for bx in 1..grid_w.min(col_limit) {
                 if std::env::var("KINETIX_AV1_DBG_CHROMA_VEDGE").is_ok()
                     && plane_index > 0
                     && by == 11
@@ -1174,6 +1186,7 @@ fn deblock_plane(
                         lp.thresh,
                         filter_size,
                         plane_index == 0,
+                        fh.bit_depth as u32,
                     );
                     for x in 0..width {
                         plane[y * stride + x] = filtered[x] as Px;
@@ -1207,7 +1220,7 @@ fn deblock_plane(
         // sample-tall transform never spans — smoothing a real, unrelated
         // content transition into the flat region next to it.
         for by in h0..h1 {
-            for bx in 0..grid_w {
+            for bx in 0..grid_w.min(col_limit) {
                 if std::env::var("KINETIX_AV1_DBG_CHROMA_HEDGE").is_ok()
                     && plane_index > 0
                     && by == 11
@@ -1357,6 +1370,7 @@ fn deblock_plane(
                         lp.thresh,
                         filter_size,
                         plane_index == 0,
+                        fh.bit_depth as u32,
                     );
                     for y in 0..height {
                         plane[y * stride + x] = filtered[y] as Px;
@@ -1448,13 +1462,14 @@ fn cdef_direction(
     height: usize,
     x0: usize,
     y0: usize,
+    bit_depth: u32,
 ) -> (usize, i32) {
     let mut partial = [[0i32; 15]; 8];
     for i in 0..8 {
         for j in 0..8 {
             let yy = (y0 + i).min(height.saturating_sub(1));
             let xx = (x0 + j).min(width.saturating_sub(1));
-            let x = src[yy * stride + xx] as i32 - 128;
+            let x = (src[yy * stride + xx] as i32 >> (bit_depth - 8)) - 128;
             partial[0][i + j] += x;
             partial[1][i + j / 2] += x;
             partial[2][i] += x;
@@ -1720,6 +1735,12 @@ fn wiener_filter_plane(
     };
     let fh = build_filter(half_h);
     let fv = build_filter(half_v);
+    // dav1d `wiener_c`: the intermediate precision follows the bit depth.
+    let bit_depth = 32 - (pix_max as u32).leading_zeros();
+    let round_bits_h = 3 + if bit_depth == 12 { 2 } else { 0 };
+    let clip_limit = 1i32 << (bit_depth + 1 + 7 - round_bits_h);
+    let round_bits_v = 11 - if bit_depth == 12 { 2 } else { 0 };
+    let round_offset_v = 1i32 << (bit_depth + round_bits_v - 1);
     let wiener_dbg = std::env::var("KINETIX_AV1_DBG_WPX").ok().and_then(|s| {
         let (a, b) = s.split_once(',')?;
         Some((
@@ -1746,25 +1767,26 @@ fn wiener_filter_plane(
     for iy in 0..inter_h {
         let y = uy0 as isize + iy as isize - 3;
         for x in 0..uw {
-            let mut sum = 1i32 << 14; // horizontal bias
+            let mut sum = 1i32 << (bit_depth + 6); // horizontal bias
             for (i, &fi) in fh.iter().enumerate() {
                 let xi = ux0 as isize + x as isize + i as isize - 3;
                 sum += fi * src_at(xi, y);
             }
-            inter[iy * uw + x] = ((sum + 4) >> 3).clamp(0, 8191);
+            inter[iy * uw + x] =
+                ((sum + (1 << (round_bits_h - 1))) >> round_bits_h).clamp(0, clip_limit - 1);
         }
     }
 
     // Vertical pass — matching negative bias; out ∈ [0, 255].
-    let round_offset_v = -(1i32 << 18);
     for y in 0..uh {
         for x in 0..uw {
-            let mut sum = round_offset_v;
+            let mut sum = -round_offset_v;
             for (i, &fi) in fv.iter().enumerate() {
                 let iy = y + i; // (y + i - 3) offset by the +3 padding above
                 sum += fi * inter[iy * uw + x];
             }
-            plane[(uy0 + y) * pw + (ux0 + x)] = ((sum + 1024) >> 11).clamp(0, pix_max) as Px;
+            plane[(uy0 + y) * pw + (ux0 + x)] =
+                ((sum + (1 << (round_bits_v - 1))) >> round_bits_v).clamp(0, pix_max) as Px;
         }
     }
 }
@@ -1800,6 +1822,7 @@ fn sgrproj_filter_plane(
     // a_tab/b_tab need a 1-cell (3×3 pass) / 1-cell (5×5 pass, `yn = y+1`
     // only looks forward) halo around the unit; padding by 1 on every side
     // covers both passes uniformly.
+    let bd8 = 32 - (pix_max as u32).leading_zeros() - 8;
     let pad = 1isize;
     let aw = uw + 2 * pad as usize;
     let ah = uh + 2 * pad as usize;
@@ -1826,7 +1849,11 @@ fn sgrproj_filter_plane(
                             sum_sq += (v * v) as i64;
                         }
                     }
-                    let p_val = ((n as i64 * sum_sq - (sum as i64) * (sum as i64)).max(0)) as u64;
+                    // dav1d `selfguided_filter`: the variance is taken on the
+                    // sums scaled back to 8-bit precision.
+                    let a8 = (sum_sq + ((1i64 << (2 * bd8)) >> 1)) >> (2 * bd8);
+                    let b8 = ((sum as i64) + ((1i64 << bd8) >> 1)) >> bd8;
+                    let p_val = ((n as i64 * a8 - b8 * b8).max(0)) as u64;
                     let z = ((p_val * s as u64 + (1 << 19)) >> 20).min(255) as usize;
                     let alpha = SGR_X_BY_X[z] as i32;
                     let ai = a_idx(lx, ly);
@@ -1967,6 +1994,7 @@ fn sgrproj_filter_plane(
 fn apply_loop_restoration_plane(
     plane: &mut [Px],
     w: usize,
+    vis_w: usize,
     h: usize,
     plane_idx: usize,
     fh: &crate::frame::FrameHeader,
@@ -1978,6 +2006,23 @@ fn apply_loop_restoration_plane(
     if fh.frame_restoration_type[plane_idx] == 0 {
         return;
     }
+    // `w` is the plane stride (the mi-grid width, padded past the visible
+    // frame); restoration units and the edge-replication of filter taps use
+    // the VISIBLE width `vis_w` (dav1d `lr_sbrow` works on `f->cur.p.w`).
+    // Replicate the last visible column into the padding of both source
+    // snapshots so taps reaching past the frame edge read the edge sample.
+    let replicate_edge = |src: &[Px]| -> Vec<Px> {
+        let mut v = src.to_vec();
+        if vis_w < w {
+            for row in v.chunks_mut(w) {
+                let edge = row[vis_w - 1];
+                row[vis_w..].fill(edge);
+            }
+        }
+        v
+    };
+    let boundary_owned = replicate_edge(boundary_src);
+    let boundary_src: &[Px] = &boundary_owned;
     if std::env::var("KINETIX_AV1_DBG_LRMAP").is_ok() {
         let mut kinds = std::collections::HashMap::new();
         for ((pl, ur, uc), u) in lr_units {
@@ -1994,8 +2039,16 @@ fn apply_loop_restoration_plane(
         );
     }
     let unit_size = fh.lr_unit_size[plane_idx] as usize;
-    let unit_cols = w.div_ceil(unit_size);
-    let unit_rows = h.div_ceil(unit_size);
+    // §7.17 `count_units_in_frame`: a trailing partial unit shorter than half
+    // a unit is folded into the previous one, and the last unit extends to
+    // the frame edge.
+    let count_units = |span: usize| ((span + (unit_size >> 1)) / unit_size).max(1);
+    let unit_cols = count_units(vis_w);
+    let unit_rows = count_units(h);
+    // The vertical unit grid is offset by 8 luma rows (`8 >> ssv` in the
+    // plane): §7.17 picks `unitRow = ((row * MI_SIZE + 8) >> ss_y) / unitSize`,
+    // so with 128-row units the second unit row starts at y = 120, not 128.
+    let unit_off_y = 8 >> ssv;
     // Every unit filters from one shared pre-restoration snapshot of the
     // *whole* plane (not just its own unit), so its own 7-tap (Wiener) /
     // radius-r (SgrProj) window can read real neighbouring-unit pixels —
@@ -2003,7 +2056,7 @@ fn apply_loop_restoration_plane(
     // here (rather than per-unit) also keeps units mutually independent:
     // an already-filtered neighbour never leaks into a later unit's input,
     // matching the spec's per-unit-independent filtering.
-    let full_src = plane.to_vec();
+    let full_src = replicate_edge(plane);
 
     let first_h = (64 - 8) >> ssv;
     let full_h = 64 >> ssv;
@@ -2016,31 +2069,29 @@ fn apply_loop_restoration_plane(
             (top, (top + full_h - 1).min(h - 1))
         }
     };
-    let half_unit = unit_size / 2;
-    // §7.14 "round half up" (dav1d `lr_sbrow`: `aligned_unit_pos -= unit_size`
-    // when `aligned_unit_pos + half_unit_size > h`): a trailing partial unit —
-    // one whose start sits more than half a unit above the frame edge — is not
-    // its own unit. Its coefficients are never read (§5.11.57 skips it), and
-    // its pixels are filtered with the *previous* unit's filter.
-    let effective_unit = |u: usize, span: usize| -> usize {
-        if u > 0 && u * unit_size + half_unit > span {
-            u - 1
-        } else {
-            u
-        }
-    };
-
     for ur in 0..unit_rows {
-        let eff_ur = effective_unit(ur, h);
+        let uy0 = if ur == 0 {
+            0
+        } else {
+            ur * unit_size - unit_off_y
+        };
+        let uy_end = if ur + 1 == unit_rows {
+            h
+        } else {
+            (ur + 1) * unit_size - unit_off_y
+        };
         for uc in 0..unit_cols {
-            let eff_uc = effective_unit(uc, w);
-            let Some(unit) = lr_units.get(&(plane_idx, eff_ur, eff_uc)) else {
+            let Some(unit) = lr_units.get(&(plane_idx, ur, uc)) else {
                 continue;
             };
             let ux0 = uc * unit_size;
-            let uy0 = ur * unit_size;
-            let uw = unit_size.min(w - ux0);
-            let uh = unit_size.min(h - uy0);
+            let ux_end = if uc + 1 == unit_cols {
+                vis_w
+            } else {
+                (uc + 1) * unit_size
+            };
+            let uw = ux_end - ux0;
+            let uh = uy_end - uy0;
 
             // Split the unit's rows into stripe segments; filter each against a
             // copy of the source whose out-of-stripe rows have been replaced
@@ -2101,6 +2152,10 @@ fn apply_loop_restoration_plane(
 // Public entry point
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Superres-upscaled plane set returned by [`apply_post_filters`] (the
+/// stored reference and the crop source for a superres frame).
+type UpscaledPlanes = (Vec<Px>, Vec<Px>, Vec<Px>, usize);
+
 /// Run the full AV1 in-loop post-filter chain (deblock → CDEF → restoration)
 /// on the three reconstructed planes, in place.
 #[allow(clippy::too_many_arguments)]
@@ -2118,7 +2173,7 @@ pub fn apply_post_filters(
     _seq: &SequenceHeaderObu,
     tile_x0: usize,
     tile_y0: usize,
-) -> Result<(), KinetixError> {
+) -> Result<Option<UpscaledPlanes>, KinetixError> {
     let cdef_idx = &meta.cdef_idx;
     // Stream bit depth drives every filter's output clamp (`pix_max`).
     let bit_depth = fh.bit_depth as u32;
@@ -2210,6 +2265,9 @@ pub fn apply_post_filters(
             0,
             meta.w4,
             lf_h4,
+            // dav1d's `f->w4 = (width[0] + 3) >> 2` — the *coded* width,
+            // which for a superres frame is the downscaled one.
+            (fh.width as usize).div_ceil(4),
             fh,
             &[],
             0,
@@ -2251,6 +2309,7 @@ pub fn apply_post_filters(
             1,
             meta.w8,
             meta.h8,
+            meta.w8,
             fh,
             &meta.lf_level_u4,
             meta.cw4,
@@ -2291,6 +2350,7 @@ pub fn apply_post_filters(
             1,
             meta.w8,
             meta.h8,
+            meta.w8,
             fh,
             &meta.lf_level_v4,
             meta.cw4,
@@ -2491,6 +2551,128 @@ pub fn apply_post_filters(
     }
     dump_pxy("post-cdef", y_plane);
 
+    // --- Superres upscaling (§7.14.5; dav1d `filter_sbrow_resize`) ---
+    // A superres frame is coded downscaled and upscaled back between CDEF
+    // and loop restoration (dav1d's sbrow order: deblock → CDEF → resize →
+    // LR). When restoration is active the LR stripe-boundary rows are ALSO
+    // upscaled — from the *deblocked, pre-CDEF* plane (`dav1d_copy_lpf` →
+    // `backup_lpf` runs `mc.resize` for `lr_backup && resize`) — so the
+    // pre-CDEF snapshots go through the same filter here. The filter is
+    // row-independent, so whole-frame rows match dav1d's per-sbrow rows.
+    // `src_w` is the padded downscaled grid width (dav1d passes `4 * f->bw`,
+    // reads clamp to `[0, src_w-1]`); `dst_w` is the visible upscaled width.
+    // Grid rows below the visible height are copied verbatim and padded
+    // columns replicate their row edge: they are never sampled for output or
+    // MC, but the returned grid keeps the caller's plane shape.
+    // NOTE: compare the *coded* width against the upscaled width — `width`
+    // here is the 8-aligned grid extent, which differs from the coded width
+    // whenever the frame width is not a multiple of 8 (e.g. 548); treating
+    // that as superres ran every such frame through the resampler.
+    let superres = (fh.upscaled_width as usize) != fh.width as usize;
+    let vis_w_down = fh.width as usize;
+    let vis_cw_down = (vis_w_down + sub_x) >> sub_x;
+    if superres {
+        let uw = fh.upscaled_width as usize;
+        let ustride = uw.div_ceil(8) * 8;
+        let ucstride = ustride / 2;
+        let ucw = uw.div_ceil(2);
+        let vis_h = vis_height;
+        let vis_ch = vis_height.div_ceil(2);
+        let grid_ch = height.div_ceil(2);
+        // LR boundary rows: the deblocked (pre-CDEF) snapshots, upscaled.
+        let (by, bu, bv) = if fh.uses_lr {
+            (
+                upscale_grid_plane(
+                    &lr_pre_y, width, vis_w_down, uw, ustride, vis_h, height, pix_max,
+                ),
+                upscale_grid_plane(
+                    &lr_pre_u,
+                    uv_w,
+                    vis_cw_down,
+                    ucw,
+                    ucstride,
+                    vis_ch,
+                    grid_ch,
+                    pix_max,
+                ),
+                upscale_grid_plane(
+                    &lr_pre_v,
+                    uv_w,
+                    vis_cw_down,
+                    ucw,
+                    ucstride,
+                    vis_ch,
+                    grid_ch,
+                    pix_max,
+                ),
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        let mut yu = upscale_grid_plane(
+            y_plane, width, vis_w_down, uw, ustride, vis_h, height, pix_max,
+        );
+        let mut uu = upscale_grid_plane(
+            u_plane,
+            uv_w,
+            vis_cw_down,
+            ucw,
+            ucstride,
+            vis_ch,
+            grid_ch,
+            pix_max,
+        );
+        let mut vv = upscale_grid_plane(
+            v_plane,
+            uv_w,
+            vis_cw_down,
+            ucw,
+            ucstride,
+            vis_ch,
+            grid_ch,
+            pix_max,
+        );
+        if fh.uses_lr && std::env::var("KINETIX_AV1_NOLR").is_err() {
+            apply_loop_restoration_plane(
+                &mut yu,
+                ustride,
+                uw,
+                vis_h,
+                0,
+                fh,
+                &meta.lr_units,
+                &by,
+                0,
+                pix_max,
+            );
+            apply_loop_restoration_plane(
+                &mut uu,
+                ucstride,
+                ucw,
+                vis_ch,
+                1,
+                fh,
+                &meta.lr_units,
+                &bu,
+                sub_y,
+                pix_max,
+            );
+            apply_loop_restoration_plane(
+                &mut vv,
+                ucstride,
+                ucw,
+                vis_ch,
+                2,
+                fh,
+                &meta.lr_units,
+                &bv,
+                sub_y,
+                pix_max,
+            );
+        }
+        return Ok(Some((yu, uu, vv, ustride)));
+    }
+
     // --- Loop restoration (§7.17) ---
     // Enabled by default as of 2026-09-04, after three real bugs were found
     // and fixed this session: (1) unit-local pixel clamping at
@@ -2527,9 +2709,12 @@ pub fn apply_post_filters(
         // context (dav1d's `lr_lpf_line` holds unrestored padding rows).
         let vis_h = fh.height as usize;
         let vis_ch = vis_h.div_ceil(2);
+        let vis_w = (fh.upscaled_width as usize).min(width);
+        let vis_cw = vis_w.div_ceil(2).min(uv_w);
         apply_loop_restoration_plane(
             y_plane,
             width,
+            vis_w,
             vis_h,
             0,
             fh,
@@ -2541,6 +2726,7 @@ pub fn apply_post_filters(
         apply_loop_restoration_plane(
             u_plane,
             uv_w,
+            vis_cw,
             vis_ch,
             1,
             fh,
@@ -2552,6 +2738,7 @@ pub fn apply_post_filters(
         apply_loop_restoration_plane(
             v_plane,
             uv_w,
+            vis_cw,
             vis_ch,
             2,
             fh,
@@ -2564,7 +2751,59 @@ pub fn apply_post_filters(
     dump_cpxy("post-lr-V", v_plane, uv_w);
     dump_pxy("post-lr", y_plane);
 
-    Ok(())
+    // `None` = the input planes were filtered in place at the downscaled
+    // (non-superres) width; `Some` = superres upscaled planes + stride.
+    Ok(None)
+}
+
+/// Upscale one grid plane for superres into an owned `dst_stride`-strided
+/// buffer: rows `[0..vis_rows)` run through the superres filter
+/// (`src_w` = the padded downscaled grid width, `dst_w` = the visible
+/// upscaled width); grid rows beyond `vis_rows` copy the last upscaled row
+/// and columns beyond `dst_w` replicate the row edge, so every sample of the
+/// returned grid is defined (they are never sampled for output or MC).
+#[allow(clippy::too_many_arguments)]
+fn upscale_grid_plane(
+    src: &[Px],
+    src_stride: usize,
+    vis_w: usize,
+    dst_w: usize,
+    dst_stride: usize,
+    vis_rows: usize,
+    total_rows: usize,
+    pix_max: i32,
+) -> Vec<Px> {
+    // dav1d derives the phase step and start from the *visible* widths
+    // (`scale_fac(f->cur.p.w, sr_cur.p.w)` / `get_upscale_x0` on the same);
+    // the padded grid width is only the read-clamp bound (`src_w`).
+    let dx = crate::superres::scale_step(vis_w.max(1), dst_w.max(1));
+    let mx0 = crate::superres::upscale_x0(vis_w.max(1), dst_w.max(1), dx);
+    let mut dst = vec![0 as Px; dst_stride * total_rows];
+    crate::superres::upscale_plane(
+        &mut dst,
+        dst_stride,
+        src,
+        src_stride,
+        src_stride,
+        dst_w,
+        vis_rows.min(total_rows),
+        dx,
+        mx0,
+        pix_max,
+    );
+    let vis_w = dst_w.min(dst_stride);
+    for row in 0..total_rows {
+        let drow = &mut dst[row * dst_stride..(row + 1) * dst_stride];
+        if row >= vis_rows {
+            // Grid padding rows: copy the last upscaled row's real samples.
+            let s = vis_rows.saturating_sub(1);
+            let src_row = &src[s * src_stride..s * src_stride + vis_w.min(src_stride)];
+            drow[..src_row.len()].copy_from_slice(src_row);
+        }
+        let edge = drow[vis_w - 1];
+        drow[vis_w..].fill(edge);
+    }
+    dst
 }
 
 /// CDEF for the luma plane, applying per-8×8 variance-dependent strength.
@@ -2597,6 +2836,9 @@ fn cdef_plane_luma(
     w8: usize,
     bit_depth: u32,
 ) {
+    // dav1d cdef_apply: strengths and damping scale with the bit depth.
+    let bd8 = bit_depth - 8;
+    let (pri_str, sec_str, damping) = (pri_str << bd8, sec_str << bd8, damping + bd8 as i32);
     let block_cols = width.div_ceil(8);
     let block_rows = height.div_ceil(8);
     for r in 0..block_rows {
@@ -2612,7 +2854,7 @@ fn cdef_plane_luma(
             if luma_skip.get(r * w8 + c).copied().unwrap_or(false) {
                 continue;
             }
-            let (yd, var) = cdef_direction(src, width, width, height, x0, y0);
+            let (yd, var) = cdef_direction(src, width, width, height, x0, y0, bit_depth);
             // dav1d `adjust_strength`: `i = (var >> 6) ? Min(FloorLog2(var >> 6), 12) : 0`
             // — there is NO Clip3(_, 256) on the input; a high-variance block
             // can push `i` up to 12 (an earlier clamp-to-256 here capped it at 8,
@@ -2704,6 +2946,8 @@ fn cdef_plane_chroma(
     plane_label: char,
     bit_depth: u32,
 ) {
+    let bd8 = bit_depth - 8;
+    let (pri_str, sec_str, damping) = (pri_str << bd8, sec_str << bd8, damping + bd8 as i32);
     let w_block = 8 >> sub_x;
     let h_block = 8 >> sub_y;
     let block_cols = width.div_ceil(w_block);
@@ -2738,7 +2982,9 @@ fn cdef_plane_chroma(
             if skip_val {
                 continue;
             }
-            let (yd, _var) = cdef_direction(luma_src, luma_w, luma_w, luma_h, luma_x0, luma_y0);
+            let (yd, _var) = cdef_direction(
+                luma_src, luma_w, luma_w, luma_h, luma_x0, luma_y0, bit_depth,
+            );
             // §7.15.3 / dav1d `adjust_strength`: the variance-based primary
             // strength adjustment is applied to the *luma* plane only. Chroma
             // uses `cdef_uv_pri_strength` directly (dav1d `cdef_apply_tmpl.c`
@@ -3088,7 +3334,7 @@ mod tests {
     #[test]
     fn filter_line_identity_when_flat() {
         let line: Vec<i32> = vec![100; 16];
-        let out = filter_line_1d(&line, 8, 10, 30, 0, 8, true);
+        let out = filter_line_1d(&line, 8, 10, 30, 0, 8, true, 8);
         assert_eq!(out, line, "a perfectly flat line must be unchanged");
     }
 
@@ -3107,7 +3353,7 @@ mod tests {
         for x in line.iter_mut().take(32).skip(16) {
             *x = 158;
         }
-        let out = filter_line_1d(&line, 16, 30, 80, 1, 8, true);
+        let out = filter_line_1d(&line, 16, 30, 80, 1, 8, true, 8);
         // The two samples straddling the edge should be pulled toward each
         // other (the step should be reduced, not amplified).
         assert!(
@@ -3127,7 +3373,7 @@ mod tests {
         for x in line.iter_mut().take(32).skip(16) {
             *x = 255;
         }
-        let out = filter_line_1d(&line, 16, 0, 0, 0, 8, true);
+        let out = filter_line_1d(&line, 16, 0, 0, 0, 8, true, 8);
         assert_eq!(out, line, "level 0 must leave the line untouched");
     }
 
@@ -3142,7 +3388,7 @@ mod tests {
         // summed-difference mask let it through.
         let line = vec![120i32, 120, 120, 120, 136, 136, 136, 136];
         // Edge between index 3 and 4.
-        let out = filter_line_1d(&line, 4, 20, 80, 1, 4, true);
+        let out = filter_line_1d(&line, 4, 20, 80, 1, 4, true, 8);
         assert!(out[3] > 120, "p0 should move toward the higher q side");
         assert!(out[4] < 136, "q0 should move toward the lower p side");
     }
@@ -3162,7 +3408,7 @@ mod tests {
         // spec-correct narrow filter must leave the line untouched even
         // though `qs0 = 162 - 128 = 34` exceeds `blimit = 16`.
         let line = vec![162i32; 12];
-        let out = filter_line_1d(&line, 6, 4, 16, 0, 4, true);
+        let out = filter_line_1d(&line, 6, 4, 16, 0, 4, true, 8);
         assert_eq!(
             out, line,
             "flat content far from 128 must be a no-op regardless of blimit"
@@ -3182,7 +3428,7 @@ mod tests {
         for x in line.iter_mut().skip(10) {
             *x = 131;
         }
-        let out = filter_line_1d(&line, 8, 4, 16, 0, 16, true);
+        let out = filter_line_1d(&line, 8, 4, 16, 0, 16, true, 8);
         assert_eq!(
             out, line,
             "a real edge outside the narrow filter's tap window must not perturb flat samples near the deblock edge"
@@ -3208,7 +3454,7 @@ mod tests {
         for x in line.iter_mut().skip(8) {
             *x = 200;
         }
-        let out = filter_line_1d(&line, 8, 30, 80, 1, 8, true);
+        let out = filter_line_1d(&line, 8, 30, 80, 1, 8, true, 8);
         assert_eq!(
             out, line,
             "a step far exceeding blimit's combined-term threshold must not be filtered"
@@ -3230,7 +3476,7 @@ mod tests {
         // the p-side's own reach): line (edge=4) is
         // `[200, 200, 100, 100 | 100, 100, 200, 200]`.
         let line = vec![200i32, 200, 100, 100, 100, 100, 200, 200];
-        let out = filter_line_1d(&line, 4, 150, 200, 1, 8, true);
+        let out = filter_line_1d(&line, 4, 150, 200, 1, 8, true, 8);
         // filterMask passes (checked below via the assertion that some
         // filtering happens at all — the narrow filter's own p0/p1/q0/q1
         // samples are already mutually equal so it's a visible no-op there
@@ -3264,8 +3510,8 @@ mod tests {
         // never write there, regardless of the numeric result the (buggy,
         // wider) tap window would have produced.
         let line = vec![100i32, 101, 100, 101, 100, 101, 100, 101];
-        let out_luma = filter_line_1d(&line, 4, 10, 50, 1, 8, true);
-        let out_chroma = filter_line_1d(&line, 4, 10, 50, 1, 8, false);
+        let out_luma = filter_line_1d(&line, 4, 10, 50, 1, 8, true, 8);
+        let out_chroma = filter_line_1d(&line, 4, 10, 50, 1, 8, false, 8);
         assert_ne!(
             out_luma[1], line[1],
             "luma's n=3 wide filter must reach and modify p2"
@@ -3440,7 +3686,7 @@ mod cdef_dir_probe {
             47, 48, 47, 47, 49, 52, 54, 54, //
             46, 49, 48, 47, 49, 52, 54, 54, //
         ];
-        let (y_dir, var) = cdef_direction(&blk, 8, 8, 8, 0, 0);
+        let (y_dir, var) = cdef_direction(&blk, 8, 8, 8, 0, 0, 8);
         let y_dir = y_dir as i32;
         eprintln!("PROBE y_dir={y_dir} var={var}");
         // The spec formula, computed independently (dav1d cdef_find_dir_c).

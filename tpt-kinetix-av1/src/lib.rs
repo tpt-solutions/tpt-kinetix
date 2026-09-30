@@ -48,11 +48,14 @@ pub mod decoder;
 pub mod encoder;
 pub mod entropy;
 pub mod entropy_cdf;
+pub mod film_grain;
+mod film_grain_table;
 pub mod frame;
 pub mod inter;
 pub mod loop_filter;
 pub mod obu;
 pub mod reconstruct;
+mod superres;
 
 /// One decoded sample. 16 bits wide so a single reconstruction path serves 8-,
 /// 10- and 12-bit streams; 8-bit output is narrowed back to bytes at the frame

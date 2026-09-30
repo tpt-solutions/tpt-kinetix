@@ -136,7 +136,6 @@ impl<'a> TileDecodeState<'a> {
         if self.allow_intrabc || !self.lr.uses_lr {
             return;
         }
-        let _ = sb_mi;
         for plane in 0..self.lr.num_planes {
             if self.lr.frame_restoration_type[plane] == 0 {
                 continue;
@@ -156,31 +155,59 @@ impl<'a> TileDecodeState<'a> {
             let half_unit = unit_size >> 1;
             // SB pixel position (chroma-subsampled for planes 1/2).
             let y = (r * MI_SIZE) >> sub_y;
-            let x = (c * MI_SIZE) >> sub_x;
             let h = round2(self.lr.frame_height, sub_y);
-            let w = round2(self.lr.upscaled_width, sub_x);
             if y & mask != 0 {
                 continue;
             }
             if y != 0 && y + half_unit > h {
                 continue;
             }
-            if x & mask != 0 {
-                continue;
-            }
-            if x != 0 && x + half_unit > w {
-                continue;
-            }
             let unit_row = y / unit_size;
-            let unit_col = x / unit_size;
-            if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
-                eprintln!(
-                    "DBG read_lr sb=({r},{c}) plane={plane} frt={} unit_size={unit_size} unit=({unit_row},{unit_col}) bit={}",
-                    self.lr.frame_restoration_type[plane],
-                    self.dec.bit_position()
-                );
+            // With superres the horizontal unit grid is laid out in the
+            // UPSCALED width while superblocks advance in downscaled mi
+            // columns, so one SB can straddle several units (dav1d decode.c's
+            // `width[0] != width[1]` branch): project the SB's pixel extent
+            // through the denominator and read every unit that starts inside
+            // it. Unit columns are keyed by upscaled unit index — the same
+            // key space `apply_loop_restoration_plane` iterates.
+            if self.lr.superres_active() {
+                let d = self.lr.superres_denom as i64;
+                let log2 = unit_size.trailing_zeros() as i64;
+                // Round-half-up unit count over the subsampled upscaled width.
+                let w_up = round2(self.lr.upscaled_width, sub_x);
+                let n_units = 1.max((w_up + half_unit) >> unit_size.trailing_zeros());
+                let rnd = (unit_size * 8 - 1) as i64;
+                let shift = log2 + 3;
+                let px0 = (c * MI_SIZE) as i64;
+                let px1 = ((c + sb_mi) * MI_SIZE) as i64;
+                let x0 = (((px0 * d) >> sub_x) + rnd) >> shift;
+                let x1 = (((px1 * d) >> sub_x) + rnd) >> shift;
+                for x in x0..x1.min(n_units as i64) {
+                    // dav1d's `px_x = x << (log2 + ss)` maps the plane-unit
+                    // index back to (luma-grid) pixels; the unit column key
+                    // is the plane-unit index `x` itself.
+                    self.read_lr_unit(plane, unit_row, x as usize);
+                }
+                continue;
+            } else {
+                let x = (c * MI_SIZE) >> sub_x;
+                let w = round2(self.lr.upscaled_width, sub_x);
+                if x & mask != 0 {
+                    continue;
+                }
+                if x != 0 && x + half_unit > w {
+                    continue;
+                }
+                let unit_col = x / unit_size;
+                if std::env::var("KINETIX_AV1_DBG_LR").is_ok() {
+                    eprintln!(
+                        "DBG read_lr sb=({r},{c}) plane={plane} frt={} unit_size={unit_size} unit=({unit_row},{unit_col}) bit={}",
+                        self.lr.frame_restoration_type[plane],
+                        self.dec.bit_position()
+                    );
+                }
+                self.read_lr_unit(plane, unit_row, unit_col);
             }
-            self.read_lr_unit(plane, unit_row, unit_col);
         }
     }
 

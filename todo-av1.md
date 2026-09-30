@@ -14547,3 +14547,380 @@ Unresolved / next steps:
   grain-free output for the intermediate milestone). Not started: too large.
 - Not covered: scaled references combined with superres; scaled OBMC/warp.
 - pixel_exact stays false (10-bit, film grain, no long-run coverage beyond FATE).
+
+## Session 2026-09-30 -- film grain + 10-bit loop filters: FATE 194/204 -> 204/204
+
+- Film grain synthesis (`film_grain.rs`, port of dav1d filmgrain_tmpl/fg_apply_tmpl;
+  Gaussian table in `film_grain_table.rs`). `film_grain_params()` is now fully parsed
+  into `FilmGrainParams` (previously discarded, and `update_grain == 0` was not
+  handled). The decoder keeps per-slot params (`ref_film_grain`), resolves
+  `film_grain_params_ref_idx` (keeping the frame's own seed), saves into refreshed
+  slots, and applies grain to the shown OUTPUT only (references stay grain-free);
+  `show_existing_frame` applies the stored slot's params. `KINETIX_AV1_NO_GRAIN=1`
+  disables synthesis for diagnosis. Even-width 4:2:0 only.
+- The film_grain stream's mismatch was NOT grain at first: the 10-bit deblock
+  (`filter_line_1d`: limits/thresholds, flat threshold, +-128 domain, 255 clip were
+  8-bit only) and CDEF (strengths/damping not shifted by bd-8, direction search
+  not downshifted) were wrong at high bit depth. Both fixed; LR was already fine.
+- `StoredFrame::to_video_frame` (show_existing_frame) truncated to u8; now uses
+  `crop_planes` with the stream bit depth.
+- `av1_fate_score` now asks ffmpeg for `yuv420p10le` on high-bitdepth streams.
+- Verified: libaom `film-grain-test=1..16`, all-keyframe (`-g 1`) 352x288, 8-bit AND
+  10-bit: 32/32 streams bit-exact vs ffmpeg+libdav1d. Unit tests added.
+
+### Same session, part 2: libaom-encode / dav1d-compare loop (found and fixed 12 more bugs)
+
+Method: `ffmpeg -f lavfi -i <src> -c:v libaom-av1 -cpu-used N [-pix_fmt yuv420p10le]
+[-aom-params film-grain-test=K]` -> decode with Kinetix and with `ffmpeg` (libdav1d) ->
+compare raw bytes; then bisect with filters off (`KINETIX_AV1_NOFILTER` vs the patched
+dav1d's `DAV1D_NODEBLOCK/NOCDEF_Y/NOCDEF_UV/NOLR`), then the partition-sequence diff.
+Permanent regression test: `tpt-kinetix-av1/tests/libaom_crosscheck.rs` (11 cases,
+skips without ffmpeg+libaom+libdav1d, ~60 s). Randomized sweeps (8/10-bit, 8..570
+px, cpu-used 0..6, six synthetic sources, grain) went from ~30% failing to 1/50.
+
+Fixed (each a real divergence FATE never exercised):
+1. Inter blocks did not clear the neighbour palette-colour arrays -> stale
+   `has_palette_y` ctx (entropy desync on screen-content inter frames).
+2. GLOBALMV `mf` flag is only set for blocks >= 8x8 (dav1d `imin(bw4,bh4) >= 2`).
+3. Intra path read coefficients for transform blocks entirely outside the frame and
+   ordered >64-wide blocks all-luma-then-chroma; spec `residual()` is per 64x64 chunk
+   (luma then chroma) and skips tx blocks starting at/after MiCols*4 / MiRows*4.
+4. IntraBC MVs shared the ordinary MV CDF set; spec/dav1d keep a separate
+   `MvCtx == 1` (`dmv`) set. An IBC keyframe polluted the MV CDFs every later inter
+   frame inherited (`InterCdfs::dmv`, `read_mv_ibc`).
+5. `ibc_mv_pred` secondary scans must start at column `bx4 | 1` / row `by4 | 1`.
+6. Deblock built edges over the padded mi grid; dav1d limits columns to the visible
+   `ceil(width/4)` 4-sample cells (`col_limit`).
+7. LR replicated/clamped at the padded stride width, not the visible width
+   (`vis_w`); and the vertical unit grid is offset by 8 luma rows (4 chroma): unit
+   row boundaries are at `k*unitSize - 8`, with `count_units_in_frame` rounding.
+8. Compound mv stack: BOTH MVs of each entry are clamped to the frame border
+   (`mv[1]` was left unclamped). NOTE dav1d's clamp bounds use the PADDED mi grid
+   (`iw4 = iw8 << 1`), not the visible size -- an attempted "fix" to visible size
+   regressed and was reverted.
+9. 10-bit Wiener (bias/clip/rounding depend on bit depth) and SGR (variance is taken
+   on sums scaled back by `bd - 8`).
+10. 10-bit deblock thresholds/flat/narrow-filter range and CDEF strengths/damping/
+    direction search (see above).
+
+Still open: `-cpu-used 0` 548x388 `testsrc` (7.5k of 4.8M bytes differ; saved as
+fail_26.ivf in the scratchpad while investigating) -- next: bisect with filters off.
+Untested: grain with `update_grain == 0` on real inter streams (libaom test vectors
+only cover a subset), 4:4:4 / 4:2:2 / monochrome output, odd-width grain,
+superres, scaled references + OBMC/warp.
+
+## Session 2026-09-30 #2 -- libaom crosscheck 12/12 (fail_26 FIXED): inter
+## residual reads were all-luma-then-chroma; spec/dav1d read per 64x64 chunk
+## (luma, U, V) -- `add_inter_residual` restructured
+
+The `-cpu-used 0` 548x388 `testsrc` case (fail_26.ivf, "Still open" above) is
+fixed: Kinetix now decodes it byte-identical to ffmpeg+libdav1d (0 of 4.78M
+bytes differ; was 7536).
+
+Re-localization notes (the dump files from the last session were gone; the
+stream re-encodes in ~1 s):
+- Only ONE frame diverged, and it was display slot 13 = decode-order frame 14,
+  NOT frame 13 -- the altref/overlay reorder misled the first read of the
+  dumps. `KINETIX_AV1_DUMP_FRAMES` / `DAV1D_DUMP_DIR` name files by DECODE
+  order; the yuv streams are DISPLAY order. The per-frame dump comparison
+  (kfr_NN vs fNN) showed 15/16 frames bit-exact; decode frame 14 (an oh=13
+  overlay of the ARF coded at decode frame 1) was the only miss, and the
+  oracle never dumps it (`DAV1D_DUMP_DIR` dumps only when
+  `refresh_frame_flags != 0`, which an overlay never sets) -- match display
+  slots to decode frames before concluding anything.
+- The patched dav1d oracle's per-block prints (`Post-skip[..]` etc.) silently
+  DO NOT FIRE under dav1d's default frame threading (`dav1d_dbg_n` keeps
+  incrementing at submit time while decode lags, so `dav1d_dbg_n ==
+  dav1d_dbg_sel` fails inside decode_b). `--threads 1` is REQUIRED for
+  `DAV1D_DBG_N` block traces. (RP/OLF/KT prints fired because their gates run
+  at different times -- misleading.)
+
+Root cause (found via partition-sequence + skip/inter rng alignment, then the
+oracle's `Post-y-cf-blk`/`Post-uv-cf-blk` interleaving):
+- Decode-order frame 14 is an ARF overlay: 20 blocks, all but two skip.
+  Partitions, skip, is_inter, ref, mv and motion_mode rng all matched dav1d
+  exactly. The FIRST non-skip block (128x128 at mi (64,32) -- 4 luma 64x64
+  leaves) diverged inside its coefficient reads: Kinetix read Y,Y,Y,Y then
+  U,V,U,V,U,V,U,V (all luma leaves, then the whole block's chroma), while
+  dav1d/spec read per 64x64 chunk: Y1,U1,V1,Y2,U2,V2,Y3,... The first luma
+  read matched; the second drew the chroma `txb_skip` symbols with the luma
+  path's CDF state -- same values, different rng, CDF adaptation diverged,
+  and the tail of the frame desynced into the +-(1..2) pixel noise.
+- This is the INTER twin of the intra-path fix in the previous session
+  ("spec `residual()` is per 64x64 chunk"); the comment at the chroma block
+  even recorded the wrong belief ("dav1d reads it after all the luma leaves").
+
+Fix (`add_inter_residual`, inter_block.rs): restructured into the chunk loop
+-- for each 64x64 chunk (row-major, `init_y` outer like dav1d
+`read_coef_blocks`): the chunk's luma var-tx leaves (same per-leaf work as
+before: deblock-edge marks, coeff read, itx, plane add), then THAT chunk's
+chroma TBs (U then V) tiled with the block's uniform chroma tx size over the
+chunk's subsampled extent, clipped to the block's chroma region (dav1d's
+`sub_cw4/sub_ch4 = imin(..., (init+16)>>ss)`). `tx`/`ty` stay
+whole-block-relative so skipped blocks still mark only their block boundary
+(`mark_chroma_edges_sel` semantics unchanged). `co_located_luma_type` became
+a free fn taking the leaves read SO FAR as a parameter -- with the interleave,
+a chroma TB must see only its own chunk's luma leaves, which is exactly
+dav1d's `txtp_map` visibility; the `.first()` miss-fallback semantics (see
+the fn's doc comment) are unchanged. `u/v` qindices are precomputed before
+the first plane borrow.
+
+Verification: libaom_crosscheck gained the case (`testsrc 548x388 cpu0`,
+now 12 cases) and passes; FATE aggregate still 204/204; lib tests 169/169;
+clippy `-D warnings` clean; fmt clean. Randomized sweep (24 cases, seed 7:
+sizes 8..570, cpu-used 0..6, five sources, 8/10-bit, grain 25%): 24/24
+bit-exact, including the previously failing `testsrc 548x388 cpu0`; a second
+seed-99 sweep: 24/24. Film grain on odd-chroma-width frames (chroma_w
+9/17/25/33/65, 8/10-bit, grain-test 2/4/9/11/16): 5/5 bit-exact.
+
+Remaining (AV1):
+- Untested: grain with `update_grain == 0` on real inter streams, 4:4:4 /
+  4:2:2 / monochrome output, superres, scaled references + OBMC/warp.
+- pixel_exact stays false pending long-run coverage; everything FATE + the
+  libaom crosscheck + sweeps exercise is bit-exact.
+
+## Session 2026-09-30 #3 -- SUPERRES implemented end-to-end (SVT-AV1 streams
+## bit-exact): 8-tap resampler + LR-at-upscaled-geometry + refs/output +
+## motion-field size-compat gate; update_grain=0 verified; new open item: SVT
+## palette keyframes
+
+Superres is now fully supported. ffmpeg's libaom cannot encode it; SVT-AV1
+can (`-c:v libsvtav1 -svtav1-params superres-mode=2:superres-denominator=N`).
+
+Implementation:
+- `src/superres.rs`: dav1d `dav1d_resize_filter[64][8]` (extracted from
+  tables.c; **the C code NEGATES the filter sum** — `iclip_pixel((-(F·s)+64)>>7)`
+  — dropping the minus produced all-zero output), `scale_step` /
+  `upscale_x0` (decode.c `scale_fac` / `get_upscale_x0`), row-wise
+  `upscale_row`/`upscale_plane`. The phase math uses the VISIBLE coded width
+  (dav1d `scale_fac(f->cur.p.w, sr_cur.p.w)`); the padded grid width is only
+  the read-clamp bound (`4*f->bw`).
+- `apply_post_filters` (loop_filter.rs) gained the deblock → CDEF → upscale →
+  LR order (dav1d sbrow order, whole-frame here — the filter is
+  row-independent). The upscaled planes are returned to the caller
+  (`Result<Option<UpscaledPlanes>>`) and become both the stored reference and
+  the cropped output. `FrameHeader.superres_denom` is now parsed through.
+- LR runs on the upscaled planes with `lr_units` keyed by UPSCALED-x /
+  downscaled-y unit indices: `read_lr` (partition.rs) gained dav1d's
+  `width[0] != width[1]` branch (project the SB pixel extent through
+  SuperresDenom, read every unit starting inside it). The LR stripe-boundary
+  rows are the DEBLOCKED pre-CDEF pixels upscaled with the same filter
+  (dav1d `copy_lpf` → `backup_lpf` runs `mc.resize` for `lr_backup && resize`).
+- Deblock `col_limit` is the CODED width (`f->w4 = ceil(width[0]/4)`), not
+  upscaled — only differs under superres but was wrong.
+- Temporal MVs: dav1d only accepts a saved motion field when the source
+  frame's mi grid equals the current frame's (decode.c
+  `ref_w == f->bw && ref_h == f->bh`). With per-frame superres denominators
+  every field is size-incompatible → dav1d uses NO temporal candidates.
+  `build_rp_proj`'s `rp_ref` now enforces the same (without it the scan
+  projected phantom candidates and desynced frame 2 of every SR stream:
+  MV stack n_mvs=1 vs dav1d 0 at the frame-edge block).
+- PITFALL that cost a regression: the superres test must compare
+  `fh.upscaled_width != fh.width` (CODED), not the grid `width` parameter —
+  the grid is 8-aligned, so every non-superres frame with a non-multiple-of-8
+  width (548, 350, ...) wrongly took the resampler. Caught by re-running
+  fail26 after the sweep; fixed.
+
+Pitfalls / tooling (this session):
+- The patched dav1d oracle builds a NEW `src/libdav1d.dll` but
+  `bld2/tools/` keeps a STALE COPY — `cp src/libdav1d.dll tools/` after every
+  rebuild or the old decoder silently runs.
+- dav1d prints palette colors in HEX (`printf "%02x"`) — Kinetix's debug
+  prints decimal; `[20 24 50 92]` == `[32, 36, 80, 146]`. Cost a false alarm.
+- **ffmpeg libaom/SVT encodes are NOT deterministic across invocations on
+  this machine** (same command line, different bitstreams hours apart). The
+  libaom crosscheck therefore flakes onto fresh vectors: a "failing" case
+  must be A/B'd per-vector (HEAD binary vs new binary on the SAME ivf,
+  separate `--target-dir` builds) before calling it a regression. Pure-HEAD
+  fails freshly-encoded `testsrc2 350x286 cpu4` (447283 bytes) that the
+  morning's encode of the same command passed — the new code fixes it (it
+  contains >64x64 inter blocks with coefficients, i.e. the chunk-order bug).
+- FATE samples were removed from `%LOCALAPPDATA%/Temp/fate_av1` mid-session
+  (only outputs remain); FATE was 204/204 earlier in the session and the
+  crosscheck covers the shared paths since.
+
+Verified: libaom crosscheck 13/13 (incl. new superres case); SVT superres
+sweep 12/13 bit-exact (fixed denominators 9..16, kf-denom mode, 10-bit,
+grain+superres 8/10-bit, tiling, odd 154x98, KINETIX_AV1_DUMP_FRAMES
+per-frame decode-order comparison vs the oracle); fail26/t350/sr_svt all 0;
+randomized sweeps seeds 7 and 99 (48 streams) all clean; lib tests 169/169;
+clippy `-D warnings` + fmt clean. Probe results: grain `update_grain == 0`
+is covered by libaom `film-grain-test=5/9/11` (their `update_parameters=0`)
+— 6/6 bit-exact incl. 10-bit. Monochrome and 4:4:4/4:2:2 inputs are still
+unsupported (Kinetix emits 420-layout frames; needs core VideoFrame work).
+
+Remaining (AV1):
+- OPEN (next): SVT `superres-mode=1` (adaptive) 260x200 `testsrc2` keyframe
+  diverges (17.5k of 78k bytes, scattered ±1..8, chroma too) — the stream
+  turns out to use NO superres at all; the keyframe is PALETTE-heavy. With
+  filters disabled on both sides the diff is identical → intra reconstruction.
+  Palette COLORS match dav1d exactly (hex-vs-decimal false alarm); the
+  palette INDEX map ("Post-y-pal-indices") is the suspect. SVT's all-intra
+  keyframes exercise palette far more heavily than libaom's cpu-used 0..6
+  streams in the sweeps.
+- Untested: 4:4:4 / 4:2:2 / monochrome (feature gap), superres + scaled
+  references *of superres frames referencing each other across resolution
+  changes*, grain with `update_grain == 0` on real inter streams other than
+  libaom test vectors.
+- FATE samples need re-fetching to re-run `av1_fate_score`.
+
+## Session 2026-09-30 #4 -- "SVT palette keyframe" RESOLVED: it was the
+## superres gate bug (already fixed); palette path proven bit-perfect;
+## oracle build tree restored
+
+The session-#3 open item is closed. The `superres-mode=1` 260x200 stream's
+keyframe divergence was NOT a palette bug: 260 is not a multiple of 8, so the
+superres gate (`upscaled_width != grid width`) wrongly routed every frame
+through the resampler. The grid-vs-coded-width fix from #3 resolved it — all
+15 frames are now bit-exact vs ffmpeg/libdav1d.
+
+The palette path itself was proven correct along the way (the investigation
+was not wasted):
+- Patched the oracle to print per-pixel palette-index reads (`DAV1D_PALIDX`:
+  diagonal i, j, ctx, resolved map value, symbol, rng) and compared against
+  Kinetix's `KINETIX_DBG_PALIDX` (now also prints the resolved map value):
+  **all 13047 palette pixels of the keyframe match** — ctx, symbol, resolved
+  map value and rng identical; palette colors match; every rng checkpoint
+  (colormap ends 39060/41792/56680/52479/49600 vs dav1d's Post-y-pal-indices
+  chain) matches; the DC+delta_q+CFL block's reads are all in sync.
+- With deblock/CDEF/LR selectively disabled on both sides, the keyframe is
+  bit-exact in every combination.
+
+Regression coverage: `libaom_crosscheck` gained the 260x200 svt adaptive case
+(palette-heavy keyframe, width % 8 != 0) — 14 cases, all passing. Randomized
+sweeps (seeds 7, 99) re-run clean. lib tests 169/169, clippy `-D warnings`
+and fmt clean.
+
+Oracle tooling note: the `dav1d_oracle` source tree had lost its
+`meson.build`/`include/`/parts of `tools/`+`src/` (Temp cleanup), which made
+`ninja` fail on regeneration. Restored by untarring the pristine
+`/tmp/dav154.tar.gz` over the tree and re-copying the patched files
+(decode.c, recon_tmpl.c, refmvs.c, recon.h, cdef_apply_tmpl.c,
+loopfilter_tmpl.c) back on top. If it happens again: untar, copy the patched
+files back, `cp src/libdav1d.dll tools/` after every rebuild.
+
+## Session 2026-09-30 #5 -- MONOCHROME output support implemented (core
+## PixelFormat::Gray/10/12 + decoder plumbing); keyframe bit-exact; found +
+## fixed a hardcoded-420 tile-state bug; inter-frame divergence remains on
+## some content
+
+Monochrome (AV1 `mono_chrome`) now decodes to 1-plane output:
+- `tpt-kinetix-core`: `PixelFormat::Gray`, `Gray10le`, `Gray12le` added
+  (num_planes 1, Display names "gray"/"gray10le"/"gray12le"). The AV1 decoder
+  is the only consumer affected; H.264/other crates unaffected.
+- `crop_planes` now takes the `PixelFormat` and emits Y-only for Gray
+  formats (also fixes an inconsistency where non-420 8-bit formats would
+  have been serialised as le16); `pixel_format_for(bit_depth, monochrome)`.
+- `StoredFrame` carries the slot's `PixelFormat` (fixing `show_existing_
+  frame` labelling 10-bit refs as Yuv420p), `RefFrameStore::refresh` takes
+  it, `FrameHeader` carries `mono_chrome`.
+- FOUND + FIXED a real pre-existing bug: `decode_tile_group` passed
+  **hardcoded** `subsampling_x/y = true` and `monochrome = false` into
+  `TileDecodeState::new` — every stream decoded as 4:2:0-with-chroma
+  internally regardless of the sequence header. For monochrome streams this
+  desynced the tile immediately (phantom uv_mode reads shifted every
+  subsequent symbol): with real values threaded through, the mono KEYFRAME
+  went from garbage to bit-exact vs libdav1d, and the palette CDF trace
+  (`Post-y_pal` rng 40256) matches the oracle exactly.
+- `read_palette_mode_info`'s palette-size CDFs, CDEF chroma-skip, LF
+  level parse and film-grain parse were already mono-aware (pre-existing
+  plumbing + tests).
+
+Validation: `smptebars 120x90 mono` decodes bit-exact end-to-end INCLUDING
+P-frames; `testsrc2 160x120 mono` keyframe bit-exact. Remaining known gap:
+`testsrc2`-based mono streams diverge on INTER frames (entropy in sync —
+symbol reads match the oracle through the blocks; ~all pixels of P frames
+differ by small deltas; prediction-only (`NO_RESID`) still differs, so it is
+in the inter prediction/derivation application, not the syntax read).
+Content-dependent (smptebars P-frames pass) — follow-up session item.
+
+Color-stream regression gates re-run after the plumbing changes: lib tests
+169/169 (+ core 11+7), libaom crosscheck 14/14, randomized sweeps seeds 7
+and 99 clean, superres sweep clean, update-grain sweep clean, clippy
+`-D warnings` + fmt clean (core + av1).
+
+Remaining (AV1):
+- FOLLOW-UP: mono inter-frame divergence on testsrc2 content (above).
+- 4:4:4 / 4:2:2 input: still unsupported (core has Yuv422p/Yuv444p formats;
+  the decoder's chroma geometry is 4:2:0-shaped in ~dozens of sites —
+  uv grid alloc, tile assembly chroma rows, crop_planes chroma, MC chroma
+  origins cpx=px/2, sub-8x8 chroma ownership padding, film grain, superres
+  chroma). Sequenced plan: 4:4:4 first (no odd-subsample cases), then 4:2:2,
+  then 10/12-bit 422/444 PixelFormat variants.
+- FATE samples still need re-fetching.
+
+## Session 2026-09-30 #6 -- mono inter divergence LOCALIZED: mv-stack
+## ctx/candidate mismatch at NEWMV-neighbour blocks (next: spec-read
+## NewMvContext + scan gating)
+
+Follow-up on #5's remaining mono gap. Precise localization on
+`testsrc2 160x120 mono` (libaom, `-pix_fmt gray`):
+- The keyframe (n=0) and the first several blocks of inter frame n=1 decode
+  with matching entropy, but the stacks first diverge at block mi=(8,0)
+  (64x16 at px (32,0)): Kinetix `n_mvs=4 ctx=0x3A` with stack
+  `[(0,0) w=648, (0,200) w=644, (0,-64) w=8, (0,192) w=4]` vs dav1d
+  `n_mvs=2 ctx=0x3B` with `[(0,0) w=646, (0,-64) w=4]`.
+- Consequences: ctx differs in the NewMvContext bit (0 vs 1 — a NEWMV-
+  flagged neighbour is counted by dav1d but not by Kinetix, despite
+  Kinetix's own scan seeing the same mf=2 sample at grid (2,7)); the
+  ref_mv symbol then decodes NEARMV+DRL on Kinetix vs NEARESTMV on dav1d,
+  and the diverged MV (Kinetix applied mv x=+57 px) wrecks the rest of the
+  frame. The candidate VALUES in dav1d's stack differ too (its cand[1] is
+  (0,-64) w=4 — one weight-4 sample, not Kinetix's two).
+- So the bug is in the scan bookkeeping around NEWMV-flagged neighbours:
+  either `have_newmv` accounting in `add`/`scan_row`/`scan_col`, or the
+  secondary-scan/weight-sort interaction (Kinetix keeps weight-4/8 entries
+  in the returned stack; dav1d's cnt may exclude them via
+  `add_single_extended_candidate`'s `cnt < 2` gate + weight semantics).
+- NOT the cause (ruled out): global motion (identity), temporal candidates
+  (none for frame 1), OBMC/warp (NOOBMC/NO_WARP identical), palette
+  (keyframe bit-exact), LOOMA/interintra gating (mono paths already gated).
+
+Debug hooks available for the next session:
+- Oracle: `KINETIX_MVSTACK by= bx=` + `cand[i] mv0=(y,x) weight=` lines print
+  every stack entry (already in the patched tree); `DPALSTATE` prints msac
+  rng/dif/cnt at each y-palette read; `DAV1D_PALIDX` per-pixel palette reads;
+  `DAV1D_MFMV` prints the per-frame mfmv source selection.
+- Kinetix: `KINETIX_AV1_DBG_B0` mvstack/skip/intermode prints,
+  `KINETIX_AV1_DBG_MVSCAN="by:bx"` full scan trace (add_s/add_t lines with
+  weights and mf flags), `KINETIX_AV1_DBG_IMODE` final mode/drl/base.
+- NOTE the display-vs-decode-order trap: libaom alt-ref streams' output
+  frames do NOT map 1:1 to decode order; compare per-DECODE-frame via
+  `KINETIX_AV1_DUMP_FRAMES` (kfr_NN) vs `DAV1D_DUMP_DIR` (fN) — output-file
+  per-frame comparisons against ffmpeg will point at the wrong frame.
+
+Everything else re-validated after the investigation: lib tests 169/169,
+crosscheck 14/14, sweep seed 7 clean, clippy/fmt clean.
+
+## Session 2026-09-30 #7 -- mono inter divergence FIXED: inter residual path
+## ignored `mono_chrome` (odd/odd 4x4 leaves read uv coefficients)
+
+#6's follow-up is resolved — and #6's mv-stack theory was a downstream
+symptom, not the root cause. The real desync: `add_inter_residual`'s
+per-64x64-chunk chroma loop computed
+`has_chroma = (bw > 1 || odd_col) && (bh > 1 || odd_row)` WITHOUT a
+monochrome check, so every non-skip odd/odd 4x4 inter leaf (and any block
+passing the geometry half of the gate) read two uv `uv-cf` coefficient
+symbols dav1d never reads. On `testsrc2 160x120 mono` frame 1 this fired at
+the very first such leaf — block mi=(5,3) consumed 33288→58118→51192 while
+dav1d went straight from the y-cf read to the next partition — and every
+subsequent partition/block diverged (the "170 vs 98 blocks / mv-stack
+ctx 0x3A vs 0x3B" observation was this desync propagating).
+
+Fix: `let has_chroma = !self.monochrome && (geometry)` — folding mono into
+the existing gate keeps the chroma deblock-edge marking semantics (the
+`if !has_chroma { continue }` path still marks edges before skipping the
+reads, matching the intra path's mono handling, which was already correct —
+hence the bit-exact keyframe).
+
+Validation: all four mono streams (testsrc2/smptebars x 8/10-bit) now
+decode BIT-EXACT vs ffmpeg+libdav1d end to end, including P frames —
+`libaom_crosscheck` gained the `testsrc2 160x120 monochrome` case (15
+cases). Full gates re-ran: lib tests 169/169, randomized sweeps seeds 7/99
+clean, superres sweep clean, update-grain sweep clean, clippy `-D warnings`
++ fmt clean.
+
+Monochrome is now FULLY supported: decode end to end (syntax, prediction,
+filters, `Gray`/`Gray10le`/`Gray12le` output) bit-exact on every tested
+stream. Remaining (AV1): 4:4:4 / 4:2:2 input (sequenced plan in #5), FATE
+sample re-fetch.

@@ -14,6 +14,7 @@ use tpt_kinetix_core::{
 };
 
 use crate::{
+    film_grain::FilmGrainParams,
     frame::FrameHeader,
     inter::MotionField,
     obu::{parse_obu_sequence, ObuType, SequenceHeaderObu},
@@ -60,6 +61,9 @@ pub struct StoredFrame {
     /// The visible frame dimensions (≤ grid dims) used for output cropping.
     pub real_width: usize,
     pub real_height: usize,
+    /// The frame's sample layout (4:2:0 family, or a `Gray` format for
+    /// monochrome frames) — `to_video_frame` labels the output with it.
+    pub pixel_format: PixelFormat,
     /// Per-4×4 motion field for temporal MV projection; `None` for keyframes.
     pub motion_field: Option<MotionField>,
 }
@@ -69,35 +73,22 @@ impl StoredFrame {
     /// reference — used to satisfy `show_existing_frame` (§7.4). The padding
     /// rows/columns of the mi-grid-extent planes are cropped away.
     fn to_video_frame(&self) -> VideoFrame {
-        let mut data = Vec::with_capacity(self.real_width * self.real_height * 3 / 2);
-        let uv_stride = self.width / 2;
-        for row in 0..self.real_height {
-            let off = row * self.width;
-            data.extend(self.y[off..off + self.real_width].iter().map(|&s| s as u8));
-        }
-        for row in 0..self.real_height.div_ceil(2) {
-            let off = row * uv_stride;
-            data.extend(
-                self.u[off..off + self.real_width / 2]
-                    .iter()
-                    .map(|&s| s as u8),
-            );
-        }
-        for row in 0..self.real_height.div_ceil(2) {
-            let off = row * uv_stride;
-            data.extend(
-                self.v[off..off + self.real_width / 2]
-                    .iter()
-                    .map(|&s| s as u8),
-            );
-        }
+        let data = crate::reconstruct::crop_planes(
+            &self.y,
+            &self.u,
+            &self.v,
+            self.width,
+            self.real_width,
+            self.real_height,
+            self.pixel_format,
+        );
         VideoFrame {
             pts: Timestamp::NONE,
             dts: Timestamp::NONE,
             data,
             width: self.real_width as u32,
             height: self.real_height as u32,
-            pixel_format: PixelFormat::Yuv420p,
+            pixel_format: self.pixel_format,
             is_key_frame: false,
         }
     }
@@ -132,6 +123,7 @@ impl RefFrameStore {
         refresh_flags: u8,
         planes: &crate::reconstruct::PaddedPlanes,
         motion_field: Option<&MotionField>,
+        pixel_format: PixelFormat,
     ) {
         let y = &planes.y;
         let u = &planes.u;
@@ -181,6 +173,7 @@ impl RefFrameStore {
                 height: planes.grid_height,
                 real_width: planes.real_width,
                 real_height: planes.real_height,
+                pixel_format,
                 motion_field: motion_field.map(|mf| MotionField {
                     cells: mf_cells_opt.unwrap().to_vec(),
                     stride: mf.stride,
@@ -238,6 +231,9 @@ pub struct Av1Decoder {
     /// adapted CDFs; a `refresh_context` frame saves its adapted CDFs into the
     /// slots `refresh_frame_flags` selects.
     ref_cdf_contexts: [Option<std::sync::Arc<crate::reconstruct::FrameCdfContext>>; 8],
+    /// Per-slot saved film-grain parameters (`save_grain_params`), the source
+    /// for `update_grain == 0` and for `show_existing_frame`.
+    ref_film_grain: [Option<FilmGrainParams>; 8],
 }
 
 impl Av1Decoder {
@@ -254,6 +250,7 @@ impl Av1Decoder {
             ref_lf_deltas: [crate::frame::LoopFilterDeltas::default(); 8],
             ref_gm_params: [crate::frame::default_gm_params(); 8],
             ref_cdf_contexts: [None, None, None, None, None, None, None, None],
+            ref_film_grain: std::array::from_fn(|_| None),
         }
     }
 
@@ -491,10 +488,15 @@ impl Av1Decoder {
     ) -> Option<VideoFrame> {
         self.last_frame_header = Some(fh.clone());
         if let Some(idx) = fh.show_existing_idx {
-            let f = self
+            let mut f = self
                 .ref_frames
                 .get(idx as usize)
                 .map(|s| s.to_video_frame());
+            if let (Some(frame), Some(Some(p))) =
+                (f.as_mut(), self.ref_film_grain.get(idx as usize))
+            {
+                apply_grain_to_frame(frame, p, fh.bit_depth, seq);
+            }
             if std::env::var("KINETIX_AV1_DBG_RECON_ERR").is_ok() {
                 eprintln!(
                     "KIN show_existing_frame idx={idx} slot_present={} order_hint={}",
@@ -593,6 +595,29 @@ impl Av1Decoder {
             }
         };
         let refresh = fh.refresh_frame_flags;
+        // film_grain_params (§5.9.30): resolve `update_grain == 0` from the
+        // named slot (keeping this frame's seed), save into refreshed slots,
+        // and synthesise grain on the shown output only.
+        let mut grain = fh.film_grain.clone();
+        if let (Some(p), Some(idx)) = (grain.as_mut(), fh.film_grain_load_idx) {
+            if let Some(Some(stored)) = self.ref_film_grain.get(usize::from(idx)) {
+                let seed = p.grain_seed;
+                *p = stored.clone();
+                p.grain_seed = seed;
+                p.apply_grain = true;
+            }
+        }
+        let mut frame = frame;
+        if fh.show_frame {
+            if let Some(p) = &grain {
+                apply_grain_to_frame(&mut frame, p, fh.bit_depth, seq);
+            }
+        }
+        for i in 0..8 {
+            if refresh & (1u8 << i) != 0 {
+                self.ref_film_grain[i] = grain.clone();
+            }
+        }
         // After a `refresh_context` frame, its adapted CDFs are saved into
         // every slot selected by `refresh_frame_flags` (§ context update).
         if std::env::var("KINETIX_AV1_DBG_CDFSAVE").is_ok() {
@@ -641,8 +666,14 @@ impl Av1Decoder {
         // denote. Recorded in the same pass that refreshes `ref_order_hints`.
         let stored_dims = (fh.upscaled_width, fh.height);
         if let Some(planes) = &padded {
+            let pixel_format = crate::reconstruct::pixel_format_for(
+                u32::from(fh.bit_depth),
+                fh.mono_chrome,
+                fh.subsampling_x,
+                fh.subsampling_y,
+            );
             self.ref_frames
-                .refresh(refresh, planes, motion_field.as_ref());
+                .refresh(refresh, planes, motion_field.as_ref(), pixel_format);
         }
         if std::env::var("KINETIX_AV1_DUMP_FRAMES").is_ok() {
             let nm = format!("kfr_{:02}.yuv", crate::debug_frame_seq::current());
@@ -702,4 +733,63 @@ impl Default for Av1Decoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Synthesise film grain onto a cropped output frame (Y, U, V planar, 8-bit or
+/// 16-bit little-endian samples). Only even-width 4:2:0 layouts are handled.
+fn apply_grain_to_frame(
+    frame: &mut VideoFrame,
+    p: &FilmGrainParams,
+    bit_depth: u8,
+    seq: &SequenceHeaderObu,
+) {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if !p.apply_grain
+        || w == 0
+        || h == 0
+        || w % 2 != 0
+        || std::env::var_os("KINETIX_AV1_NO_GRAIN").is_some()
+    {
+        return;
+    }
+    let bytes = if bit_depth == 8 { 1 } else { 2 };
+    let (cw, ch) = (w / 2, h.div_ceil(2));
+    if frame.data.len() != (w * h + 2 * cw * ch) * bytes {
+        return;
+    }
+    let decode = |b: &[u8]| -> Vec<crate::Px> {
+        if bytes == 1 {
+            b.iter().map(|&v| crate::Px::from(v)).collect()
+        } else {
+            b.chunks_exact(2)
+                .map(|c| crate::Px::from_le_bytes([c[0], c[1]]))
+                .collect()
+        }
+    };
+    let (yb, rest) = frame.data.split_at(w * h * bytes);
+    let (ub, vb) = rest.split_at(cw * ch * bytes);
+    let (mut y, mut u, mut v) = (decode(yb), decode(ub), decode(vb));
+    crate::film_grain::apply_film_grain(
+        p,
+        u32::from(bit_depth),
+        1,
+        1,
+        seq.color_config.matrix_coefficients == 0,
+        w,
+        h,
+        &mut y,
+        &mut u,
+        &mut v,
+    );
+    let mut out = Vec::with_capacity(frame.data.len());
+    for plane in [&y, &u, &v] {
+        if bytes == 1 {
+            out.extend(plane.iter().map(|&s| s as u8));
+        } else {
+            for &s in plane.iter() {
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+    }
+    frame.data = out;
 }

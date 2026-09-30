@@ -458,10 +458,16 @@ impl<'a> TileDecodeState<'a> {
                     .get(mi_row)
                     .is_some_and(|v| !v.is_empty());
             let ctx = above_has as usize + left_has as usize;
-            if self
+            let pal_y = self
                 .mode_cdfs
-                .read_has_palette_y(&mut self.dec, bsize_ctx, ctx)
-            {
+                .read_has_palette_y(&mut self.dec, bsize_ctx, ctx);
+            if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                eprintln!(
+                    "DBG b0 has_palette_y={pal_y} bsize_ctx={bsize_ctx} ctx={ctx} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
+            if pal_y {
                 let size = 2 + self.mode_cdfs.read_palette_size_y(&mut self.dec, bsize_ctx);
                 let cache = self.get_palette_cache(0, mi_row, mi_col);
                 let pal_dbg = std::env::var("KINETIX_AV1_DBG_PAL").is_ok()
@@ -568,7 +574,8 @@ impl<'a> TileDecodeState<'a> {
                     };
                     if std::env::var("KINETIX_DBG_PALIDX").is_ok() {
                         eprintln!(
-                            "PALIDX i={i} j={c} ctx={ctx} idx={sym} r={}",
+                            "PALIDX i={i} j={c} ctx={ctx} idx={} sym={sym} r={}",
+                            color_order[sym],
                             self.dec.raw_state().0
                         );
                     }

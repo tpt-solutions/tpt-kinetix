@@ -114,12 +114,7 @@ impl<'a> TileDecodeState<'a> {
                 // default DV if both are (0,0). The stack itself comes from
                 // §7.10.2 `find_mv_stack` — see `ibc_mv_pred`.
                 let ibc_pred = self.ibc_mv_pred(mi_row, mi_col, bsize);
-                let delta = crate::inter::read_mv(
-                    &mut self.dec,
-                    &mut self.map_inter_cdfs,
-                    false, // allow_hp
-                    true,  // force_integer_mv
-                )?;
+                let delta = crate::inter::read_mv_ibc(&mut self.dec, &mut self.map_inter_cdfs)?;
                 let mv = crate::inter::Mv::new(ibc_pred.row + delta.row, ibc_pred.col + delta.col);
                 if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
                     eprintln!(
@@ -452,352 +447,121 @@ impl<'a> TileDecodeState<'a> {
 
         // Luma transform blocks (every square and rectangular `TxSize`; the
         // inverse-transform set covers all 19 AV1 spec `TxSize` values).
-        for ty in (0..bh * MI_SIZE).step_by(luma_tx_h) {
-            for tx in (0..bw * MI_SIZE).step_by(luma_tx_w) {
-                let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
-                let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
-                if std::env::var("KINETIX_AV1_DBG_SB1").is_ok()
-                    && (mi_row == 8 || mi_row == 16)
-                    && mi_col == 0
-                    && ty == 0
-                    && tx == 0
-                {
-                    eprintln!("DBG SB1 recon_intra_sub mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tile_px=({},{}) luma_tx={luma_tx} bsize={bsize}", self.tile_px_x0, self.tile_px_y0);
-                }
-                // Mark this *individual* transform sub-block's own left/top
-                // grid cells as real AV1 §7.14.1 deblock edges (see
-                // `FrameMeta::mark_luma_edges`'s doc comment) — a coded block
-                // whose `luma_tx_w`/`_h` is smaller than its own size (e.g. a
-                // 32×32 block using `TX_16X16`) reconstructs multiple
-                // separate transform blocks here, each with a *real* edge at
-                // its own origin, not just at the whole coded block's origin.
-                self.meta.mark_luma_edges(
-                    px_x / 8,
-                    px_y / 8,
-                    (px_x + luma_tx_w).div_ceil(8),
-                    (px_y + luma_tx_h).div_ceil(8),
-                );
-                // 4×4-luma-cell-resolution counterparts (see `FrameMeta::w4`'s
-                // doc comment) — deblock's luma pass runs at 4-sample
-                // granularity since transforms as small as TX_4X4/TX_4X8/
-                // TX_8X4 can meet at boundaries the coarser 8×8 grid can't
-                // represent.
-                self.meta.mark_luma_edges4(
-                    px_x / 4,
-                    px_y / 4,
-                    (px_x + luma_tx_w).div_ceil(4),
-                    (px_y + luma_tx_h).div_ceil(4),
-                );
-                self.meta.record_luma4(
-                    px_x / 4,
-                    px_y / 4,
-                    (px_x + luma_tx_w).div_ceil(4),
-                    (px_y + luma_tx_h).div_ceil(4),
-                    luma_tx_w as u8,
-                    luma_tx_h as u8,
-                );
-                // Intra (and IBC) blocks: §7.14.4 ref = INTRA_FRAME,
-                // modeType = 0.
-                self.meta.record_lf4(
-                    px_x / 4,
-                    px_y / 4,
-                    (px_x + luma_tx_w).div_ceil(4),
-                    (px_y + luma_tx_h).div_ceil(4),
-                    0,
-                    0,
-                );
-                let (lu, lv) = chroma_lf_levels_snapshot(
-                    self.lf_frame_levels,
-                    self.lf_ref_deltas,
-                    self.lf_mode_deltas,
-                    self.lf_delta_enabled,
-                    self.delta_lf,
-                    0,
-                    0,
-                );
-                self.meta.record_lf_level_chroma(
-                    px_x / 8,
-                    px_y / 8,
-                    (px_x + luma_tx_w).div_ceil(8),
-                    (px_y + luma_tx_h).div_ceil(8),
-                    lu as u8,
-                    lv as u8,
-                );
-                let blk = TxBlockCtx {
-                    plane: 0,
-                    tx_size: luma_tx,
-                    x4: px_x / 4,
-                    y4: px_y / 4,
-                    max_x4: self.luma_max_x4,
-                    max_y4: self.luma_max_y4,
-                    // `Block_Width[get_plane_residual_size(MiSize, 0)]` (spec
-                    // §8.3.2 `all_zero`'s `bw`/`bh`) — the *coded block's*
-                    // plane-residual size, not this transform block's own
-                    // `Tx_Width`/`Tx_Height`. For plane 0 the residual size is
-                    // `MiSize` itself (no subsampling), i.e. `bw`/`bh` in
-                    // samples. A previous revision passed `luma_tx_w`/`_h`
-                    // here, making `blk.block_w == w && blk.block_h == h`
-                    // (the whole-block `ctx = 0` special case) unconditionally
-                    // true for every transform block — including every block
-                    // whose `tx_size` splits a larger coded block, which then
-                    // read `all_zero` from the wrong CDF bucket and decoded
-                    // the wrong boolean whenever the true (neighbour-derived)
-                    // context wasn't already 0. This desynced every
-                    // multi-transform-block coded block's residual, and
-                    // everything after it in decode order — while a
-                    // single-block-single-transform frame (`solid_red`) never
-                    // exercised the buggy branch at all, since there `bw == w`
-                    // was actually true.
-                    block_w: bw * MI_SIZE,
-                    block_h: bh * MI_SIZE,
-                    intra_dir: luma_intra_dir,
-                    uv_mode,
-                    qindex_positive: !self.lossless,
-                    reduced_tx_set: self.reduced_tx_set,
-                    lossless: self.lossless,
-                    is_inter: false,
-                    coincident_luma_tx_type: av1::DCT_DCT,
-                };
-                let palette_y = (!palette.colors_y.is_empty()).then(|| PaletteBlockInfo {
-                    colors: &palette.colors_y,
-                    color_map: &palette.map_y,
-                    map_stride: palette.stride_y,
-                    off_x: tx,
-                    off_y: ty,
-                });
-                reconstruct_tx_block(
-                    &mut self.dec,
-                    &mut self.coeff_cdfs,
-                    &mut self.coeff_ctxs,
-                    &blk,
-                    y_plane,
-                    self.y_stride,
-                    self.tile_w,
-                    self.tile_h,
-                    px_x,
-                    px_y,
-                    luma_tx,
-                    y_qindex_dc,
-                    y_qindex_ac,
-                    y_mode,
-                    skip,
-                    filter_intra_mode,
-                    self.enable_intra_edge_filter,
-                    filter_type_y,
-                    None,
-                    angle_delta_y,
-                    palette_y,
+        //
+        // AV1 §5.11.34 `residual()`: a block larger than 64 in either
+        // dimension is coded as 64×64 chunks in raster order, each chunk
+        // carrying its luma transform blocks followed by its chroma ones;
+        // and `transform_block()` returns without reading anything for a
+        // transform block that starts at or beyond the frame's mi-grid edge.
+        let chunks_w = (bw * MI_SIZE).div_ceil(64).max(1);
+        let chunks_h = (bh * MI_SIZE).div_ceil(64).max(1);
+        for chunk in 0..chunks_w * chunks_h {
+            let (chunk_x, chunk_y) = (chunk % chunks_w, chunk / chunks_w);
+            let (cy0, cx0) = (chunk_y * 64, chunk_x * 64);
+            for ty in (cy0..(cy0 + 64).min(bh * MI_SIZE)).step_by(luma_tx_h) {
+                for tx in (cx0..(cx0 + 64).min(bw * MI_SIZE)).step_by(luma_tx_w) {
+                    if mi_col * MI_SIZE + tx >= self.mi_cols * MI_SIZE
+                        || mi_row * MI_SIZE + ty >= self.mi_rows * MI_SIZE
                     {
-                        let (sr, sc) = bd_index(0, px_x, px_y);
-                        BlockDecodedCtx {
-                            grid: &mut bd_y[..],
-                            sub_r: sr,
-                            sub_c: sc,
-                            step_x: luma_tx_w >> 2,
-                            step_y: luma_tx_h >> 2,
-                            overhang: Some(&mut self.luma_overhang),
-                        }
-                    },
-                    self.bit_depth,
-                )?;
-            }
-        }
-
-        // Record per-8×8-luma-block metadata for the in-loop filters (AV1 Phase
-        // D). Coordinates are tile-local, matching the tile-local plane buffers
-        // this tile reconstructs into; `reconstruct_av1_frame` merges the
-        // per-tile metas into a full-frame `FrameMeta` and runs
-        // `apply_post_filters` over the assembled frame.
-        let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
-        let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
-        let bx0 = blk_px_x / 8;
-        let by0 = blk_px_y / 8;
-        let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
-        let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
-        for by in by0..by1.min(self.meta.h8) {
-            for bx in bx0..bx1.min(self.meta.w8) {
-                self.meta
-                    .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
-            }
-        }
-        self.meta.record_delta_lf(bx0, by0, bx1, by1, self.delta_lf);
-        self.meta.record_delta_lf4(
-            blk_px_x / 4,
-            blk_px_y / 4,
-            (blk_px_x + bw * MI_SIZE).div_ceil(4),
-            (blk_px_y + bh * MI_SIZE).div_ceil(4),
-            self.delta_lf,
-        );
-
-        // Reconstruct chroma transform blocks (4:2:0 / 4:2:2 / 4:4:4).
-        // `HasChroma` (AV1 spec §5.11.5, see [`has_chroma`]): a block that is
-        // the first (even row/col) half of a sub-4-sample chroma-sharing
-        // pair carries no chroma syntax/residual at all — that shared data
-        // was already reconstructed on (or waits for) the pair's second
-        // block. Skipping this whole section for such a block, rather than
-        // reconstructing a redundant, wrongly-positioned partial chroma
-        // block per luma sub-block, is the fix for the "not modelled"
-        // simplification noted elsewhere in this module.
-        if !self.monochrome
-            && has_chroma(
-                bsize,
-                mi_row,
-                mi_col,
-                self.subsampling_x,
-                self.subsampling_y,
-            )
-        {
-            let sub_x = self.subsampling_x as usize;
-            let sub_y = self.subsampling_y as usize;
-            // `MaxLumaW`/`MaxLumaH` (AV1 spec §7.11.2.1, set when `plane ==
-            // 0`): the pixel extent of the coded block's just-reconstructed
-            // luma region, used by CFL (§7.11.5) to clamp its luma-sample
-            // lookups at the block's own right/bottom edge rather than the
-            // frame's. dav1d (`recon_tmpl.c`) derives this from
-            // `w4 = imin(bw4, f->bw - t->bx)` — the block's own nominal
-            // extent additionally clamped to the FRAME's mi-grid edge — not
-            // the unclamped nominal extent alone. A block whose partition
-            // legally straddles the frame's right/bottom mi-grid boundary
-            // (allowed: partitioning only requires the block's *origin* to
-            // be inside the grid, not its full nominal extent) previously
-            // computed a `max_luma_w`/`_h` past the actual reconstructed
-            // buffer width/height (`tile_w`/`tile_h`), so the CFL
-            // luma-average read `.get(...)` on an out-of-range index quietly
-            // wrapped into the next row instead of clamping to the block's
-            // last real column/row — corrupting `lumaAvg` and every `L[i][j]`
-            // sample. Traced on `switch_frame.ivf` frame 7, mi=(208,112)
-            // bsize=BLOCK_32X32: `max_luma_w=864` against a `tile_w=856`
-            // buffer (the frame is 852 wide, mi-grid-padded to 856; the SB
-            // partition tree still produced a 32-wide block starting at
-            // mi_col 208, straddling the mi-grid edge by 8px/2mi).
-            // Refinement (spec `MaxLumaW`/`MaxLumaH` = end of the last luma
-            // transform block that *starts* inside the frame; dav1d
-            // `furthest_r`/`furthest_b`): a luma transform straddling the
-            // mi-grid edge is reconstructed in full, so CFL averages over its
-            // samples past the edge (kept in `luma_overhang`) rather than
-            // replicating the last in-frame row/column.
-            let round_up_to_tx = |start: usize, limit: usize, block_end: usize, tx: usize| {
-                if block_end <= limit {
-                    block_end
-                } else {
-                    (start + (limit.saturating_sub(start)).div_ceil(tx) * tx).min(block_end)
-                }
-            };
-            let max_luma_w =
-                round_up_to_tx(blk_px_x, self.tile_w, blk_px_x + bw * MI_SIZE, luma_tx_w);
-            let max_luma_h =
-                round_up_to_tx(blk_px_y, self.tile_h, blk_px_y + bh * MI_SIZE, luma_tx_h);
-            // AV1 spec §5.11.37 `get_tx_size(plane, txSz)`: the chroma
-            // transform size is derived from the *whole coded block's* size
-            // (`bsize`), not from the luma transform size directly, via
-            // `Max_Tx_Size_Rect[get_plane_residual_size(MiSize, plane)]` plus
-            // the 64-sample clamp. A previous revision instead bucketed a
-            // per-luma-tx-block `cw`/`ch` (derived from `luma_tx_w`/`_h`) into
-            // the nearest *square* candidate — wrong for any bsize whose
-            // subsampled residual size is itself rectangular (e.g. every
-            // non-square bsize under 4:2:0), and recomputed uselessly once
-            // per luma tx sub-block instead of once per coded block.
-            let c_tx = chroma_tx_size(
-                bsize,
-                usize::from(self.subsampling_x),
-                usize::from(self.subsampling_y),
-            );
-            let cw = av1::TX_WIDTH[c_tx];
-            let ch = av1::TX_HEIGHT[c_tx];
-            // Chroma transform blocks tile the coded block's *chroma-space*
-            // residual extent directly (spec §5.11.34 `residual()`'s
-            // `transform_block` loop, stepping by the single chroma `txSz`
-            // it derived for the whole block) — not the per-luma-tx-block
-            // grid `luma_tx_w`/`_h` step used above, which only coincides
-            // with the chroma step when `cw`/`ch` happen to equal the
-            // subsampled luma tx step (the previous revision's bucketed
-            // square `c_tx` always did; a real rectangular `c_tx` may not).
-            // AV1 spec §5.11.34 `residual()`: `baseXBlock = (MiCol >> subX) *
-            // MI_SIZE` — the mi position is floor-divided by the subsampling
-            // *before* multiplying back up to samples, not the other way
-            // round. For an odd `mi_col`/`mi_row` (always the case for the
-            // chroma-carrying half of a `HasChroma`-shared pair, since the
-            // *other* half sits at the preceding even position) those two
-            // orders disagree — e.g. `mi_col == 1`, `sub_x == 1`:
-            // `(1 >> 1) * 4 == 0` vs the previous `(1 * 4) >> 1 == 2` — and
-            // only the spec's order lands both halves of the pair on the
-            // same shared chroma origin.
-            let base_cpx_x = (mi_col >> sub_x) * MI_SIZE - (self.tile_px_x0 >> sub_x);
-            let base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (self.tile_px_y0 >> sub_y);
-            // `num4x4W * 4` / `num4x4H * 4` (spec `residual()`): the chroma
-            // extent is this block's own `get_plane_residual_size(MiSize,
-            // plane)`, which already accounts for the sub-4x4 floor (e.g.
-            // `Subsampled_Size[BLOCK_4X4][1][1] == BLOCK_4X4`) — no separate
-            // "shared group size" is needed, since only the `HasChroma`
-            // block of a pair reaches this code at all.
-            let plane_sz = {
-                let sz = get_plane_residual_size(bsize, sub_x, sub_y);
-                if sz == BLOCK_INVALID {
-                    bsize
-                } else {
-                    sz
-                }
-            };
-            let chroma_bw = BLOCK_WIDTH[plane_sz];
-            let chroma_bh = BLOCK_HEIGHT[plane_sz];
-            for ty in (0..chroma_bh).step_by(ch) {
-                for tx in (0..chroma_bw).step_by(cw) {
-                    let cpx_x = base_cpx_x + tx;
-                    let cpx_y = base_cpx_y + ty;
-                    if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_INTRA_CXY") {
-                        if let Some((sx, sy)) = spec.split_once(',') {
-                            if let (Ok(tx_), Ok(ty_)) =
-                                (sx.trim().parse::<usize>(), sy.trim().parse::<usize>())
-                            {
-                                if tx_ >= cpx_x
-                                    && tx_ < cpx_x + cw
-                                    && ty_ >= cpx_y
-                                    && ty_ < cpx_y + ch
-                                {
-                                    eprintln!(
-                                        "INTRACXY fr={} mi=({mi_col},{mi_row}) bsize={bsize} cpx=({cpx_x},{cpx_y}) cw={cw} ch={ch} max_luma=({max_luma_w},{max_luma_h}) uv_mode={uv_mode} cfl_alpha={:?} tile_cw={} tile_ch={} y_stride={}",
-                                        crate::debug_frame_seq::current(),
-                                        cfl_alpha,
-                                        self.tile_cw,
-                                        self.tile_ch,
-                                        self.y_stride,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
                         continue;
                     }
-                    // Mark this individual chroma transform sub-block's own
-                    // left/top grid cells as real deblock edges — same
-                    // reasoning as the luma `mark_luma_edges` call above.
-                    // Chroma is stored at the shared luma-grid resolution
-                    // (`FrameMeta`'s doc comment: one grid cell == 4 chroma
-                    // samples == 8 luma samples), matching the `/8`-of-luma
-                    // == `/4`-of-chroma scale the existing `bx0`/`by0`
-                    // computation below already relies on.
-                    self.meta.mark_chroma_edges(
-                        cpx_x / 4,
-                        cpx_y / 4,
-                        (cpx_x + cw).div_ceil(4),
-                        (cpx_y + ch).div_ceil(4),
+                    let px_x = mi_col * MI_SIZE + tx - self.tile_px_x0;
+                    let px_y = mi_row * MI_SIZE + ty - self.tile_px_y0;
+                    if std::env::var("KINETIX_AV1_DBG_SB1").is_ok()
+                        && (mi_row == 8 || mi_row == 16)
+                        && mi_col == 0
+                        && ty == 0
+                        && tx == 0
+                    {
+                        eprintln!("DBG SB1 recon_intra_sub mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tile_px=({},{}) luma_tx={luma_tx} bsize={bsize}", self.tile_px_x0, self.tile_px_y0);
+                    }
+                    // Mark this *individual* transform sub-block's own left/top
+                    // grid cells as real AV1 §7.14.1 deblock edges (see
+                    // `FrameMeta::mark_luma_edges`'s doc comment) — a coded block
+                    // whose `luma_tx_w`/`_h` is smaller than its own size (e.g. a
+                    // 32×32 block using `TX_16X16`) reconstructs multiple
+                    // separate transform blocks here, each with a *real* edge at
+                    // its own origin, not just at the whole coded block's origin.
+                    self.meta.mark_luma_edges(
+                        px_x / 8,
+                        px_y / 8,
+                        (px_x + luma_tx_w).div_ceil(8),
+                        (px_y + luma_tx_h).div_ceil(8),
                     );
-                    let blk_u = TxBlockCtx {
-                        plane: 1,
-                        tx_size: c_tx,
-                        x4: cpx_x / 4,
-                        y4: cpx_y / 4,
-                        max_x4: self.uv_max_x4,
-                        max_y4: self.uv_max_y4,
-                        // Same fix as the luma case above: the coded block's
-                        // chroma plane-residual size (`chroma_bw`/`chroma_bh`,
-                        // already `Block_Width`/`Height[get_plane_residual_
-                        // size(MiSize, 1)]`), not this transform block's own
-                        // `cw`/`ch`.
-                        block_w: chroma_bw,
-                        block_h: chroma_bh,
-                        intra_dir: uv_mode,
+                    // 4×4-luma-cell-resolution counterparts (see `FrameMeta::w4`'s
+                    // doc comment) — deblock's luma pass runs at 4-sample
+                    // granularity since transforms as small as TX_4X4/TX_4X8/
+                    // TX_8X4 can meet at boundaries the coarser 8×8 grid can't
+                    // represent.
+                    self.meta.mark_luma_edges4(
+                        px_x / 4,
+                        px_y / 4,
+                        (px_x + luma_tx_w).div_ceil(4),
+                        (px_y + luma_tx_h).div_ceil(4),
+                    );
+                    self.meta.record_luma4(
+                        px_x / 4,
+                        px_y / 4,
+                        (px_x + luma_tx_w).div_ceil(4),
+                        (px_y + luma_tx_h).div_ceil(4),
+                        luma_tx_w as u8,
+                        luma_tx_h as u8,
+                    );
+                    // Intra (and IBC) blocks: §7.14.4 ref = INTRA_FRAME,
+                    // modeType = 0.
+                    self.meta.record_lf4(
+                        px_x / 4,
+                        px_y / 4,
+                        (px_x + luma_tx_w).div_ceil(4),
+                        (px_y + luma_tx_h).div_ceil(4),
+                        0,
+                        0,
+                    );
+                    let (lu, lv) = chroma_lf_levels_snapshot(
+                        self.lf_frame_levels,
+                        self.lf_ref_deltas,
+                        self.lf_mode_deltas,
+                        self.lf_delta_enabled,
+                        self.delta_lf,
+                        0,
+                        0,
+                    );
+                    self.meta.record_lf_level_chroma(
+                        px_x / 8,
+                        px_y / 8,
+                        (px_x + luma_tx_w).div_ceil(8),
+                        (px_y + luma_tx_h).div_ceil(8),
+                        lu as u8,
+                        lv as u8,
+                    );
+                    let blk = TxBlockCtx {
+                        plane: 0,
+                        tx_size: luma_tx,
+                        x4: px_x / 4,
+                        y4: px_y / 4,
+                        max_x4: self.luma_max_x4,
+                        max_y4: self.luma_max_y4,
+                        // `Block_Width[get_plane_residual_size(MiSize, 0)]` (spec
+                        // §8.3.2 `all_zero`'s `bw`/`bh`) — the *coded block's*
+                        // plane-residual size, not this transform block's own
+                        // `Tx_Width`/`Tx_Height`. For plane 0 the residual size is
+                        // `MiSize` itself (no subsampling), i.e. `bw`/`bh` in
+                        // samples. A previous revision passed `luma_tx_w`/`_h`
+                        // here, making `blk.block_w == w && blk.block_h == h`
+                        // (the whole-block `ctx = 0` special case) unconditionally
+                        // true for every transform block — including every block
+                        // whose `tx_size` splits a larger coded block, which then
+                        // read `all_zero` from the wrong CDF bucket and decoded
+                        // the wrong boolean whenever the true (neighbour-derived)
+                        // context wasn't already 0. This desynced every
+                        // multi-transform-block coded block's residual, and
+                        // everything after it in decode order — while a
+                        // single-block-single-transform frame (`solid_red`) never
+                        // exercised the buggy branch at all, since there `bw == w`
+                        // was actually true.
+                        block_w: bw * MI_SIZE,
+                        block_h: bh * MI_SIZE,
+                        intra_dir: luma_intra_dir,
                         uv_mode,
                         qindex_positive: !self.lossless,
                         reduced_tx_set: self.reduced_tx_set,
@@ -805,42 +569,10 @@ impl<'a> TileDecodeState<'a> {
                         is_inter: false,
                         coincident_luma_tx_type: av1::DCT_DCT,
                     };
-                    let blk_v = TxBlockCtx { plane: 2, ..blk_u };
-                    let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
-                        luma: &*y_plane,
-                        luma_stride: self.y_stride,
-                        sub_x: self.subsampling_x,
-                        sub_y: self.subsampling_y,
-                        max_luma_w,
-                        max_luma_h,
-                        luma_w: self.tile_w,
-                        luma_h: self.tile_h,
-                        overhang: &self.luma_overhang,
-                        alpha: au,
-                    });
-                    let cfl_v = cfl_alpha.map(|(_, av)| CflParams {
-                        luma: &*y_plane,
-                        luma_stride: self.y_stride,
-                        sub_x: self.subsampling_x,
-                        sub_y: self.subsampling_y,
-                        max_luma_w,
-                        max_luma_h,
-                        luma_w: self.tile_w,
-                        luma_h: self.tile_h,
-                        overhang: &self.luma_overhang,
-                        alpha: av,
-                    });
-                    let palette_u = (!palette.colors_u.is_empty()).then(|| PaletteBlockInfo {
-                        colors: &palette.colors_u,
-                        color_map: &palette.map_uv,
-                        map_stride: palette.stride_uv,
-                        off_x: tx,
-                        off_y: ty,
-                    });
-                    let palette_v = (!palette.colors_v.is_empty()).then(|| PaletteBlockInfo {
-                        colors: &palette.colors_v,
-                        color_map: &palette.map_uv,
-                        map_stride: palette.stride_uv,
+                    let palette_y = (!palette.colors_y.is_empty()).then(|| PaletteBlockInfo {
+                        colors: &palette.colors_y,
+                        color_map: &palette.map_y,
+                        map_stride: palette.stride_y,
                         off_x: tx,
                         off_y: ty,
                     });
@@ -848,80 +580,366 @@ impl<'a> TileDecodeState<'a> {
                         &mut self.dec,
                         &mut self.coeff_cdfs,
                         &mut self.coeff_ctxs,
-                        &blk_u,
-                        u_plane,
-                        self.uv_stride,
-                        self.tile_cw,
-                        self.tile_ch,
-                        cpx_x,
-                        cpx_y,
-                        c_tx,
-                        u_qindex_dc,
-                        u_qindex_ac,
-                        uv_mode,
+                        &blk,
+                        y_plane,
+                        self.y_stride,
+                        self.tile_w,
+                        self.tile_h,
+                        px_x,
+                        px_y,
+                        luma_tx,
+                        y_qindex_dc,
+                        y_qindex_ac,
+                        y_mode,
                         skip,
-                        None,
+                        filter_intra_mode,
                         self.enable_intra_edge_filter,
-                        filter_type_uv,
-                        cfl_u,
-                        angle_delta_uv,
-                        palette_u,
+                        filter_type_y,
+                        None,
+                        angle_delta_y,
+                        palette_y,
                         {
-                            let (sr, sc) = bd_index(1, cpx_x, cpx_y);
+                            let (sr, sc) = bd_index(0, px_x, px_y);
                             BlockDecodedCtx {
-                                grid: &mut bd_u[..],
+                                grid: &mut bd_y[..],
                                 sub_r: sr,
                                 sub_c: sc,
-                                step_x: cw >> 2,
-                                step_y: ch >> 2,
-                                overhang: None,
-                            }
-                        },
-                        self.bit_depth,
-                    )?;
-                    reconstruct_tx_block(
-                        &mut self.dec,
-                        &mut self.coeff_cdfs,
-                        &mut self.coeff_ctxs,
-                        &blk_v,
-                        v_plane,
-                        self.uv_stride,
-                        self.tile_cw,
-                        self.tile_ch,
-                        cpx_x,
-                        cpx_y,
-                        c_tx,
-                        v_qindex_dc,
-                        v_qindex_ac,
-                        uv_mode,
-                        skip,
-                        None,
-                        self.enable_intra_edge_filter,
-                        filter_type_uv,
-                        cfl_v,
-                        angle_delta_uv,
-                        palette_v,
-                        {
-                            let (sr, sc) = bd_index(2, cpx_x, cpx_y);
-                            BlockDecodedCtx {
-                                grid: &mut bd_v[..],
-                                sub_r: sr,
-                                sub_c: sc,
-                                step_x: cw >> 2,
-                                step_y: ch >> 2,
-                                overhang: None,
+                                step_x: luma_tx_w >> 2,
+                                step_y: luma_tx_h >> 2,
+                                overhang: Some(&mut self.luma_overhang),
                             }
                         },
                         self.bit_depth,
                     )?;
                 }
             }
-            // Record chroma tx/skip metadata for the same 8×8-luma grid region.
-            let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
-            let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
+
+            // Record per-8×8-luma-block metadata for the in-loop filters (AV1 Phase
+            // D). Coordinates are tile-local, matching the tile-local plane buffers
+            // this tile reconstructs into; `reconstruct_av1_frame` merges the
+            // per-tile metas into a full-frame `FrameMeta` and runs
+            // `apply_post_filters` over the assembled frame.
+            let blk_px_x = mi_col * MI_SIZE - self.tile_px_x0;
+            let blk_px_y = mi_row * MI_SIZE - self.tile_px_y0;
+            let bx0 = blk_px_x / 8;
+            let by0 = blk_px_y / 8;
+            let bx1 = (blk_px_x + bw * MI_SIZE).div_ceil(8);
+            let by1 = (blk_px_y + bh * MI_SIZE).div_ceil(8);
             for by in by0..by1.min(self.meta.h8) {
                 for bx in bx0..bx1.min(self.meta.w8) {
-                    self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
+                    self.meta
+                        .record_luma(bx, by, luma_tx_w as u8, luma_tx_h as u8, skip);
+                }
+            }
+            self.meta.record_delta_lf(bx0, by0, bx1, by1, self.delta_lf);
+            self.meta.record_delta_lf4(
+                blk_px_x / 4,
+                blk_px_y / 4,
+                (blk_px_x + bw * MI_SIZE).div_ceil(4),
+                (blk_px_y + bh * MI_SIZE).div_ceil(4),
+                self.delta_lf,
+            );
+
+            // Reconstruct chroma transform blocks (4:2:0 / 4:2:2 / 4:4:4).
+            // `HasChroma` (AV1 spec §5.11.5, see [`has_chroma`]): a block that is
+            // the first (even row/col) half of a sub-4-sample chroma-sharing
+            // pair carries no chroma syntax/residual at all — that shared data
+            // was already reconstructed on (or waits for) the pair's second
+            // block. Skipping this whole section for such a block, rather than
+            // reconstructing a redundant, wrongly-positioned partial chroma
+            // block per luma sub-block, is the fix for the "not modelled"
+            // simplification noted elsewhere in this module.
+            if !self.monochrome
+                && has_chroma(
+                    bsize,
+                    mi_row,
+                    mi_col,
+                    self.subsampling_x,
+                    self.subsampling_y,
+                )
+            {
+                let sub_x = self.subsampling_x as usize;
+                let sub_y = self.subsampling_y as usize;
+                // `MaxLumaW`/`MaxLumaH` (AV1 spec §7.11.2.1, set when `plane ==
+                // 0`): the pixel extent of the coded block's just-reconstructed
+                // luma region, used by CFL (§7.11.5) to clamp its luma-sample
+                // lookups at the block's own right/bottom edge rather than the
+                // frame's. dav1d (`recon_tmpl.c`) derives this from
+                // `w4 = imin(bw4, f->bw - t->bx)` — the block's own nominal
+                // extent additionally clamped to the FRAME's mi-grid edge — not
+                // the unclamped nominal extent alone. A block whose partition
+                // legally straddles the frame's right/bottom mi-grid boundary
+                // (allowed: partitioning only requires the block's *origin* to
+                // be inside the grid, not its full nominal extent) previously
+                // computed a `max_luma_w`/`_h` past the actual reconstructed
+                // buffer width/height (`tile_w`/`tile_h`), so the CFL
+                // luma-average read `.get(...)` on an out-of-range index quietly
+                // wrapped into the next row instead of clamping to the block's
+                // last real column/row — corrupting `lumaAvg` and every `L[i][j]`
+                // sample. Traced on `switch_frame.ivf` frame 7, mi=(208,112)
+                // bsize=BLOCK_32X32: `max_luma_w=864` against a `tile_w=856`
+                // buffer (the frame is 852 wide, mi-grid-padded to 856; the SB
+                // partition tree still produced a 32-wide block starting at
+                // mi_col 208, straddling the mi-grid edge by 8px/2mi).
+                // Refinement (spec `MaxLumaW`/`MaxLumaH` = end of the last luma
+                // transform block that *starts* inside the frame; dav1d
+                // `furthest_r`/`furthest_b`): a luma transform straddling the
+                // mi-grid edge is reconstructed in full, so CFL averages over its
+                // samples past the edge (kept in `luma_overhang`) rather than
+                // replicating the last in-frame row/column.
+                let round_up_to_tx = |start: usize, limit: usize, block_end: usize, tx: usize| {
+                    if block_end <= limit {
+                        block_end
+                    } else {
+                        (start + (limit.saturating_sub(start)).div_ceil(tx) * tx).min(block_end)
+                    }
+                };
+                let max_luma_w =
+                    round_up_to_tx(blk_px_x, self.tile_w, blk_px_x + bw * MI_SIZE, luma_tx_w);
+                let max_luma_h =
+                    round_up_to_tx(blk_px_y, self.tile_h, blk_px_y + bh * MI_SIZE, luma_tx_h);
+                // AV1 spec §5.11.37 `get_tx_size(plane, txSz)`: the chroma
+                // transform size is derived from the *whole coded block's* size
+                // (`bsize`), not from the luma transform size directly, via
+                // `Max_Tx_Size_Rect[get_plane_residual_size(MiSize, plane)]` plus
+                // the 64-sample clamp. A previous revision instead bucketed a
+                // per-luma-tx-block `cw`/`ch` (derived from `luma_tx_w`/`_h`) into
+                // the nearest *square* candidate — wrong for any bsize whose
+                // subsampled residual size is itself rectangular (e.g. every
+                // non-square bsize under 4:2:0), and recomputed uselessly once
+                // per luma tx sub-block instead of once per coded block.
+                let c_tx = chroma_tx_size(
+                    bsize,
+                    usize::from(self.subsampling_x),
+                    usize::from(self.subsampling_y),
+                );
+                let cw = av1::TX_WIDTH[c_tx];
+                let ch = av1::TX_HEIGHT[c_tx];
+                // Chroma transform blocks tile the coded block's *chroma-space*
+                // residual extent directly (spec §5.11.34 `residual()`'s
+                // `transform_block` loop, stepping by the single chroma `txSz`
+                // it derived for the whole block) — not the per-luma-tx-block
+                // grid `luma_tx_w`/`_h` step used above, which only coincides
+                // with the chroma step when `cw`/`ch` happen to equal the
+                // subsampled luma tx step (the previous revision's bucketed
+                // square `c_tx` always did; a real rectangular `c_tx` may not).
+                // AV1 spec §5.11.34 `residual()`: `baseXBlock = (MiCol >> subX) *
+                // MI_SIZE` — the mi position is floor-divided by the subsampling
+                // *before* multiplying back up to samples, not the other way
+                // round. For an odd `mi_col`/`mi_row` (always the case for the
+                // chroma-carrying half of a `HasChroma`-shared pair, since the
+                // *other* half sits at the preceding even position) those two
+                // orders disagree — e.g. `mi_col == 1`, `sub_x == 1`:
+                // `(1 >> 1) * 4 == 0` vs the previous `(1 * 4) >> 1 == 2` — and
+                // only the spec's order lands both halves of the pair on the
+                // same shared chroma origin.
+                let base_cpx_x = (mi_col >> sub_x) * MI_SIZE - (self.tile_px_x0 >> sub_x);
+                let base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (self.tile_px_y0 >> sub_y);
+                // `num4x4W * 4` / `num4x4H * 4` (spec `residual()`): the chroma
+                // extent is this block's own `get_plane_residual_size(MiSize,
+                // plane)`, which already accounts for the sub-4x4 floor (e.g.
+                // `Subsampled_Size[BLOCK_4X4][1][1] == BLOCK_4X4`) — no separate
+                // "shared group size" is needed, since only the `HasChroma`
+                // block of a pair reaches this code at all.
+                let plane_sz = {
+                    let sz = get_plane_residual_size(bsize, sub_x, sub_y);
+                    if sz == BLOCK_INVALID {
+                        bsize
+                    } else {
+                        sz
+                    }
+                };
+                let chroma_bw = BLOCK_WIDTH[plane_sz];
+                let chroma_bh = BLOCK_HEIGHT[plane_sz];
+                let (ccy0, ccx0) = (cy0 >> sub_y, cx0 >> sub_x);
+                for ty in (ccy0..((cy0 + 64) >> sub_y).min(chroma_bh)).step_by(ch) {
+                    for tx in (ccx0..((cx0 + 64) >> sub_x).min(chroma_bw)).step_by(cw) {
+                        if (mi_col >> sub_x) * MI_SIZE + tx >= (self.mi_cols * MI_SIZE) >> sub_x
+                            || (mi_row >> sub_y) * MI_SIZE + ty >= (self.mi_rows * MI_SIZE) >> sub_y
+                        {
+                            continue;
+                        }
+                        let cpx_x = base_cpx_x + tx;
+                        let cpx_y = base_cpx_y + ty;
+                        if let Ok(spec) = std::env::var("KINETIX_AV1_DBG_INTRA_CXY") {
+                            if let Some((sx, sy)) = spec.split_once(',') {
+                                if let (Ok(tx_), Ok(ty_)) =
+                                    (sx.trim().parse::<usize>(), sy.trim().parse::<usize>())
+                                {
+                                    if tx_ >= cpx_x
+                                        && tx_ < cpx_x + cw
+                                        && ty_ >= cpx_y
+                                        && ty_ < cpx_y + ch
+                                    {
+                                        eprintln!(
+                                        "INTRACXY fr={} mi=({mi_col},{mi_row}) bsize={bsize} cpx=({cpx_x},{cpx_y}) cw={cw} ch={ch} max_luma=({max_luma_w},{max_luma_h}) uv_mode={uv_mode} cfl_alpha={:?} tile_cw={} tile_ch={} y_stride={}",
+                                        crate::debug_frame_seq::current(),
+                                        cfl_alpha,
+                                        self.tile_cw,
+                                        self.tile_ch,
+                                        self.y_stride,
+                                    );
+                                    }
+                                }
+                            }
+                        }
+                        if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                            continue;
+                        }
+                        // Mark this individual chroma transform sub-block's own
+                        // left/top grid cells as real deblock edges — same
+                        // reasoning as the luma `mark_luma_edges` call above.
+                        // Chroma is stored at the shared luma-grid resolution
+                        // (`FrameMeta`'s doc comment: one grid cell == 4 chroma
+                        // samples == 8 luma samples), matching the `/8`-of-luma
+                        // == `/4`-of-chroma scale the existing `bx0`/`by0`
+                        // computation below already relies on.
+                        self.meta.mark_chroma_edges(
+                            cpx_x / 4,
+                            cpx_y / 4,
+                            (cpx_x + cw).div_ceil(4),
+                            (cpx_y + ch).div_ceil(4),
+                        );
+                        let blk_u = TxBlockCtx {
+                            plane: 1,
+                            tx_size: c_tx,
+                            x4: cpx_x / 4,
+                            y4: cpx_y / 4,
+                            max_x4: self.uv_max_x4,
+                            max_y4: self.uv_max_y4,
+                            // Same fix as the luma case above: the coded block's
+                            // chroma plane-residual size (`chroma_bw`/`chroma_bh`,
+                            // already `Block_Width`/`Height[get_plane_residual_
+                            // size(MiSize, 1)]`), not this transform block's own
+                            // `cw`/`ch`.
+                            block_w: chroma_bw,
+                            block_h: chroma_bh,
+                            intra_dir: uv_mode,
+                            uv_mode,
+                            qindex_positive: !self.lossless,
+                            reduced_tx_set: self.reduced_tx_set,
+                            lossless: self.lossless,
+                            is_inter: false,
+                            coincident_luma_tx_type: av1::DCT_DCT,
+                        };
+                        let blk_v = TxBlockCtx { plane: 2, ..blk_u };
+                        let cfl_u = cfl_alpha.map(|(au, _)| CflParams {
+                            luma: &*y_plane,
+                            luma_stride: self.y_stride,
+                            sub_x: self.subsampling_x,
+                            sub_y: self.subsampling_y,
+                            max_luma_w,
+                            max_luma_h,
+                            luma_w: self.tile_w,
+                            luma_h: self.tile_h,
+                            overhang: &self.luma_overhang,
+                            alpha: au,
+                        });
+                        let cfl_v = cfl_alpha.map(|(_, av)| CflParams {
+                            luma: &*y_plane,
+                            luma_stride: self.y_stride,
+                            sub_x: self.subsampling_x,
+                            sub_y: self.subsampling_y,
+                            max_luma_w,
+                            max_luma_h,
+                            luma_w: self.tile_w,
+                            luma_h: self.tile_h,
+                            overhang: &self.luma_overhang,
+                            alpha: av,
+                        });
+                        let palette_u = (!palette.colors_u.is_empty()).then(|| PaletteBlockInfo {
+                            colors: &palette.colors_u,
+                            color_map: &palette.map_uv,
+                            map_stride: palette.stride_uv,
+                            off_x: tx,
+                            off_y: ty,
+                        });
+                        let palette_v = (!palette.colors_v.is_empty()).then(|| PaletteBlockInfo {
+                            colors: &palette.colors_v,
+                            color_map: &palette.map_uv,
+                            map_stride: palette.stride_uv,
+                            off_x: tx,
+                            off_y: ty,
+                        });
+                        reconstruct_tx_block(
+                            &mut self.dec,
+                            &mut self.coeff_cdfs,
+                            &mut self.coeff_ctxs,
+                            &blk_u,
+                            u_plane,
+                            self.uv_stride,
+                            self.tile_cw,
+                            self.tile_ch,
+                            cpx_x,
+                            cpx_y,
+                            c_tx,
+                            u_qindex_dc,
+                            u_qindex_ac,
+                            uv_mode,
+                            skip,
+                            None,
+                            self.enable_intra_edge_filter,
+                            filter_type_uv,
+                            cfl_u,
+                            angle_delta_uv,
+                            palette_u,
+                            {
+                                let (sr, sc) = bd_index(1, cpx_x, cpx_y);
+                                BlockDecodedCtx {
+                                    grid: &mut bd_u[..],
+                                    sub_r: sr,
+                                    sub_c: sc,
+                                    step_x: cw >> 2,
+                                    step_y: ch >> 2,
+                                    overhang: None,
+                                }
+                            },
+                            self.bit_depth,
+                        )?;
+                        reconstruct_tx_block(
+                            &mut self.dec,
+                            &mut self.coeff_cdfs,
+                            &mut self.coeff_ctxs,
+                            &blk_v,
+                            v_plane,
+                            self.uv_stride,
+                            self.tile_cw,
+                            self.tile_ch,
+                            cpx_x,
+                            cpx_y,
+                            c_tx,
+                            v_qindex_dc,
+                            v_qindex_ac,
+                            uv_mode,
+                            skip,
+                            None,
+                            self.enable_intra_edge_filter,
+                            filter_type_uv,
+                            cfl_v,
+                            angle_delta_uv,
+                            palette_v,
+                            {
+                                let (sr, sc) = bd_index(2, cpx_x, cpx_y);
+                                BlockDecodedCtx {
+                                    grid: &mut bd_v[..],
+                                    sub_r: sr,
+                                    sub_c: sc,
+                                    step_x: cw >> 2,
+                                    step_y: ch >> 2,
+                                    overhang: None,
+                                }
+                            },
+                            self.bit_depth,
+                        )?;
+                    }
+                }
+                // Record chroma tx/skip metadata for the same 8×8-luma grid region.
+                let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
+                let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
+                for by in by0..by1.min(self.meta.h8) {
+                    for bx in bx0..bx1.min(self.meta.w8) {
+                        self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
+                    }
                 }
             }
         }
@@ -1179,65 +1197,79 @@ impl<'a> TileDecodeState<'a> {
         let mut max_cols: i32 = 0;
 
         // scan_row helper: edge is grid row `rr`, walking columns from `bx4`.
-        let scan_row = |stack: &mut Vec<(Mv, i64)>, rr: i32, max_n: i32, step: i32| -> i32 {
-            let first = cell(rr, bx4);
-            let cand_bw4 = (first.w4 as i32).max(1);
-            let mut len = step.max(bw4.min(cand_bw4));
-            if bw4 <= cand_bw4 {
-                let weight = if bw4 == 1 {
-                    2
-                } else {
-                    2.max((2 * max_n).min(first.h4 as i32))
-                };
-                add(stack, first, (len * weight) as i64);
-                return weight >> 1;
-            }
-            let mut x = 0i32;
-            loop {
-                let cb = cell(rr, bx4 + x);
-                add(stack, cb, (len * 2) as i64);
-                x += len;
-                if x >= w4 {
-                    return 1;
+        let scan_row =
+            |stack: &mut Vec<(Mv, i64)>, rr: i32, col0: i32, max_n: i32, step: i32| -> i32 {
+                let first = cell(rr, col0);
+                let cand_bw4 = (first.w4 as i32).max(1);
+                let mut len = step.max(bw4.min(cand_bw4));
+                if bw4 <= cand_bw4 {
+                    let weight = if bw4 == 1 {
+                        2
+                    } else {
+                        2.max((2 * max_n).min(first.h4 as i32))
+                    };
+                    add(stack, first, (len * weight) as i64);
+                    return weight >> 1;
                 }
-                let nb = cell(rr, bx4 + x);
-                len = step.max((nb.w4 as i32).max(1));
-            }
-        };
+                let mut x = 0i32;
+                loop {
+                    let cb = cell(rr, col0 + x);
+                    add(stack, cb, (len * 2) as i64);
+                    x += len;
+                    if x >= w4 {
+                        return 1;
+                    }
+                    let nb = cell(rr, col0 + x);
+                    len = step.max((nb.w4 as i32).max(1));
+                }
+            };
         // scan_col helper: edge is grid column `cc`, walking rows from `by4`.
-        let scan_col = |stack: &mut Vec<(Mv, i64)>, cc: i32, max_n: i32, step: i32| -> i32 {
-            let first = cell(by4, cc);
-            let cand_bh4 = (first.h4 as i32).max(1);
-            let mut len = step.max(bh4.min(cand_bh4));
-            if bh4 <= cand_bh4 {
-                let weight = if bh4 == 1 {
-                    2
-                } else {
-                    2.max((2 * max_n).min(first.w4 as i32))
-                };
-                add(stack, first, (len * weight) as i64);
-                return weight >> 1;
-            }
-            let mut y = 0i32;
-            loop {
-                let cb = cell(by4 + y, cc);
-                add(stack, cb, (len * 2) as i64);
-                y += len;
-                if y >= h4 {
-                    return 1;
+        let scan_col =
+            |stack: &mut Vec<(Mv, i64)>, cc: i32, row0: i32, max_n: i32, step: i32| -> i32 {
+                let first = cell(row0, cc);
+                let cand_bh4 = (first.h4 as i32).max(1);
+                let mut len = step.max(bh4.min(cand_bh4));
+                if bh4 <= cand_bh4 {
+                    let weight = if bh4 == 1 {
+                        2
+                    } else {
+                        2.max((2 * max_n).min(first.w4 as i32))
+                    };
+                    add(stack, first, (len * weight) as i64);
+                    return weight >> 1;
                 }
-                let nb = cell(by4 + y, cc);
-                len = step.max((nb.h4 as i32).max(1));
-            }
-        };
+                let mut y = 0i32;
+                loop {
+                    let cb = cell(row0 + y, cc);
+                    add(stack, cb, (len * 2) as i64);
+                    y += len;
+                    if y >= h4 {
+                        return 1;
+                    }
+                    let nb = cell(row0 + y, cc);
+                    len = step.max((nb.h4 as i32).max(1));
+                }
+            };
 
         if by4 > row_start {
             max_rows = ((by4 - row_start + 1) >> 1).min(2 + (bh4 > 1) as i32);
-            n_rows = scan_row(&mut stack, by4 - 1, max_rows, if bw4 >= 16 { 4 } else { 1 });
+            n_rows = scan_row(
+                &mut stack,
+                by4 - 1,
+                bx4,
+                max_rows,
+                if bw4 >= 16 { 4 } else { 1 },
+            );
         }
         if bx4 > col_start {
             max_cols = ((bx4 - col_start + 1) >> 1).min(2 + (bw4 > 1) as i32);
-            n_cols = scan_col(&mut stack, bx4 - 1, max_cols, if bh4 >= 16 { 4 } else { 1 });
+            n_cols = scan_col(
+                &mut stack,
+                bx4 - 1,
+                by4,
+                max_cols,
+                if bh4 >= 16 { 4 } else { 1 },
+            );
         }
         // top-right point (dav1d gates this on `EDGE_I444_TOP_HAS_RIGHT`; we
         // approximate with "the cell is inside the frame and decoded").
@@ -1261,18 +1293,22 @@ impl<'a> TileDecodeState<'a> {
         for n in 2..=3i32 {
             if n > n_rows_run && n <= max_rows {
                 let rr = (by4 - 2 * n + 1) | 1;
+                // dav1d: secondary row scans start at column `bx4 | 1`.
                 n_rows_run += scan_row(
                     &mut stack,
                     rr,
+                    bx4 | 1,
                     1 + max_rows - n,
                     if bw4 >= 16 { 4 } else { 2 },
                 );
             }
             if n > n_cols_run && n <= max_cols {
                 let cc = (bx4 - 2 * n + 1) | 1;
+                // ... and secondary column scans at row `by4 | 1`.
                 n_cols_run += scan_col(
                     &mut stack,
                     cc,
+                    by4 | 1,
                     1 + max_cols - n,
                     if bh4 >= 16 { 4 } else { 2 },
                 );
@@ -1286,6 +1322,12 @@ impl<'a> TileDecodeState<'a> {
         tail.sort_by_key(|e| std::cmp::Reverse(e.1));
         stack.extend(tail);
 
+        if std::env::var("KINETIX_AV1_DBG_IBC").is_ok() {
+            eprintln!(
+                "DBG IBC stack mi=({mi_col},{mi_row}) bsize={bsize} n_rows={n_rows} n_cols={n_cols} max_rows={max_rows} max_cols={max_cols} stack={:?}",
+                stack.iter().map(|e| (e.0.row, e.0.col, e.1)).collect::<Vec<_>>()
+            );
+        }
         // §6.10.24 intrabc predictor selection.
         let s0 = stack.first().map(|e| e.0).unwrap_or_default();
         let s1 = stack.get(1).map(|e| e.0).unwrap_or_default();
@@ -1389,6 +1431,15 @@ impl<'a> TileDecodeState<'a> {
             }
         }
 
+        if mvscan_dbg {
+            eprintln!(
+                "MVSCAN gm tgmv0=({},{}) gmv0={:?} gm_type={:?}",
+                tgmv[0].row,
+                tgmv[0].col,
+                gmv[0].map(|m| (m.row, m.col)),
+                self.gm_type
+            );
+        }
         // dav1d `add_spatial_candidate`.
         let add = |stack: &mut Vec<([Mv; 2], i64)>,
                    have_newmv: &mut i32,
@@ -2027,12 +2078,18 @@ impl<'a> TileDecodeState<'a> {
         // with the block's global MV (`tgmv[0]`) without changing the count.
         let n_found = stack.len();
         {
+            // dav1d clamps against `rf->iw4`/`ih4` = `iw8 << 1`, i.e. the padded
+            // mi grid (NOT the visible size); a compound entry has both of its
+            // MVs clamped, a single-reference entry only the first.
             let left = -(bx4 + bw4 + 4) * 4 * 8;
             let right = (mi_cols - bx4 + 4) * 4 * 8;
             let top = -(by4 + bh4 + 4) * 4 * 8;
             let bottom = (mi_rows - by4 + 4) * 4 * 8;
             for e in stack.iter_mut() {
                 e.0[0] = Mv::new(e.0[0].row.clamp(top, bottom), e.0[0].col.clamp(left, right));
+                if is_compound {
+                    e.0[1] = Mv::new(e.0[1].row.clamp(top, bottom), e.0[1].col.clamp(left, right));
+                }
             }
         }
         let mut out: Vec<[Mv; 2]> = stack.iter().map(|e| e.0).collect();

@@ -44,13 +44,14 @@ fn split_ivf_frames(ivf: &[u8]) -> Vec<Vec<u8>> {
     frames
 }
 
-/// Decode with ffmpeg's vendored libdav1d, returning whole frames of YUV420p.
+/// Decode with ffmpeg's vendored libdav1d, returning whole frames of `pix_fmt`
+/// (`yuv420p`, or `yuv420p10le` for high-bit-depth streams).
 ///
 /// `-noautoscale` keeps every frame at its native size (streams such as
 /// `switch_frame` change resolution mid-stream), so the result is one raw
 /// buffer that the caller slices frame by frame using each decoded frame's
 /// own dimensions.
-fn reference_frames(ivf: &[u8]) -> Option<Vec<u8>> {
+fn reference_frames(ivf: &[u8], pix_fmt: &str) -> Option<Vec<u8>> {
     use std::io::Write;
     let mut child = Command::new("ffmpeg")
         .args([
@@ -59,7 +60,7 @@ fn reference_frames(ivf: &[u8]) -> Option<Vec<u8>> {
             "-i",
             "pipe:0",
             "-pix_fmt",
-            "yuv420p",
+            pix_fmt,
             "-noautoscale",
             "-f",
             "rawvideo",
@@ -148,11 +149,26 @@ fn main() {
             continue;
         };
         let ivf = std::fs::read(path).expect("read ivf");
-        let Some(refs) = reference_frames(&ivf) else {
+        let payloads = split_ivf_frames(&ivf);
+        let hbd = payloads.first().is_some_and(|first| {
+            let mut probe = Av1Decoder::new();
+            let packet = Packet {
+                pts: Timestamp::NONE,
+                dts: Timestamp::NONE,
+                data: first.clone(),
+                stream_index: 0,
+                is_key_frame: true,
+            };
+            let _ = probe.decode(&packet);
+            probe
+                .sequence_header()
+                .is_some_and(|s| s.color_config.high_bitdepth)
+        });
+        let pix_fmt = if hbd { "yuv420p10le" } else { "yuv420p" };
+        let Some(refs) = reference_frames(&ivf, pix_fmt) else {
             eprintln!("{}: SKIP (libdav1d failed)", path.display());
             continue;
         };
-        let payloads = split_ivf_frames(&ivf);
         if payloads.is_empty() {
             eprintln!("{}: SKIP (no frames)", path.display());
             continue;

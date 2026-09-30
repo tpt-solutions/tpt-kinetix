@@ -1,6 +1,6 @@
 //! Throwaway: decode every frame of an .ivf with Av1Decoder, print status per
 //! frame, no reference comparison. `cargo run -p tpt-kinetix-av1 --example
-//! dbg_decode_all -- <path.ivf>`.
+//! dbg_decode_all -- <path.ivf> [out.yuv]`.
 
 use tpt_kinetix_av1::Av1Decoder;
 use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
@@ -28,6 +28,9 @@ fn main() {
         .expect("usage: dbg_decode_all <ivf>");
     let bytes = std::fs::read(&path).expect("read ivf");
     let packets = split_ivf_frames(&bytes);
+    let mut out = std::env::args()
+        .nth(2)
+        .map(|p| std::fs::File::create(p).expect("create output"));
     let mut dec = Av1Decoder::new();
     for (i, data) in packets.iter().enumerate() {
         let pk = Packet {
@@ -38,7 +41,12 @@ fn main() {
             is_key_frame: i == 0,
         };
         match dec.decode(&pk) {
-            Ok(Some(f)) => eprintln!("[{i}] ok {}x{} ({} bytes)", f.width, f.height, f.data.len()),
+            Ok(Some(f)) => {
+                eprintln!("[{i}] ok {}x{} ({} bytes)", f.width, f.height, f.data.len());
+                if let Some(o) = out.as_mut() {
+                    std::io::Write::write_all(o, &f.data).expect("write frame");
+                }
+            }
             Ok(None) => eprintln!("[{i}] no frame"),
             Err(e) => eprintln!("[{i}] ERROR: {e}"),
         }

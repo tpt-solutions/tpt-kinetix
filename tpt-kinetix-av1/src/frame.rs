@@ -11,6 +11,7 @@
 
 use tpt_kinetix_core::error::KinetixError;
 
+use crate::film_grain::FilmGrainParams;
 use crate::obu::BitReader;
 
 // --- Quantizer lookup tables (AV1 spec §7.11.1) ---------------------------
@@ -298,20 +299,29 @@ pub struct FrameHeader {
     /// `frame_to_show_map_idx` (§5.9.2): set only when `show_existing_frame` —
     /// the DPB slot whose stored frame is displayed with no new reconstruction.
     pub show_existing_idx: Option<u8>,
+    /// Parsed `film_grain_params()` when grain applies to this frame. When
+    /// `film_grain_load_idx` is set the decoder replaces everything but
+    /// `grain_seed` with that slot's stored parameters.
+    pub film_grain: Option<FilmGrainParams>,
+    pub film_grain_load_idx: Option<u8>,
     pub showable_frame: bool,
     pub frame_id: Option<u32>,
     pub width: u32,
     pub height: u32,
     /// `UpscaledWidth` (§5.9.10): equals `width` unless superres is active,
-    /// in which case `width` is the coded (pre-upscale) frame width. No
-    /// upscale filter is implemented yet, so this is currently only used for
-    /// the `allow_intrabc` gate (§5.9.2) and the `render_size()` default.
+    /// in which case `width` is the coded (pre-upscale) frame width.
     pub upscaled_width: u32,
+    /// `SuperresDenom` (§5.9.9): `SUPERRES_NUM` (8) when superres is off;
+    /// 9..=16 when the frame is coded downscaled and upscaled back.
+    pub superres_denom: u32,
     pub render_width: u32,
     pub render_height: u32,
     pub subsampling_x: bool,
     pub subsampling_y: bool,
     pub bit_depth: u8,
+    /// `mono_chrome` (§6.4.2): the sequence's Monochrome flag as of this
+    /// frame — drives 1-plane output (`Gray`/`Gray10le`/`Gray12le`).
+    pub mono_chrome: bool,
     pub use_128x128_superblock: bool,
     pub allow_screen_content_tools: bool,
     pub allow_intrabc: bool,
@@ -530,6 +540,7 @@ impl FrameHeader {
         let width;
         let height;
         let upscaled_width;
+        let superres_denom;
         let render_width;
         let render_height;
         let mut allow_intrabc = false;
@@ -735,7 +746,7 @@ impl FrameHeader {
 
         // --- frame size / render / intrabc OR inter reference signalling ---
         if frame_is_intra {
-            let (w, h, uw, rw, rh) = parse_frame_size(
+            let (w, h, uw, sr_denom, rw, rh) = parse_frame_size(
                 &mut br,
                 seq,
                 frame_size_override_flag,
@@ -746,6 +757,7 @@ impl FrameHeader {
             width = w;
             height = h;
             upscaled_width = uw;
+            superres_denom = sr_denom;
             render_width = rw;
             render_height = rh;
             // §5.9.2: gated on `UpscaledWidth == FrameWidth`, not render size.
@@ -856,15 +868,15 @@ impl FrameHeader {
                     }
                 }
             }
-            let (w, h, uw, rw, rh) = if let Some((fuw, fh, frw, frh)) = found_ref_dims {
+            let (w, h, uw, sr_denom, rw, rh) = if let Some((fuw, fh, frw, frh)) = found_ref_dims {
                 let use_superres = seq.enable_superres && read_flag(&mut br)?;
-                let superres_denom = if use_superres {
+                let sr_denom = if use_superres {
                     read_f8(&mut br, SUPERRES_DENOM_BITS)? as u32 + SUPERRES_DENOM_MIN
                 } else {
                     SUPERRES_NUM
                 };
-                let w = (fuw * SUPERRES_NUM + (superres_denom / 2)) / superres_denom;
-                (w, fh, fuw, frw, frh)
+                let w = (fuw * SUPERRES_NUM + (sr_denom / 2)) / sr_denom;
+                (w, fh, fuw, sr_denom, frw, frh)
             } else {
                 parse_frame_size(
                     &mut br,
@@ -878,6 +890,7 @@ impl FrameHeader {
             width = w;
             height = h;
             upscaled_width = uw;
+            superres_denom = sr_denom;
             render_width = rw;
             render_height = rh;
             if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
@@ -904,6 +917,9 @@ impl FrameHeader {
                 use_ref_frame_mvs = false;
             } else {
                 use_ref_frame_mvs = read_flag(&mut br)?;
+            }
+            if std::env::var("KINETIX_AV1_DBG_FH").is_ok() {
+                eprintln!("DBG FH refmvs oh={order_hint} use_ref_frame_mvs={use_ref_frame_mvs}");
             }
         }
         if std::env::var("KINETIX_AV1_DBG_FH_SEC").is_ok() {
@@ -1108,10 +1124,9 @@ impl FrameHeader {
         }
 
         // --- film_grain_params ---
-        parse_film_grain(
+        let (film_grain, film_grain_load_idx) = parse_film_grain(
             &mut br,
             film_grain_params_present,
-            frame_is_intra,
             show_frame,
             showable_frame,
             frame_type,
@@ -1164,16 +1179,20 @@ impl FrameHeader {
                 show_frame,
                 show_existing_frame,
                 show_existing_idx: None,
+                film_grain,
+                film_grain_load_idx,
                 showable_frame,
                 frame_id: None,
                 width,
                 height,
                 upscaled_width,
+                superres_denom,
                 render_width,
                 render_height,
                 subsampling_x,
                 subsampling_y,
                 bit_depth: seq_bit_depth(seq),
+                mono_chrome,
                 use_128x128_superblock: seq.use_128x128_superblock,
                 allow_screen_content_tools,
                 allow_intrabc,
@@ -1930,92 +1949,101 @@ fn read_global_param(
     Ok(())
 }
 
-/// `film_grain_params()` (§6.8.2).
+/// `film_grain_params()` (§5.9.30). Returns the parsed parameters (`None` when
+/// grain is not applied) and, when `update_grain == 0`, the reference slot
+/// index (`film_grain_params_ref_idx`) whose stored parameters the decoder must
+/// load (keeping this frame's `grain_seed`).
 #[allow(clippy::too_many_arguments)]
 fn parse_film_grain(
     br: &mut BitReader<'_>,
     present: bool,
-    _frame_is_intra: bool,
     show_frame: bool,
     showable_frame: bool,
     frame_type: FrameType,
     mono_chrome: bool,
     subsampling_x: bool,
     subsampling_y: bool,
-) -> Result<(), KinetixError> {
+) -> Result<(Option<FilmGrainParams>, Option<u8>), KinetixError> {
     if !present || (!show_frame && !showable_frame) {
-        return Ok(());
+        return Ok((None, None));
     }
-    let apply_grain = read_flag(br)?;
-    if !apply_grain {
-        return Ok(());
+    if !read_flag(br)? {
+        return Ok((None, None));
     }
-    let _grain_seed = read_f(br, 16)?;
-    if frame_type == FrameType::InterFrame {
-        let _update_grain = read_flag(br)?;
+    let mut p = FilmGrainParams {
+        apply_grain: true,
+        grain_seed: read_f(br, 16)? as u16,
+        ..FilmGrainParams::default()
+    };
+    let update_grain = if frame_type == FrameType::InterFrame {
+        read_flag(br)?
+    } else {
+        true
+    };
+    if !update_grain {
+        let idx = read_f8(br, 3)?;
+        return Ok((Some(p), Some(idx)));
     }
-    let num_y_points = read_f8(br, 4)?;
-    for _ in 0..num_y_points {
-        let _ = read_f8(br, 8)?;
-        let _ = read_f8(br, 8)?;
-    }
-    let chroma_scaling_from_luma = if mono_chrome { false } else { read_flag(br)? };
-    let (num_cb_points, num_cr_points) = if mono_chrome
-        || chroma_scaling_from_luma
-        || (subsampling_x && subsampling_y && num_y_points == 0)
+    let read_points = |br: &mut BitReader<'_>, max: u8| -> Result<Vec<(u8, u8)>, KinetixError> {
+        let n = read_f8(br, 4)?;
+        if n > max {
+            return Err(KinetixError::Parse(
+                "film grain: too many scaling points".into(),
+            ));
+        }
+        (0..n)
+            .map(|_| Ok((read_f8(br, 8)?, read_f8(br, 8)?)))
+            .collect()
+    };
+    p.point_y = read_points(br, 14)?;
+    p.chroma_scaling_from_luma = if mono_chrome { false } else { read_flag(br)? };
+    if !(mono_chrome
+        || p.chroma_scaling_from_luma
+        || (subsampling_x && subsampling_y && p.point_y.is_empty()))
     {
-        (0u32, 0u32)
-    } else {
-        let cb = read_f8(br, 4)? as u32;
-        for _ in 0..cb {
-            let _ = read_f8(br, 8)?;
-            let _ = read_f8(br, 8)?;
-        }
-        let cr = read_f8(br, 4)? as u32;
-        for _ in 0..cr {
-            let _ = read_f8(br, 8)?;
-            let _ = read_f8(br, 8)?;
-        }
-        (cb, cr)
-    };
-    let _grain_scaling_minus_8 = read_f8(br, 2)?;
-    let ar_coeff_lag = read_f8(br, 2)? as u32;
-    let num_pos_luma = 2 * ar_coeff_lag * (ar_coeff_lag + 1);
-    let num_pos_chroma = if num_y_points > 0 {
-        num_pos_luma + 1
-    } else {
-        num_pos_luma
-    };
-    if num_y_points > 0 {
-        for _ in 0..num_pos_luma {
-            let _ = read_f8(br, 8)?;
+        p.point_cb = read_points(br, 10)?;
+        p.point_cr = read_points(br, 10)?;
+    }
+    p.scaling_shift = read_f8(br, 2)? + 8;
+    let lag = read_f8(br, 2)?;
+    p.ar_coeff_lag = lag;
+    let num_pos_luma = 2 * usize::from(lag) * (usize::from(lag) + 1);
+    let num_pos_chroma = num_pos_luma + usize::from(!p.point_y.is_empty());
+    let read_coeffs =
+        |br: &mut BitReader<'_>, n: usize, read: bool| -> Result<Vec<i8>, KinetixError> {
+            if !read {
+                return Ok(vec![0; n]);
+            }
+            (0..n)
+                .map(|_| Ok((i32::from(read_f8(br, 8)?) - 128) as i8))
+                .collect()
+        };
+    p.ar_coeffs_y = read_coeffs(br, num_pos_luma, !p.point_y.is_empty())?;
+    p.ar_coeffs_cb = read_coeffs(
+        br,
+        num_pos_chroma,
+        p.chroma_scaling_from_luma || !p.point_cb.is_empty(),
+    )?;
+    p.ar_coeffs_cr = read_coeffs(
+        br,
+        num_pos_chroma,
+        p.chroma_scaling_from_luma || !p.point_cr.is_empty(),
+    )?;
+    p.ar_coeff_shift = read_f8(br, 2)? + 6;
+    p.grain_scale_shift = read_f8(br, 2)?;
+    for (i, present) in [!p.point_cb.is_empty(), !p.point_cr.is_empty()]
+        .into_iter()
+        .enumerate()
+    {
+        if present {
+            p.uv_mult[i] = i32::from(read_f8(br, 8)?) - 128;
+            p.uv_luma_mult[i] = i32::from(read_f8(br, 8)?) - 128;
+            p.uv_offset[i] = read_f(br, 9)? as i32 - 256;
         }
     }
-    if chroma_scaling_from_luma || num_cb_points > 0 {
-        for _ in 0..num_pos_chroma {
-            let _ = read_f8(br, 8)?;
-        }
-    }
-    if chroma_scaling_from_luma || num_cr_points > 0 {
-        for _ in 0..num_pos_chroma {
-            let _ = read_f8(br, 8)?;
-        }
-    }
-    let _ar_coeff_shift_minus_6 = read_f8(br, 2)?;
-    let _grain_scale_shift = read_f8(br, 2)?;
-    if num_cb_points > 0 {
-        let _ = read_f8(br, 8)?;
-        let _ = read_f8(br, 8)?;
-        let _ = read_f(br, 9)?;
-    }
-    if num_cr_points > 0 {
-        let _ = read_f8(br, 8)?;
-        let _ = read_f8(br, 8)?;
-        let _ = read_f(br, 9)?;
-    }
-    let _overlap_flag = read_flag(br)?;
-    let _clip_to_restricted_range = read_flag(br)?;
-    Ok(())
+    p.overlap_flag = read_flag(br)?;
+    p.clip_to_restricted_range = read_flag(br)?;
+    Ok((Some(p), None))
 }
 
 // --- Subexp decoding for global motion parameters (§6.8.2) -------------------
@@ -2128,7 +2156,7 @@ fn parse_frame_size(
     max_w: u32,
     max_h: u32,
     enable_superres: bool,
-) -> Result<(u32, u32, u32, u32, u32), KinetixError> {
+) -> Result<(u32, u32, u32, u32, u32, u32), KinetixError> {
     // §5.9.9 `frame_size()`: when `frame_size_override_flag == 1`, width/height
     // are plain FIXED-width `f(n)` reads — `n = frame_width_bits_minus_1 + 1`
     // (from the sequence header) — not a variable-length `ns(max_w)` decode.
@@ -2175,7 +2203,7 @@ fn parse_frame_size(
         (upscaled_width, h)
     };
 
-    Ok((w, h, upscaled_width, rw, rh))
+    Ok((w, h, upscaled_width, superres_denom, rw, rh))
 }
 
 // --- Tile info syntax (§5.9.12) --------------------------------------------
@@ -2670,8 +2698,9 @@ mod tests {
         let bits = bw.finish();
         let mut br = crate::obu::BitReader::new(&bits);
         let seq = minimal_seq();
-        let (w, h, uw, rw, rh) =
+        let (w, h, uw, sr_denom, rw, rh) =
             parse_frame_size(&mut br, &seq, false, 128, 96, true).expect("parse_frame_size");
+        assert_eq!(sr_denom, 12);
         assert_eq!(uw, 128);
         assert_eq!(w, 85);
         assert_eq!(h, 96);
@@ -2694,8 +2723,9 @@ mod tests {
         let bits = bw.finish();
         let mut br = crate::obu::BitReader::new(&bits);
         let seq = minimal_seq();
-        let (w, h, uw, rw, rh) =
+        let (w, h, uw, sr_denom, rw, rh) =
             parse_frame_size(&mut br, &seq, false, 128, 96, false).expect("parse_frame_size");
+        assert_eq!(sr_denom, 8);
         assert_eq!(w, 128);
         assert_eq!(uw, 128);
         assert_eq!(h, 96);

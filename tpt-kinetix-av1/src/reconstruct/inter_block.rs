@@ -642,6 +642,13 @@ impl<'a> TileDecodeState<'a> {
             // keyframe path.
             let (colors_y, colors_u, colors_v) =
                 self.read_palette_mode_info(mi_row, mi_col, bsize, y_mode, uv_mode, has_chroma);
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 post-palette y={} rng={}",
+                    colors_y.len(),
+                    self.dec.raw_state().0
+                );
+            }
             // `filter_intra_mode_info()` (AV1 spec §5.11.24) is also read for
             // an intra block coded inside an inter frame (spec
             // `intra_block_mode_info()` calls it right after the mode reads,
@@ -658,6 +665,12 @@ impl<'a> TileDecodeState<'a> {
             } else {
                 None
             };
+            if dbg_b0 {
+                eprintln!(
+                    "DBG b0 post-filterintra {filter_intra_mode:?} rng={}",
+                    self.dec.raw_state().0
+                );
+            }
             // `palette_tokens()` (AV1 spec §5.11.49), same position as the
             // keyframe path.
             let (map_y, stride_y) =
@@ -1027,7 +1040,7 @@ impl<'a> TileDecodeState<'a> {
                 }
                 if !near_path {
                     mode = ZEROMV;
-                    new_mf = 1;
+                    new_mf = u8::from(bw.min(bh) >= 2); // dav1d: GLOBALMV flag only for blocks >= 8x8
                 } else {
                     // `ref_mv` S(): 1 => NEARMV (+drl), 0 => NEARESTMV.
                     let rm = self
@@ -1101,6 +1114,16 @@ impl<'a> TileDecodeState<'a> {
                         allow_hp,
                         force_integer_mv,
                     )?;
+                    if dbg_b0 {
+                        eprintln!(
+                            "DBG b0 newmv base=({},{}) diff=({},{}) hp={allow_hp} intmv={force_integer_mv} rng={}",
+                            base_mv.row,
+                            base_mv.col,
+                            diff.row,
+                            diff.col,
+                            self.dec.raw_state().0
+                        );
+                    }
                     Mv::new(base_mv.row + diff.row, base_mv.col + diff.col)
                 }
                 _ => {
@@ -1660,14 +1683,17 @@ impl<'a> TileDecodeState<'a> {
         // The previous per-leaf-only scheme happened to match dav1d on the
         // 128x96 clip (coinciding mvs) and diverged on 96x64's mixed
         // intra/inter 8x4 splits.
-        let cpx_x0 = px_x0 / 2;
-        let cpx_y0 = px_y0 / 2;
+        let cpx_x0 = px_x0 >> self.subsampling_x as u32;
+        let cpx_y0 = px_y0 >> self.subsampling_y as u32;
         let cbw_px = bw_px >> self.subsampling_x as u32;
         let cbh_px = bh_px >> self.subsampling_y as u32;
         let is_420 = self.subsampling_x && self.subsampling_y;
         // dav1d `has_chroma`: only the odd-parity half of a sub-8x8 pair (or
-        // the bottom-right 4x4 of a quad) owns the parent 8x8's chroma at all.
-        let has_chroma = (bw > 1 || (mi_col & 1) == 1) && (bh > 1 || (mi_row & 1) == 1);
+        // the bottom-right 4x4 of a quad) owns the parent 8x8's chroma — at
+        // 4:2:0. General form (spec §7.3.1): `bw4 > SubX || MiCol odd`; with
+        // subsampling 0 every block owns chroma.
+        let has_chroma = (bw > self.subsampling_x as usize || (mi_col & 1) == 1)
+            && (bh > self.subsampling_y as usize || (mi_row & 1) == 1);
         let sub8x8_leaf = is_420 && (bw == 1 || bh == 1) && has_chroma;
         // dav1d `recon_tmpl.c`: `if (!has_chroma) goto skip_inter_chroma_pred;`
         // runs BEFORE the `is_sub8x8` branch — a `has_chroma == false` leaf
@@ -2329,6 +2355,14 @@ impl<'a> TileDecodeState<'a> {
         self.set_uv_ctx_dc(mi_row, mi_col, bsize, bw, bh);
         self.mark_inter_block_decoded(mi_row, mi_col, bsize, bw, bh);
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            // dav1d clears `pal_sz` for every inter block; stale palette
+            // sizes would corrupt the next block's `has_palette_y` context.
+            if let Some(s) = self.palette_y_colors_left.get_mut(r) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_left.get_mut(r) {
+                s.clear();
+            }
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
             }
@@ -2364,6 +2398,12 @@ impl<'a> TileDecodeState<'a> {
             }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            if let Some(s) = self.palette_y_colors_above.get_mut(c) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_above.get_mut(c) {
+                s.clear();
+            }
             if let Some(s) = self.is_inter_above.get_mut(c) {
                 *s = 1;
             }
@@ -2638,8 +2678,14 @@ impl<'a> TileDecodeState<'a> {
             mi_col,
             None,
         )?;
-        let (cpx_x0, cpx_y0) = (px_x0 / 2, px_y0 / 2);
-        let (cbw, cbh) = ((bw_px / 2).max(4), (bh_px / 2).max(4));
+        let (cpx_x0, cpx_y0) = (
+            px_x0 >> self.subsampling_x as u32,
+            px_y0 >> self.subsampling_y as u32,
+        );
+        let (cbw, cbh) = (
+            (bw_px >> self.subsampling_x as u32).max(4),
+            (bh_px >> self.subsampling_y as u32).max(4),
+        );
         self.inter_predict_plane(
             1,
             cpx_x0,
@@ -2760,6 +2806,14 @@ impl<'a> TileDecodeState<'a> {
         self.set_uv_ctx_dc(mi_row, mi_col, bsize, bw, bh);
         self.mark_inter_block_decoded(mi_row, mi_col, bsize, bw, bh);
         for r in mi_row..(mi_row + bh).min(self.mi_rows) {
+            // dav1d clears `pal_sz` for every inter block; stale palette
+            // sizes would corrupt the next block's `has_palette_y` context.
+            if let Some(s) = self.palette_y_colors_left.get_mut(r) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_left.get_mut(r) {
+                s.clear();
+            }
             if let Some(s) = self.is_inter_left.get_mut(r) {
                 *s = 1;
             }
@@ -2791,6 +2845,12 @@ impl<'a> TileDecodeState<'a> {
             }
         }
         for c in mi_col..(mi_col + bw).min(self.mi_cols) {
+            if let Some(s) = self.palette_y_colors_above.get_mut(c) {
+                s.clear();
+            }
+            if let Some(s) = self.palette_u_colors_above.get_mut(c) {
+                s.clear();
+            }
             if let Some(s) = self.is_inter_above.get_mut(c) {
                 *s = 1;
             }
@@ -3859,112 +3919,153 @@ impl<'a> TileDecodeState<'a> {
         // 1-D vs 2-D transform class) from the *co-located luma leaf*, so a
         // wrong type here desyncs the chroma coefficient read.
         let mut luma_leaf_types: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
-        for &(leaf_mi_col, leaf_mi_row, leaf_tx) in leaves {
-            let leaf_tx_w = av1::TX_WIDTH[leaf_tx];
-            let leaf_tx_h = av1::TX_HEIGHT[leaf_tx];
-            let px_x = leaf_mi_col * MI_SIZE - self.tile_px_x0;
-            let px_y = leaf_mi_row * MI_SIZE - self.tile_px_y0;
-            // A skipped inter block filters only its own block boundary: the
-            // interior transform boundaries of a 128-wide/tall block (coded as
-            // several 64x64 transforms) are not edges (spec 7.14.2
-            // `applyFilter = isBlockEdge || !skip`; dav1d `mask_edges_inter`).
-            let (edge_l, edge_t) = if skip {
-                (leaf_mi_col == mi_col, leaf_mi_row == mi_row)
+
+        // Chroma-residual geometry, computed up front because the per-chunk
+        // loop below interleaves chroma coefficient reads between the luma
+        // leaves. (Shared `sub_x`/`sub_y` with the luma loop above.)
+        let sub_x = self.subsampling_x as usize;
+        let sub_y = self.subsampling_y as usize;
+        let c_tx = chroma_tx_size(bsize, sub_x, sub_y);
+        let cw = av1::TX_WIDTH[c_tx];
+        let ch = av1::TX_HEIGHT[c_tx];
+        let plane_sz = {
+            let sz = get_plane_residual_size(bsize, sub_x, sub_y);
+            if sz == BLOCK_INVALID {
+                bsize
             } else {
-                (true, true)
-            };
-            self.meta.mark_luma_edges_sel(
-                px_x / 8,
-                px_y / 8,
-                (px_x + leaf_tx_w).div_ceil(8),
-                (px_y + leaf_tx_h).div_ceil(8),
-                edge_l,
-                edge_t,
-            );
-            self.meta.mark_luma_edges4_sel(
-                px_x / 4,
-                px_y / 4,
-                (px_x + leaf_tx_w).div_ceil(4),
-                (px_y + leaf_tx_h).div_ceil(4),
-                edge_l,
-                edge_t,
-            );
-            self.meta.record_luma4(
-                px_x / 4,
-                px_y / 4,
-                (px_x + leaf_tx_w).div_ceil(4),
-                (px_y + leaf_tx_h).div_ceil(4),
-                leaf_tx_w as u8,
-                leaf_tx_h as u8,
-            );
-            let mut residual = vec![0i32; leaf_tx_w * leaf_tx_h];
-            let blk = TxBlockCtx {
-                plane: 0,
-                tx_size: leaf_tx,
-                x4: px_x / 4,
-                y4: px_y / 4,
-                max_x4: self.luma_max_x4,
-                max_y4: self.luma_max_y4,
-                // See the matching fix/comment in `intra_block.rs`: the
-                // *coded block's* plane size, not this transform block's.
-                block_w: bw * MI_SIZE,
-                block_h: bh * MI_SIZE,
-                intra_dir: 0,
-                uv_mode: 0,
-                qindex_positive: !self.lossless,
-                reduced_tx_set: self.reduced_tx_set,
-                lossless: self.lossless,
-                is_inter: true,
-                // Irrelevant for plane 0.
-                coincident_luma_tx_type: av1::DCT_DCT,
-            };
-            if skip {
-                // A skipped block reads no coeffs but still must reset the
-                // neighbour context (see `clear_coeff_context`).
-                clear_coeff_context(&mut self.coeff_ctxs, &blk, leaf_tx_w / 4, leaf_tx_h / 4);
-            } else {
-                let mut coeffs = read_coeffs(
-                    &mut self.dec,
-                    &mut self.coeff_cdfs,
-                    &mut self.coeff_ctxs,
-                    &blk,
-                )?;
-                // `KINETIX_AV1_NO_RESID` decodes the coefficients exactly as
-                // normal (so the entropy decoder stays in sync and this run
-                // still validates it) but then discards them, leaving
-                // prediction only. Paired with the same switch in dav1d it is
-                // a clean discriminator between "motion compensation /
-                // reference selection is wrong" and "the coefficient path is
-                // wrong": if the two prediction-only planes match, every
-                // divergence lives in the coefficient path; if they differ,
-                // the eob work is a red herring. Zeroing `quant` (rather than
-                // skipping the dequant/inverse-transform entirely) keeps the
-                // reconstructed block's shape and code path identical to a
-                // normal run apart from the sample values.
-                if std::env::var("KINETIX_AV1_NO_RESID").is_ok() {
-                    coeffs.quant.iter_mut().for_each(|q| *q = 0);
-                }
-                if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_col == 4 && mi_row == 0 {
-                    let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
-                    let dequant_dbg = dequantize_coeffs(
-                        &coeffs.quant,
-                        leaf_tx,
-                        qindex_dc,
-                        qindex_ac,
-                        self.bit_depth,
+                sz
+            }
+        };
+        let chroma_bw = BLOCK_WIDTH[plane_sz];
+        let chroma_bh = BLOCK_HEIGHT[plane_sz];
+        let base_cpx_x = (mi_col >> sub_x) * MI_SIZE - (self.tile_px_x0 >> sub_x);
+        let base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (self.tile_px_y0 >> sub_y);
+        let has_residual = !skip;
+        // §7.3.1 has_chroma (4:2:0): a block owns chroma only if its width
+        // exceeds one chroma column-pair (bw > 1 mi) or it sits at an odd
+        // mi_col, and likewise for height/mi_row. Blocks failing this (e.g.
+        // an 8x4 leaf at an even mi_row) have NO chroma — dav1d's
+        // read_coef_blocks skips the chroma coefficient loop entirely
+        // (`if (!has_chroma) continue;`), so reading our uv coefficients
+        // here consumed extra bits and desynced the tile.
+        // Monochrome frames (§6.4.2): NO block has chroma syntax — an
+        // odd/odd 4×4 inter leaf still read uv coefficients here otherwise,
+        // desyncing every inter frame (dav1d gates the whole chroma half of
+        // read_coef_blocks on `f->cur.p.layout != I400`).
+        let has_chroma = !self.monochrome
+            && (bw > self.subsampling_x as usize || (mi_col & 1) == 1)
+            && (bh > self.subsampling_y as usize || (mi_row & 1) == 1);
+        // Computed before the `&mut self.{u,v}_plane` reborrows in the chunk
+        // loop below — `qindex_for_plane` takes `&self`, which would conflict
+        // with those live disjoint-field mutable borrows if called any later.
+        let (u_qindex_dc, u_qindex_ac) = self.qindex_for_plane(1);
+        let (v_qindex_dc, v_qindex_ac) = self.qindex_for_plane(2);
+        // Residual reads are per 64×64 chunk (spec §7.12.3 / dav1d
+        // `read_coef_blocks`): each chunk reads its luma transform leaves
+        // first, then that chunk's own chroma transform blocks (U then V).
+        // Reading all luma leaves before any chroma (the previous ordering)
+        // drew the chroma `all_zero`/eob symbols with a stale rng and
+        // desynced the tile on the first inter block larger than 64×64 with
+        // coefficients (libaom overlay frames are exactly that).
+        for chunk_y in 0..bh.div_ceil(16) {
+            for chunk_x in 0..bw.div_ceil(16) {
+                for &(leaf_mi_col, leaf_mi_row, leaf_tx) in leaves.iter() {
+                    if (leaf_mi_col - mi_col) / 16 != chunk_x
+                        || (leaf_mi_row - mi_row) / 16 != chunk_y
+                    {
+                        continue;
+                    }
+                    let leaf_tx_w = av1::TX_WIDTH[leaf_tx];
+                    let leaf_tx_h = av1::TX_HEIGHT[leaf_tx];
+                    let px_x = leaf_mi_col * MI_SIZE - self.tile_px_x0;
+                    let px_y = leaf_mi_row * MI_SIZE - self.tile_px_y0;
+                    // A skipped inter block filters only its own block boundary: the
+                    // interior transform boundaries of a 128-wide/tall block (coded as
+                    // several 64x64 transforms) are not edges (spec 7.14.2
+                    // `applyFilter = isBlockEdge || !skip`; dav1d `mask_edges_inter`).
+                    let (edge_l, edge_t) = if skip {
+                        (leaf_mi_col == mi_col, leaf_mi_row == mi_row)
+                    } else {
+                        (true, true)
+                    };
+                    self.meta.mark_luma_edges_sel(
+                        px_x / 8,
+                        px_y / 8,
+                        (px_x + leaf_tx_w).div_ceil(8),
+                        (px_y + leaf_tx_h).div_ceil(8),
+                        edge_l,
+                        edge_t,
                     );
-                    eprintln!(
-                        "KINCFS tx={leaf_tx} txtp={} eob={} quant[..16]={:?} dequant[..16]={:?}",
-                        coeffs.tx_type,
-                        coeffs.eob,
-                        &coeffs.quant[..16.min(coeffs.quant.len())],
-                        &dequant_dbg[..16.min(dequant_dbg.len())],
+                    self.meta.mark_luma_edges4_sel(
+                        px_x / 4,
+                        px_y / 4,
+                        (px_x + leaf_tx_w).div_ceil(4),
+                        (px_y + leaf_tx_h).div_ceil(4),
+                        edge_l,
+                        edge_t,
                     );
-                }
-                if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
-                    let mut it = t.split(',');
-                    if let (Some(c), Some(r)) = (it.next(), it.next()) {
-                        if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
+                    self.meta.record_luma4(
+                        px_x / 4,
+                        px_y / 4,
+                        (px_x + leaf_tx_w).div_ceil(4),
+                        (px_y + leaf_tx_h).div_ceil(4),
+                        leaf_tx_w as u8,
+                        leaf_tx_h as u8,
+                    );
+                    let mut residual = vec![0i32; leaf_tx_w * leaf_tx_h];
+                    let blk = TxBlockCtx {
+                        plane: 0,
+                        tx_size: leaf_tx,
+                        x4: px_x / 4,
+                        y4: px_y / 4,
+                        max_x4: self.luma_max_x4,
+                        max_y4: self.luma_max_y4,
+                        // See the matching fix/comment in `intra_block.rs`: the
+                        // *coded block's* plane size, not this transform block's.
+                        block_w: bw * MI_SIZE,
+                        block_h: bh * MI_SIZE,
+                        intra_dir: 0,
+                        uv_mode: 0,
+                        qindex_positive: !self.lossless,
+                        reduced_tx_set: self.reduced_tx_set,
+                        lossless: self.lossless,
+                        is_inter: true,
+                        // Irrelevant for plane 0.
+                        coincident_luma_tx_type: av1::DCT_DCT,
+                    };
+                    if skip {
+                        // A skipped block reads no coeffs but still must reset the
+                        // neighbour context (see `clear_coeff_context`).
+                        clear_coeff_context(
+                            &mut self.coeff_ctxs,
+                            &blk,
+                            leaf_tx_w / 4,
+                            leaf_tx_h / 4,
+                        );
+                    } else {
+                        let mut coeffs = read_coeffs(
+                            &mut self.dec,
+                            &mut self.coeff_cdfs,
+                            &mut self.coeff_ctxs,
+                            &blk,
+                        )?;
+                        // `KINETIX_AV1_NO_RESID` decodes the coefficients exactly as
+                        // normal (so the entropy decoder stays in sync and this run
+                        // still validates it) but then discards them, leaving
+                        // prediction only. Paired with the same switch in dav1d it is
+                        // a clean discriminator between "motion compensation /
+                        // reference selection is wrong" and "the coefficient path is
+                        // wrong": if the two prediction-only planes match, every
+                        // divergence lives in the coefficient path; if they differ,
+                        // the eob work is a red herring. Zeroing `quant` (rather than
+                        // skipping the dequant/inverse-transform entirely) keeps the
+                        // reconstructed block's shape and code path identical to a
+                        // normal run apart from the sample values.
+                        if std::env::var("KINETIX_AV1_NO_RESID").is_ok() {
+                            coeffs.quant.iter_mut().for_each(|q| *q = 0);
+                        }
+                        if std::env::var("KINETIX_AV1_CFSUM").is_ok() && mi_col == 4 && mi_row == 0
+                        {
                             let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
                             let dequant_dbg = dequantize_coeffs(
                                 &coeffs.quant,
@@ -3973,226 +4074,486 @@ impl<'a> TileDecodeState<'a> {
                                 qindex_ac,
                                 self.bit_depth,
                             );
-                            let nz: Vec<(usize, i32)> = dequant_dbg
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, v)| **v != 0)
-                                .map(|(i, v)| (i, *v))
-                                .take(8)
-                                .collect();
                             eprintln!(
+                        "KINCFS tx={leaf_tx} txtp={} eob={} quant[..16]={:?} dequant[..16]={:?}",
+                        coeffs.tx_type,
+                        coeffs.eob,
+                        &coeffs.quant[..16.min(coeffs.quant.len())],
+                        &dequant_dbg[..16.min(dequant_dbg.len())],
+                    );
+                        }
+                        if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
+                            let mut it = t.split(',');
+                            if let (Some(c), Some(r)) = (it.next(), it.next()) {
+                                if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string()
+                                {
+                                    let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
+                                    let dequant_dbg = dequantize_coeffs(
+                                        &coeffs.quant,
+                                        leaf_tx,
+                                        qindex_dc,
+                                        qindex_ac,
+                                        self.bit_depth,
+                                    );
+                                    let nz: Vec<(usize, i32)> = dequant_dbg
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, v)| **v != 0)
+                                        .map(|(i, v)| (i, *v))
+                                        .take(8)
+                                        .collect();
+                                    eprintln!(
                                 "KCFT mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} q={} dc={} nz={nz:?}",
                                 coeffs.tx_type,
                                 coeffs.eob,
                                 self.qindex_for_plane(0).0,
                                 qindex_dc,
                             );
+                                }
+                            }
                         }
-                    }
-                }
-                if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
-                    eprintln!(
+                        if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                            eprintln!(
                         "DBG y-cf-blk mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} rng={}",
                         coeffs.tx_type,
                         coeffs.eob,
                         self.dec.raw_state().0
                     );
-                }
-                if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-                    && mi_col == 4
-                    && mi_row == 18
-                    && leaf_mi_col == 4
-                    && leaf_mi_row == 18
-                {
-                    let (qdc, qac) = self.qindex_for_plane(0);
-                    eprintln!(
+                        }
+                        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                            && mi_col == 4
+                            && mi_row == 18
+                            && leaf_mi_col == 4
+                            && leaf_mi_row == 18
+                        {
+                            let (qdc, qac) = self.qindex_for_plane(0);
+                            eprintln!(
                         "COEFF mi=(4,18) tx={leaf_tx} txtp={} eob={} qdc={qdc} qac={qac} rng={}",
                         coeffs.tx_type,
                         coeffs.eob,
                         self.dec.raw_state().0
                     );
-                    for (i, &q) in coeffs.quant.iter().enumerate().take(coeffs.eob) {
-                        if q != 0 {
-                            eprintln!("  quant[{i}]={q}");
+                            for (i, &q) in coeffs.quant.iter().enumerate().take(coeffs.eob) {
+                                if q != 0 {
+                                    eprintln!("  quant[{i}]={q}");
+                                }
+                            }
                         }
-                    }
-                }
-                if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-                    && std::env::var("KINETIX_AV1_DBG_PRED_COEFF").is_ok()
-                    && {
-                        let (tx0, ty0, reach) = dbg_pred_target();
-                        (px_x as i64) < tx0 + reach
-                            && (px_x as i64) + leaf_tx_w as i64 > tx0 - reach
-                            && (px_y as i64) < ty0 + reach
-                            && (px_y as i64) + leaf_tx_h as i64 > ty0 - reach
-                    }
-                {
-                    let (qdc, qac) = self.qindex_for_plane(0);
-                    eprintln!(
+                        if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                            && std::env::var("KINETIX_AV1_DBG_PRED_COEFF").is_ok()
+                            && {
+                                let (tx0, ty0, reach) = dbg_pred_target();
+                                (px_x as i64) < tx0 + reach
+                                    && (px_x as i64) + leaf_tx_w as i64 > tx0 - reach
+                                    && (px_y as i64) < ty0 + reach
+                                    && (px_y as i64) + leaf_tx_h as i64 > ty0 - reach
+                            }
+                        {
+                            let (qdc, qac) = self.qindex_for_plane(0);
+                            eprintln!(
                         "COEFF mi=({mi_col},{mi_row}) tx={leaf_tx} txtp={} eob={} qdc={qdc} qac={qac}",
                         coeffs.tx_type, coeffs.eob,
                     );
-                    for (i, &q) in coeffs.quant.iter().enumerate().take(coeffs.eob) {
-                        if q != 0 {
-                            eprintln!("  quant[{i}]={q}");
+                            for (i, &q) in coeffs.quant.iter().enumerate().take(coeffs.eob) {
+                                if q != 0 {
+                                    eprintln!("  quant[{i}]={q}");
+                                }
+                            }
                         }
-                    }
-                }
-                // Coeffs are always *read* (entropy sync). The residual is
-                // applied at every tx size: `inverse_transform` handles the
-                // adjusted-size (≤32-side) dequant stride and the 32/64-family
-                // shifts generically.
-                if coeffs.eob > 0 {
-                    let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
-                    let dequant = dequantize_coeffs(
-                        &coeffs.quant,
-                        leaf_tx,
-                        qindex_dc,
-                        qindex_ac,
-                        self.bit_depth,
-                    );
-                    if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-                        && mi_col == 4
-                        && mi_row == 18
-                        && leaf_mi_col == 4
-                        && leaf_mi_row == 18
-                    {
-                        eprintln!("  dequant[..16]={:?}", &dequant[..16.min(dequant.len())]);
-                        eprintln!(
-                            "  residual BEFORE itx (all zeros expected): {:?}",
-                            &residual[..16.min(residual.len())]
-                        );
-                    }
-                    inverse_transform(
-                        &dequant,
-                        coeffs.tx_type,
-                        leaf_tx,
-                        self.lossless,
-                        self.bit_depth,
-                        &mut residual,
-                    );
-                    // Dump the post-ITX residual for leaves overlapping the
-                    // `KINETIX_AV1_DBG_PRED_X/Y` target: prediction can be
-                    // pixel-exact and the output still wrong, which localises
-                    // the fault to dequant/ITX/residual-add rather than MC.
-                    if std::env::var("KINETIX_AV1_DBG_PRED_RESID").is_ok() {
-                        let (tx0, ty0, reach) = dbg_pred_target();
-                        if (px_x as i64) < tx0 + reach
-                            && (px_x as i64) + leaf_tx_w as i64 > tx0 - reach
-                            && (px_y as i64) < ty0 + reach
-                            && (px_y as i64) + leaf_tx_h as i64 > ty0 - reach
-                        {
-                            eprintln!(
+                        // Coeffs are always *read* (entropy sync). The residual is
+                        // applied at every tx size: `inverse_transform` handles the
+                        // adjusted-size (≤32-side) dequant stride and the 32/64-family
+                        // shifts generically.
+                        if coeffs.eob > 0 {
+                            let (qindex_dc, qindex_ac) = self.qindex_for_plane(0);
+                            let dequant = dequantize_coeffs(
+                                &coeffs.quant,
+                                leaf_tx,
+                                qindex_dc,
+                                qindex_ac,
+                                self.bit_depth,
+                            );
+                            if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                                && mi_col == 4
+                                && mi_row == 18
+                                && leaf_mi_col == 4
+                                && leaf_mi_row == 18
+                            {
+                                eprintln!(
+                                    "  dequant[..16]={:?}",
+                                    &dequant[..16.min(dequant.len())]
+                                );
+                                eprintln!(
+                                    "  residual BEFORE itx (all zeros expected): {:?}",
+                                    &residual[..16.min(residual.len())]
+                                );
+                            }
+                            inverse_transform(
+                                &dequant,
+                                coeffs.tx_type,
+                                leaf_tx,
+                                self.lossless,
+                                self.bit_depth,
+                                &mut residual,
+                            );
+                            // Dump the post-ITX residual for leaves overlapping the
+                            // `KINETIX_AV1_DBG_PRED_X/Y` target: prediction can be
+                            // pixel-exact and the output still wrong, which localises
+                            // the fault to dequant/ITX/residual-add rather than MC.
+                            if std::env::var("KINETIX_AV1_DBG_PRED_RESID").is_ok() {
+                                let (tx0, ty0, reach) = dbg_pred_target();
+                                if (px_x as i64) < tx0 + reach
+                                    && (px_x as i64) + leaf_tx_w as i64 > tx0 - reach
+                                    && (px_y as i64) < ty0 + reach
+                                    && (px_y as i64) + leaf_tx_h as i64 > ty0 - reach
+                                {
+                                    eprintln!(
                                 "RESID mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tx={leaf_tx}x{leaf_tx_h} txtp={} eob={}",
                                 coeffs.tx_type, coeffs.eob,
                             );
-                            for r in 0..leaf_tx_h.min(8) {
-                                eprintln!(
-                                    "  r{r}: {:?}",
-                                    &residual[r * leaf_tx_w..(r + 1) * leaf_tx_w]
-                                );
+                                    for r in 0..leaf_tx_h.min(8) {
+                                        eprintln!(
+                                            "  r{r}: {:?}",
+                                            &residual[r * leaf_tx_w..(r + 1) * leaf_tx_w]
+                                        );
+                                    }
+                                }
                             }
-                        }
-                    }
-                    // Flag a dequantized coefficient large enough that the
-                    // inverse transform's fixed `col_shift = 4` leaves a
-                    // residual big enough to saturate an 8-bit sample. A
-                    // correct decode at any qindex stays far below this, so a
-                    // hit means the *coefficient* is wrong (a lost/desynced
-                    // entropy read), not that the transform overshot.
-                    if std::env::var("KINETIX_AV1_DBG_BIGCOEF").is_ok() {
-                        let peak = dequant.iter().fold(0i32, |a, &b| a.max(b.abs()));
-                        if peak > (1 << 13) {
-                            eprintln!(
+                            // Flag a dequantized coefficient large enough that the
+                            // inverse transform's fixed `col_shift = 4` leaves a
+                            // residual big enough to saturate an 8-bit sample. A
+                            // correct decode at any qindex stays far below this, so a
+                            // hit means the *coefficient* is wrong (a lost/desynced
+                            // entropy read), not that the transform overshot.
+                            if std::env::var("KINETIX_AV1_DBG_BIGCOEF").is_ok() {
+                                let peak = dequant.iter().fold(0i32, |a, &b| a.max(b.abs()));
+                                if peak > (1 << 13) {
+                                    eprintln!(
                                 "BIGCOEF mi=({mi_col},{mi_row}) px=({px_x},{px_y}) tx={leaf_tx} txtp={} eob={} peak_dq={peak} qdc={qindex_dc} qac={qindex_ac}",
                                 coeffs.tx_type, coeffs.eob,
                             );
+                                }
+                            }
+                            if std::env::var("KINETIX_AV1_DBG_ITX").is_ok()
+                                && (leaf_tx == 12 || leaf_tx == 4)
+                            {
+                                eprintln!(
+                                    "KIN ITX64x32 eob={} txtp={} dequant_row0: {:?}",
+                                    coeffs.eob,
+                                    coeffs.tx_type,
+                                    &dequant[..32.min(dequant.len())]
+                                );
+                                let stride = 64;
+                                let rows = if leaf_tx == 4 { 64 } else { 32 };
+                                let rowsums: Vec<i32> = (0..rows)
+                                    .map(|y| residual[y * stride..(y + 1) * stride].iter().sum())
+                                    .collect();
+                                eprintln!("KIN RESID rowsums: {rowsums:?}");
+                            }
+                            if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
+                                && mi_col == 4
+                                && mi_row == 18
+                                && leaf_mi_col == 4
+                                && leaf_mi_row == 18
+                            {
+                                eprintln!("  residual AFTER itx (row-major 16x8):");
+                                for row in 0..leaf_tx_h {
+                                    eprintln!(
+                                        "    row {row}: {:?}",
+                                        &residual[row * leaf_tx_w..(row + 1) * leaf_tx_w]
+                                    );
+                                }
+                            }
+                        }
+                        // Session cont'd 30: this MUST be pushed for every leaf this
+                        // block reads, not just ones with `eob > 0` — a dav1d oracle
+                        // trace (see `todo-av1.md`'s cont'd 30 entry) proved that for
+                        // the long-standing t2.ivf chroma mismatch, the real
+                        // co-located luma leaf dav1d's `txtp_map` read resolves to is
+                        // THIS block's own FIRST (all-zero/`eob=-1`) leaf, at the
+                        // same mi_row, a few mi_cols to the left of the actual
+                        // nonzero leaf — not a sibling block's row at all, as five
+                        // prior sessions (cont'd 25-29) assumed. dav1d's own
+                        // `read_coef_tree` writes `txtp_map` unconditionally after
+                        // *every* leaf's `decode_coefs` call, skip or not (an
+                        // all-zero leaf's `txtp` defaults to `DCT_DCT`, same as this
+                        // codebase's `coeffs.tx_type` for that case) — gating this
+                        // push on `eob > 0` silently dropped exactly those leaves
+                        // from the local scan, forcing a lookup miss that fell
+                        // through to `own_luma_tx_type` (`.first()` of the
+                        // *remaining*, eob>0-only leaves) instead of the correct
+                        // answer already sitting in this same block's own list.
+                        luma_leaf_types.push((px_x, px_y, leaf_tx_w, leaf_tx_h, coeffs.tx_type));
+                    }
+                    for dy in 0..leaf_tx_h {
+                        let sy = px_y + dy;
+                        if sy >= self.tile_h {
+                            break;
+                        }
+                        for dx in 0..leaf_tx_w {
+                            let sx = px_x + dx;
+                            if sx >= self.tile_w {
+                                break;
+                            }
+                            if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
+                                *slot = ((*slot as i32 + residual[dy * leaf_tx_w + dx])
+                                    .clamp(0, pix_max))
+                                    as Px;
+                            }
                         }
                     }
-                    if std::env::var("KINETIX_AV1_DBG_ITX").is_ok()
-                        && (leaf_tx == 12 || leaf_tx == 4)
-                    {
-                        eprintln!(
-                            "KIN ITX64x32 eob={} txtp={} dequant_row0: {:?}",
-                            coeffs.eob,
-                            coeffs.tx_type,
-                            &dequant[..32.min(dequant.len())]
+                    // Temporary: post-add plane rows for the CFTARGET leaf (the
+                    // pre/post-prediction dumps bracket this point but not the add).
+                    if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
+                        let mut it = t.split(',');
+                        if let (Some(c), Some(r)) = (it.next(), it.next()) {
+                            if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
+                                for dy in 0..leaf_tx_h.min(16) {
+                                    let sy = px_y + dy;
+                                    let row: Vec<Px> = (0..leaf_tx_w.min(16))
+                                        .map(|dx| self.y_plane[(sy) * self.y_stride + px_x + dx])
+                                        .collect();
+                                    eprintln!(
+                                        "POSTADD fr={} r{dy}: {row:?}",
+                                        crate::debug_frame_seq::current()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // Chroma coefficient reads for THIS chunk (U then V). The
+                // chunk's chroma region is its 64×64-luma extent subsampled
+                // (§5.11.37), tiled with the block's uniform chroma tx size;
+                // `tx`/`ty` stay whole-block-relative so the deblock-edge
+                // marks below keep flagging only the block boundary on
+                // skipped blocks.
+                let chunk_cpx_x0 = (chunk_x * 16 * MI_SIZE) >> sub_x;
+                let chunk_cpx_x1 = (((chunk_x + 1) * 16 * MI_SIZE) >> sub_x).min(chroma_bw);
+                let chunk_cpx_y0 = (chunk_y * 16 * MI_SIZE) >> sub_y;
+                let chunk_cpx_y1 = (((chunk_y + 1) * 16 * MI_SIZE) >> sub_y).min(chroma_bh);
+                let mut ty = chunk_cpx_y0;
+                while ty < chunk_cpx_y1 {
+                    let mut tx = chunk_cpx_x0;
+                    while tx < chunk_cpx_x1 {
+                        let cpx_x = base_cpx_x + tx;
+                        let cpx_y = base_cpx_y + ty;
+                        if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
+                            tx += cw;
+                            continue;
+                        }
+                        // AV1 §7.14.1: chroma deblock edges are at luma block
+                        // boundaries, regardless of whether this block owns chroma
+                        // samples (has_chroma). A block at even (mi_col, mi_row) with
+                        // 4×4 luma size has_chroma=false but still creates a real
+                        // luma-grid boundary that the chroma deblock must filter.
+                        self.meta.mark_chroma_edges_sel(
+                            cpx_x / 4,
+                            cpx_y / 4,
+                            (cpx_x + cw).div_ceil(4),
+                            (cpx_y + ch).div_ceil(4),
+                            !skip || tx == 0,
+                            !skip || ty == 0,
                         );
-                        let stride = 64;
-                        let rows = if leaf_tx == 4 { 64 } else { 32 };
-                        let rowsums: Vec<i32> = (0..rows)
-                            .map(|y| residual[y * stride..(y + 1) * stride].iter().sum())
-                            .collect();
-                        eprintln!("KIN RESID rowsums: {rowsums:?}");
-                    }
-                    if std::env::var("KINETIX_AV1_DBG_PRED").is_ok()
-                        && mi_col == 4
-                        && mi_row == 18
-                        && leaf_mi_col == 4
-                        && leaf_mi_row == 18
-                    {
-                        eprintln!("  residual AFTER itx (row-major 16x8):");
-                        for row in 0..leaf_tx_h {
-                            eprintln!(
-                                "    row {row}: {:?}",
-                                &residual[row * leaf_tx_w..(row + 1) * leaf_tx_w]
-                            );
+                        if !has_chroma {
+                            // No chroma of its own (§7.3.1): skip coefficient reading
+                            // and reconstruction, but edge geometry above is still needed.
+                            tx += cw;
+                            continue;
                         }
-                    }
-                }
-                // Session cont'd 30: this MUST be pushed for every leaf this
-                // block reads, not just ones with `eob > 0` — a dav1d oracle
-                // trace (see `todo-av1.md`'s cont'd 30 entry) proved that for
-                // the long-standing t2.ivf chroma mismatch, the real
-                // co-located luma leaf dav1d's `txtp_map` read resolves to is
-                // THIS block's own FIRST (all-zero/`eob=-1`) leaf, at the
-                // same mi_row, a few mi_cols to the left of the actual
-                // nonzero leaf — not a sibling block's row at all, as five
-                // prior sessions (cont'd 25-29) assumed. dav1d's own
-                // `read_coef_tree` writes `txtp_map` unconditionally after
-                // *every* leaf's `decode_coefs` call, skip or not (an
-                // all-zero leaf's `txtp` defaults to `DCT_DCT`, same as this
-                // codebase's `coeffs.tx_type` for that case) — gating this
-                // push on `eob > 0` silently dropped exactly those leaves
-                // from the local scan, forcing a lookup miss that fell
-                // through to `own_luma_tx_type` (`.first()` of the
-                // *remaining*, eob>0-only leaves) instead of the correct
-                // answer already sitting in this same block's own list.
-                luma_leaf_types.push((px_x, px_y, leaf_tx_w, leaf_tx_h, coeffs.tx_type));
-            }
-            for dy in 0..leaf_tx_h {
-                let sy = px_y + dy;
-                if sy >= self.tile_h {
-                    break;
-                }
-                for dx in 0..leaf_tx_w {
-                    let sx = px_x + dx;
-                    if sx >= self.tile_w {
-                        break;
-                    }
-                    if let Some(slot) = self.y_plane.get_mut(sy * self.y_stride + sx) {
-                        *slot = ((*slot as i32 + residual[dy * leaf_tx_w + dx]).clamp(0, pix_max))
-                            as Px;
-                    }
-                }
-            }
-            // Temporary: post-add plane rows for the CFTARGET leaf (the
-            // pre/post-prediction dumps bracket this point but not the add).
-            if let Ok(t) = std::env::var("KINETIX_AV1_CFTARGET") {
-                let mut it = t.split(',');
-                if let (Some(c), Some(r)) = (it.next(), it.next()) {
-                    if c.trim() == mi_col.to_string() && r.trim() == mi_row.to_string() {
-                        for dy in 0..leaf_tx_h.min(16) {
-                            let sy = px_y + dy;
-                            let row: Vec<Px> = (0..leaf_tx_w.min(16))
-                                .map(|dx| self.y_plane[(sy) * self.y_stride + px_x + dx])
-                                .collect();
-                            eprintln!(
-                                "POSTADD fr={} r{dy}: {row:?}",
-                                crate::debug_frame_seq::current()
+                        for (plane, dst, stride, w, h) in [
+                            (
+                                1usize,
+                                &mut *self.u_plane,
+                                self.uv_stride,
+                                self.tile_cw,
+                                self.tile_ch,
+                            ),
+                            (
+                                2usize,
+                                &mut *self.v_plane,
+                                self.uv_stride,
+                                self.tile_cw,
+                                self.tile_ch,
+                            ),
+                        ] {
+                            let mut residual = vec![0i32; cw * ch];
+                            if !has_residual {
+                                // A skipped block reads no chroma coeffs but must
+                                // still reset the neighbour context — the luma path
+                                // above already does this (`clear_coeff_context`);
+                                // this branch was missing here, so a skip inter
+                                // block left the chroma `above_level`/`left_level`/
+                                // `*_dc` arrays holding whatever a previous block (or
+                                // an earlier frame, since the arrays persist across
+                                // `decode()` calls) had written, corrupting
+                                // `all_zero_ctx` for the next real chroma read at
+                                // that position (first observed on a hierarchical-GOP
+                                // stream: a skip block leaving `left=11` stale, then
+                                // desyncing the very next coded TX_8X4 chroma block).
+                                let clear_blk = TxBlockCtx {
+                                    plane,
+                                    tx_size: c_tx,
+                                    x4: cpx_x / 4,
+                                    y4: cpx_y / 4,
+                                    max_x4: self.uv_max_x4,
+                                    max_y4: self.uv_max_y4,
+                                    block_w: 0,
+                                    block_h: 0,
+                                    intra_dir: 0,
+                                    uv_mode: 0,
+                                    qindex_positive: !self.lossless,
+                                    reduced_tx_set: self.reduced_tx_set,
+                                    lossless: self.lossless,
+                                    is_inter: true,
+                                    coincident_luma_tx_type: av1::DCT_DCT,
+                                };
+                                clear_coeff_context(
+                                    &mut self.coeff_ctxs,
+                                    &clear_blk,
+                                    cw / 4,
+                                    ch / 4,
+                                );
+                            }
+                            if has_residual {
+                                let blk = TxBlockCtx {
+                                    plane,
+                                    tx_size: c_tx,
+                                    x4: cpx_x / 4,
+                                    y4: cpx_y / 4,
+                                    max_x4: self.uv_max_x4,
+                                    max_y4: self.uv_max_y4,
+                                    // See the luma fix above: the coded block's
+                                    // chroma-plane size, not this transform block's
+                                    // own `cw`/`ch`. This inter chroma path already
+                                    // approximates the true `get_plane_residual_size`
+                                    // (see the `c_tx` heuristic above it), so this
+                                    // matches that same approximation rather than the
+                                    // exact spec table.
+                                    block_w: (bw * MI_SIZE) >> subsampling_x,
+                                    block_h: (bh * MI_SIZE) >> subsampling_y,
+                                    intra_dir: 0,
+                                    uv_mode: 0,
+                                    qindex_positive: !self.lossless,
+                                    reduced_tx_set: self.reduced_tx_set,
+                                    lossless: self.lossless,
+                                    is_inter: true,
+                                    // The real co-located luma leaf's decoded type —
+                                    // `get_uv_inter_txtp` needs it to pick the chroma
+                                    // transform family, and `read_eob`'s is_1d CDF
+                                    // context depends on it (a DCT_DCT placeholder
+                                    // here desynced the chroma read on every inter
+                                    // block whose luma leaf used a 1-D/identity type).
+                                    // §5.11.36/§7.12.3: the chroma tx type derives from
+                                    // the co-located luma leaf's decoded type (see
+                                    // `co_located_luma_type`); the miss fallback is this
+                                    // block's OWN first leaf read so far — `.first()` is
+                                    // load-bearing here, do not change to DCT_DCT or
+                                    // `.last()` (both measurably regressed the corpus,
+                                    // see that fn's docs).
+                                    coincident_luma_tx_type: co_located_luma_type(
+                                        &luma_leaf_types,
+                                        luma_leaf_types
+                                            .first()
+                                            .map(|&(_, _, _, _, t)| t)
+                                            .unwrap_or(av1::DCT_DCT),
+                                        mi_col,
+                                        mi_row,
+                                        sub_x,
+                                        sub_y,
+                                        cpx_x,
+                                        cpx_y,
+                                    ),
+                                };
+                                let coeffs = read_coeffs(
+                                    &mut self.dec,
+                                    &mut self.coeff_cdfs,
+                                    &mut self.coeff_ctxs,
+                                    &blk,
+                                )?;
+                                if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
+                                    eprintln!(
+                                "DBG uv-cf-blk seq={} mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} cw={cw} ch={ch} txtp={} eob={} rng={}",
+                                crate::debug_frame_seq::current(),
+                                coeffs.tx_type,
+                                coeffs.eob,
+                                self.dec.raw_state().0
                             );
+                                }
+                                if coeffs.eob > 0 {
+                                    let (qindex_dc, qindex_ac) = if plane == 1 {
+                                        (u_qindex_dc, u_qindex_ac)
+                                    } else {
+                                        (v_qindex_dc, v_qindex_ac)
+                                    };
+                                    let dequant = dequantize_coeffs(
+                                        &coeffs.quant,
+                                        c_tx,
+                                        qindex_dc,
+                                        qindex_ac,
+                                        self.bit_depth,
+                                    );
+                                    inverse_transform(
+                                        &dequant,
+                                        coeffs.tx_type,
+                                        c_tx,
+                                        self.lossless,
+                                        self.bit_depth,
+                                        &mut residual,
+                                    );
+                                    if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
+                                        eprintln!(
+                                    "RESDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} txtp={} residual={:?}",
+                                    coeffs.tx_type,
+                                    &residual[..(cw * ch).min(64)]
+                                );
+                                        eprintln!(
+                                    "COEFFDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} eob={} dequant={:?}",
+                                    coeffs.eob,
+                                    &dequant[..(cw * ch).min(64)]
+                                );
+                                    }
+                                }
+                            }
+                            for dy in 0..ch {
+                                let sy = cpx_y + dy;
+                                if sy >= h {
+                                    break;
+                                }
+                                for dx in 0..cw {
+                                    let sx = cpx_x + dx;
+                                    if sx >= w {
+                                        break;
+                                    }
+                                    if let Some(slot) = dst.get_mut(sy * stride + sx) {
+                                        *slot = ((*slot as i32 + residual[dy * cw + dx])
+                                            .clamp(0, pix_max))
+                                            as Px;
+                                    }
+                                }
+                            }
+                            if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok()
+                                && mi_col == 4
+                                && mi_row == 20
+                                && cpx_x == 8
+                                && cpx_y == 40
+                                && plane == 1
+                            {
+                                eprintln!(
+                                    "POSTADD u rows40-43 cols8-15: {:?}",
+                                    (0..4)
+                                        .map(|r| {
+                                            (0..8)
+                                                .map(|c| dst[(40 + r) * stride + 8 + c])
+                                                .collect::<Vec<Px>>()
+                                        })
+                                        .collect::<Vec<Vec<Px>>>()
+                                );
+                            }
                         }
+                        tx += cw;
                     }
+                    ty += ch;
                 }
             }
         }
@@ -4227,273 +4588,6 @@ impl<'a> TileDecodeState<'a> {
         // Deliberately placed at the very END of the block, after the chroma
         // residual too: a chroma transform block whose bounds are wrong can
         // scribble into the luma plane, and only an end-of-block dump sees it.
-
-        // Chroma residual. Inter chroma uses one uniform transform size
-        // (`get_tx_size(get_plane_residual_size)`, §5.11.37) tiling the whole
-        // block's chroma region — dav1d reads it (`Post-uv-cf-blk`) after all
-        // the luma leaves, `pl=0` then `pl=1`.
-        let sub_x = self.subsampling_x as usize;
-        let sub_y = self.subsampling_y as usize;
-        let c_tx = chroma_tx_size(bsize, sub_x, sub_y);
-        let cw = av1::TX_WIDTH[c_tx];
-        let ch = av1::TX_HEIGHT[c_tx];
-        let plane_sz = {
-            let sz = get_plane_residual_size(bsize, sub_x, sub_y);
-            if sz == BLOCK_INVALID {
-                bsize
-            } else {
-                sz
-            }
-        };
-        let chroma_bw = BLOCK_WIDTH[plane_sz];
-        let chroma_bh = BLOCK_HEIGHT[plane_sz];
-        let base_cpx_x = (mi_col >> sub_x) * MI_SIZE - (self.tile_px_x0 >> sub_x);
-        let base_cpx_y = (mi_row >> sub_y) * MI_SIZE - (self.tile_px_y0 >> sub_y);
-        let has_residual = !skip;
-        // §5.11.36/§7.12.3: an inter chroma transform block's tx type derives
-        // from the *co-located luma leaf's* decoded tx type (1-D/identity
-        // luma types make the chroma read use the 1-D eob CDF context).
-        // §7.3.1 sub-8x8 chroma ownership: a 4px-wide/tall block at odd mi
-        // parity codes the chroma for the whole parent 8x8, so some of its
-        // chroma positions map to the SIBLING sub-block's luma area, which
-        // this block's own leaf list does not cover. dav1d uses the block's
-        // own luma tx type for every chroma tx block it codes (`b->txtp`),
-        // so on a lookup miss fall back to this block's own first luma leaf
-        // instead of DCT_DCT — a DCT_DCT fallback read the chroma tx type
-        // with the wrong CDF context (txtp differs from the bitstream's) and
-        // desynced the tile at the very first chroma read of such a block.
-        // NOTE (session cont'd 26): both a persistent tile-wide `TxTypes[y][x]`
-        // grid AND switching this fallback to `.last()` were tried and
-        // BOTH measurably regressed the corpus (t2.ivf frame 1 Y-plane diff
-        // went from 0 to 77641 and 33493 respectively — real entropy
-        // desyncs, not cosmetic pixel differences). `.first()` is therefore
-        // NOT a latent bug on this repro as cont'd 25 suspected — it is
-        // load-bearing. Do not change this fallback without a passing
-        // measurement across the full corpus.
-        let own_luma_tx_type = luma_leaf_types
-            .first()
-            .map(|&(_, _, _, _, t)| t)
-            .unwrap_or(av1::DCT_DCT);
-        let co_located_luma_type = |clpx_x: usize, clpx_y: usize| -> usize {
-            let lx = clpx_x << sub_x;
-            let ly = clpx_y << sub_y;
-            if std::env::var("KINETIX_AV1_DBG_COLOC").is_ok() {
-                eprintln!(
-                    "COLOC mi=({mi_col},{mi_row}) clpx=({clpx_x},{clpx_y}) lx={lx} ly={ly} leaves={luma_leaf_types:?} own={own_luma_tx_type}"
-                );
-            }
-            for &(lx0, ly0, w, _h, t) in &luma_leaf_types {
-                if lx >= lx0 && lx < lx0 + w && ly >= ly0 && ly < ly0 + _h {
-                    return t;
-                }
-            }
-            own_luma_tx_type
-        };
-        // Computed before the `&mut self.{u,v}_plane` reborrows in the loop
-        // below — `qindex_for_plane` takes `&self`, which would conflict
-        // with those live disjoint-field mutable borrows if called any later.
-        let (u_qindex_dc, u_qindex_ac) = self.qindex_for_plane(1);
-        let (v_qindex_dc, v_qindex_ac) = self.qindex_for_plane(2);
-        // §7.3.1 has_chroma (4:2:0): a block owns chroma only if its width
-        // exceeds one chroma column-pair (bw > 1 mi) or it sits at an odd
-        // mi_col, and likewise for height/mi_row. Blocks failing this (e.g.
-        // an 8x4 leaf at an even mi_row) have NO chroma — dav1d's
-        // read_coef_blocks skips the chroma coefficient loop entirely
-        // (`if (!has_chroma) continue;`), so reading our uv coefficients
-        // here consumed extra bits and desynced the tile.
-        let has_chroma = (bw > 1 || (mi_col & 1) == 1) && (bh > 1 || (mi_row & 1) == 1);
-        for ty in (0..chroma_bh).step_by(ch) {
-            for tx in (0..chroma_bw).step_by(cw) {
-                let cpx_x = base_cpx_x + tx;
-                let cpx_y = base_cpx_y + ty;
-                if cpx_x >= self.tile_cw || cpx_y >= self.tile_ch {
-                    continue;
-                }
-                // AV1 §7.14.1: chroma deblock edges are at luma block
-                // boundaries, regardless of whether this block owns chroma
-                // samples (has_chroma). A block at even (mi_col, mi_row) with
-                // 4×4 luma size has_chroma=false but still creates a real
-                // luma-grid boundary that the chroma deblock must filter.
-                self.meta.mark_chroma_edges_sel(
-                    cpx_x / 4,
-                    cpx_y / 4,
-                    (cpx_x + cw).div_ceil(4),
-                    (cpx_y + ch).div_ceil(4),
-                    !skip || tx == 0,
-                    !skip || ty == 0,
-                );
-                if !has_chroma {
-                    // No chroma of its own (§7.3.1): skip coefficient reading
-                    // and reconstruction, but edge geometry above is still needed.
-                    continue;
-                }
-                for (plane, dst, stride, w, h) in [
-                    (
-                        1usize,
-                        &mut *self.u_plane,
-                        self.uv_stride,
-                        self.tile_cw,
-                        self.tile_ch,
-                    ),
-                    (
-                        2usize,
-                        &mut *self.v_plane,
-                        self.uv_stride,
-                        self.tile_cw,
-                        self.tile_ch,
-                    ),
-                ] {
-                    let mut residual = vec![0i32; cw * ch];
-                    if !has_residual {
-                        // A skipped block reads no chroma coeffs but must
-                        // still reset the neighbour context — the luma path
-                        // above already does this (`clear_coeff_context`);
-                        // this branch was missing here, so a skip inter
-                        // block left the chroma `above_level`/`left_level`/
-                        // `*_dc` arrays holding whatever a previous block (or
-                        // an earlier frame, since the arrays persist across
-                        // `decode()` calls) had written, corrupting
-                        // `all_zero_ctx` for the next real chroma read at
-                        // that position (first observed on a hierarchical-GOP
-                        // stream: a skip block leaving `left=11` stale, then
-                        // desyncing the very next coded TX_8X4 chroma block).
-                        let clear_blk = TxBlockCtx {
-                            plane,
-                            tx_size: c_tx,
-                            x4: cpx_x / 4,
-                            y4: cpx_y / 4,
-                            max_x4: self.uv_max_x4,
-                            max_y4: self.uv_max_y4,
-                            block_w: 0,
-                            block_h: 0,
-                            intra_dir: 0,
-                            uv_mode: 0,
-                            qindex_positive: !self.lossless,
-                            reduced_tx_set: self.reduced_tx_set,
-                            lossless: self.lossless,
-                            is_inter: true,
-                            coincident_luma_tx_type: av1::DCT_DCT,
-                        };
-                        clear_coeff_context(&mut self.coeff_ctxs, &clear_blk, cw / 4, ch / 4);
-                    }
-                    if has_residual {
-                        let blk = TxBlockCtx {
-                            plane,
-                            tx_size: c_tx,
-                            x4: cpx_x / 4,
-                            y4: cpx_y / 4,
-                            max_x4: self.uv_max_x4,
-                            max_y4: self.uv_max_y4,
-                            // See the luma fix above: the coded block's
-                            // chroma-plane size, not this transform block's
-                            // own `cw`/`ch`. This inter chroma path already
-                            // approximates the true `get_plane_residual_size`
-                            // (see the `c_tx` heuristic above it), so this
-                            // matches that same approximation rather than the
-                            // exact spec table.
-                            block_w: (bw * MI_SIZE) >> subsampling_x,
-                            block_h: (bh * MI_SIZE) >> subsampling_y,
-                            intra_dir: 0,
-                            uv_mode: 0,
-                            qindex_positive: !self.lossless,
-                            reduced_tx_set: self.reduced_tx_set,
-                            lossless: self.lossless,
-                            is_inter: true,
-                            // The real co-located luma leaf's decoded type —
-                            // `get_uv_inter_txtp` needs it to pick the chroma
-                            // transform family, and `read_eob`'s is_1d CDF
-                            // context depends on it (a DCT_DCT placeholder
-                            // here desynced the chroma read on every inter
-                            // block whose luma leaf used a 1-D/identity type).
-                            coincident_luma_tx_type: co_located_luma_type(cpx_x, cpx_y),
-                        };
-                        let coeffs = read_coeffs(
-                            &mut self.dec,
-                            &mut self.coeff_cdfs,
-                            &mut self.coeff_ctxs,
-                            &blk,
-                        )?;
-                        if std::env::var("KINETIX_AV1_DBG_B0").is_ok() {
-                            eprintln!(
-                                "DBG uv-cf-blk seq={} mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} cw={cw} ch={ch} txtp={} eob={} rng={}",
-                                crate::debug_frame_seq::current(),
-                                coeffs.tx_type,
-                                coeffs.eob,
-                                self.dec.raw_state().0
-                            );
-                        }
-                        if coeffs.eob > 0 {
-                            let (qindex_dc, qindex_ac) = if plane == 1 {
-                                (u_qindex_dc, u_qindex_ac)
-                            } else {
-                                (v_qindex_dc, v_qindex_ac)
-                            };
-                            let dequant = dequantize_coeffs(
-                                &coeffs.quant,
-                                c_tx,
-                                qindex_dc,
-                                qindex_ac,
-                                self.bit_depth,
-                            );
-                            inverse_transform(
-                                &dequant,
-                                coeffs.tx_type,
-                                c_tx,
-                                self.lossless,
-                                self.bit_depth,
-                                &mut residual,
-                            );
-                            if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok() {
-                                eprintln!(
-                                    "RESDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} txtp={} residual={:?}",
-                                    coeffs.tx_type,
-                                    &residual[..(cw * ch).min(64)]
-                                );
-                                eprintln!(
-                                    "COEFFDUMP mi=({mi_col},{mi_row}) cpx=({cpx_x},{cpx_y}) pl={plane} tx={c_tx} eob={} dequant={:?}",
-                                    coeffs.eob,
-                                    &dequant[..(cw * ch).min(64)]
-                                );
-                            }
-                        }
-                    }
-                    for dy in 0..ch {
-                        let sy = cpx_y + dy;
-                        if sy >= h {
-                            break;
-                        }
-                        for dx in 0..cw {
-                            let sx = cpx_x + dx;
-                            if sx >= w {
-                                break;
-                            }
-                            if let Some(slot) = dst.get_mut(sy * stride + sx) {
-                                *slot = ((*slot as i32 + residual[dy * cw + dx]).clamp(0, pix_max))
-                                    as Px;
-                            }
-                        }
-                    }
-                    if std::env::var("KINETIX_AV1_DBG_RESDUMP").is_ok()
-                        && mi_col == 4
-                        && mi_row == 20
-                        && cpx_x == 8
-                        && cpx_y == 40
-                        && plane == 1
-                    {
-                        eprintln!(
-                            "POSTADD u rows40-43 cols8-15: {:?}",
-                            (0..4)
-                                .map(|r| {
-                                    (0..8)
-                                        .map(|c| dst[(40 + r) * stride + 8 + c])
-                                        .collect::<Vec<Px>>()
-                                })
-                                .collect::<Vec<Vec<Px>>>()
-                        );
-                    }
-                }
-            }
-        }
         // Record chroma tx/skip metadata for the same 8×8-luma grid region
         // (mirrors the intra keyframe path's identical call).
         let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
@@ -4533,6 +4627,56 @@ impl<'a> TileDecodeState<'a> {
         }
         Ok(())
     }
+}
+
+/// The chroma transform type for an inter chroma tx block at chroma-pixel
+/// `clpx_*`, derived from the co-located luma leaf's decoded tx type
+/// (§5.11.36/§7.12.3: 1-D/identity luma types make the chroma read use the
+/// 1-D eob CDF context, so the wrong family here desyncs the tile).
+///
+/// Sub-8x8 chroma ownership (§7.3.1): a 4px-wide/tall block at odd mi parity
+/// codes the chroma for the whole parent 8x8, so some chroma positions map to
+/// the SIBLING sub-block's luma area, which this block's own leaf list does
+/// not cover. dav1d uses the block's own luma tx type for every chroma tx
+/// block it codes (`b->txtp`), so on a lookup miss fall back to this block's
+/// own first luma leaf instead of DCT_DCT — a DCT_DCT fallback read the
+/// chroma tx type with the wrong CDF context (txtp differs from the
+/// bitstream's) and desynced the tile at the very first chroma read of such a
+/// block.
+///
+/// NOTE (session cont'd 26): both a persistent tile-wide `TxTypes[y][x]` grid
+/// AND switching this fallback to `.last()` were tried and BOTH measurably
+/// regressed the corpus (t2.ivf frame 1 Y-plane diff went from 0 to 77641 and
+/// 33493 respectively — real entropy desyncs, not cosmetic pixel differences).
+/// `.first()` is therefore NOT a latent bug on that repro as cont'd 25
+/// suspected — it is load-bearing. Do not change this fallback without a
+/// passing measurement across the full corpus. `luma_leaf_types` holds only
+/// the leaves read so far (per-chunk interleave), which is exactly dav1d's
+/// `txtp_map` visibility at the same point.
+#[allow(clippy::too_many_arguments)]
+fn co_located_luma_type(
+    luma_leaf_types: &[(usize, usize, usize, usize, usize)],
+    own_luma_tx_type: usize,
+    mi_col: usize,
+    mi_row: usize,
+    sub_x: usize,
+    sub_y: usize,
+    clpx_x: usize,
+    clpx_y: usize,
+) -> usize {
+    let lx = clpx_x << sub_x;
+    let ly = clpx_y << sub_y;
+    if std::env::var("KINETIX_AV1_DBG_COLOC").is_ok() {
+        eprintln!(
+            "COLOC mi=({mi_col},{mi_row}) clpx=({clpx_x},{clpx_y}) lx={lx} ly={ly} leaves={luma_leaf_types:?} own={own_luma_tx_type}"
+        );
+    }
+    for &(lx0, ly0, w, _h, t) in luma_leaf_types {
+        if lx >= lx0 && lx < lx0 + w && ly >= ly0 && ly < ly0 + _h {
+            return t;
+        }
+    }
+    own_luma_tx_type
 }
 
 /// dav1d `apply_sign` (common/intops.h).

@@ -496,6 +496,22 @@ pub struct LrDecodeParams {
     pub upscaled_width: usize,
     pub frame_height: usize,
     pub num_planes: usize,
+    /// `FrameHeader::width` — the *coded* width, which for a superres frame
+    /// is the horizontally downscaled one (`upscaled_width` is the post-
+    /// upscale size). Non-zero only when the frame actually parses its LR
+    /// params; a superres-active frame is
+    /// `coded_width != 0 && coded_width != upscaled_width`.
+    pub coded_width: usize,
+    /// `SuperresDenom` (9..=16) when superres is active; unused otherwise.
+    pub superres_denom: u32,
+}
+
+impl LrDecodeParams {
+    /// A frame whose coded width is horizontally downscaled relative to its
+    /// output width (`use_superres`, §6.8.8).
+    pub fn superres_active(&self) -> bool {
+        self.coded_width != 0 && self.coded_width != self.upscaled_width
+    }
 }
 
 /// One cell of the 2-D reference-MV grid ([`TileDecodeState::refmv_grid`]),
@@ -589,8 +605,31 @@ fn build_rp_proj(
     let cur = cur_order_hint as i32;
     // refidx m (0=LAST .. 6=ALTREF) ↔ Kinetix name m+2.
     let ref_poc = |m: usize| -> i32 { dpb_order_hints[ref_to_slot[m + 2] as usize] as i32 };
-    let rp_ref =
-        |m: usize| -> Option<&MotionField> { temporal_motion_fields[ref_to_slot[m + 2] as usize] };
+    let rp_ref = |m: usize| -> Option<&MotionField> {
+        let field = temporal_motion_fields[ref_to_slot[m + 2] as usize].as_ref()?;
+        // dav1d decode.c (`ref_w == f->bw && ref_h == f->bh`): a saved motion
+        // field is only usable when the source frame's mi grid equals the
+        // current frame's. Superres streams code every frame at its own
+        // (differently) downscaled size, so their fields are never
+        // size-compatible — without this check the temporal scan projected
+        // candidates dav1d never produces and desynced the tile.
+        let src_mi_cols = field.stride;
+        let src_mi_rows = field.cells.len() / field.stride;
+        let cur_mi_cols = w8 * 2;
+        let cur_mi_rows = h8 * 2;
+        if std::env::var("KINETIX_AV1_DBG_RPDIM").is_ok()
+            && (src_mi_cols != cur_mi_cols || src_mi_rows != cur_mi_rows)
+        {
+            eprintln!(
+                "RPDIM fr={} m={m} src=({src_mi_cols},{src_mi_rows}) cur=({cur_mi_cols},{cur_mi_rows}) REJECT",
+                crate::debug_frame_seq::current()
+            );
+        }
+        if src_mi_cols != cur_mi_cols || src_mi_rows != cur_mi_rows {
+            return None;
+        }
+        Some(field)
+    };
 
     // mfmv reference selection (dav1d `refmvs_init_frame`).
     let mut mfmv_refs: Vec<usize> = Vec::new();
@@ -621,6 +660,13 @@ fn build_rp_proj(
     let sv_dump = std::env::var("KINETIX_AV1_DBG_SVDUMP").is_ok();
     for &m in &mfmv_refs {
         let Some(src) = rp_ref(m) else { continue };
+        // dav1d `load_tmvs` clamps the scan to the SOURCE frame's grid
+        // (`row_end8 = imin(row_end8, rf->ih8)`, `col_end8i = imin(...,
+        // rf->iw8)`): with superres every frame decodes at its own size, so
+        // a stored motion field can be smaller than the current frame's
+        // (and wider sources are fine — writes are tile-clamped below).
+        let src_w8 = src.stride >> 1;
+        let src_h8 = (src.cells.len() / src.stride) >> 1;
         let rpoc = ref_poc(m);
         let diff1 = poc_diff(rpoc, cur);
         if diff1.abs() > 31 {
@@ -635,8 +681,8 @@ fn build_rp_proj(
         // the tile, so the extension only lets the tile's edge SBs receive
         // projections from a source one SB outside.
         let col_start8i = col_start8.saturating_sub(8);
-        let col_end8i = (col_end8 + 8).min(w8);
-        for y in row_start8..row_end8 {
+        let col_end8i = (col_end8 + 8).min(src_w8);
+        for y in row_start8..row_end8.min(src_h8) {
             for x in col_start8i..col_end8i {
                 // dav1d `save_tmvs_c` stores each 8×8 cell from the block at
                 // 4×4 column `x*2 + 1` of the cell's *bottom* 4×4 row: it is
@@ -1344,7 +1390,12 @@ impl<'a> TileDecodeState<'a> {
             luma_max_y4: height.div_ceil(4),
             // Visible frame size (the scale-factor denominators of
             // §7.11.3.3); `width`/`height` are the 8-aligned grid extent.
-            frame_w: if lr.upscaled_width > 0 {
+            // For a superres frame the denominators use the *coded*
+            // (downscaled) width — dav1d's `f->svc` scales reference sizes
+            // against `frame_hdr->width[0]`, not the post-upscale width.
+            frame_w: if lr.coded_width > 0 {
+                lr.coded_width
+            } else if lr.upscaled_width > 0 {
                 lr.upscaled_width
             } else {
                 width
@@ -1721,6 +1772,9 @@ pub fn decode_tile_group(
     enable_filter_intra: bool,
     enable_intra_edge_filter: bool,
     allow_screen_content_tools: bool,
+    subsampling_x: bool,
+    subsampling_y: bool,
+    monochrome: bool,
     allow_intrabc: bool,
     lr: LrDecodeParams,
     cdef_delta: CdefDeltaParams,
@@ -1762,8 +1816,8 @@ pub fn decode_tile_group(
     // different sizes under non-uniform spacing, so the caller (which splits
     // the tile groups) owns the geometry.
 
-    let uv_w = width / 2;
-    let uv_h = height / 2;
+    let uv_w = if subsampling_x { width / 2 } else { width };
+    let uv_h = if subsampling_y { height / 2 } else { height };
 
     // `data` is exactly this tile's `tile_data` bytes: the caller already
     // parsed the tile-group header and any per-tile size fields (§5.11.1), so
@@ -1789,13 +1843,13 @@ pub fn decode_tile_group(
         delta_q,
         tx_mode_select,
         reduced_tx_set,
-        true, // subsampling_x (4:2:0)
-        true, // subsampling_y (4:2:0)
+        subsampling_x,
+        subsampling_y,
         x0,
         y0,
         tile_w,
         tile_h,
-        false,
+        monochrome,
         lf_levels,
         lf_ref_deltas,
         lf_mode_deltas,
@@ -2166,8 +2220,12 @@ pub fn reconstruct_av1_frame(
     let mi_rows = 2 * height.div_ceil(8);
     let grid_w = mi_cols * MI_SIZE;
     let grid_h = mi_rows * MI_SIZE;
-    let uv_grid_w = grid_w / 2;
-    let uv_grid_h = grid_h / 2;
+    let (ss_x, ss_y) = (
+        seq.color_config.subsampling_x,
+        seq.color_config.subsampling_y,
+    );
+    let uv_grid_w = if ss_x { grid_w / 2 } else { grid_w };
+    let uv_grid_h = if ss_y { grid_h / 2 } else { grid_h };
 
     let bit_depth = frame_header.bit_depth as u32;
     let mid = 1 << (bit_depth - 1);
@@ -2211,7 +2269,18 @@ pub fn reconstruct_av1_frame(
 
     if tile_payloads.is_empty() {
         let cropped = crop_planes(
-            &y_plane, &u_plane, &v_plane, grid_w, width, height, bit_depth,
+            &y_plane,
+            &u_plane,
+            &v_plane,
+            grid_w,
+            width,
+            height,
+            pixel_format_for(
+                bit_depth,
+                seq.color_config.mono_chrome,
+                seq.color_config.subsampling_x,
+                seq.color_config.subsampling_y,
+            ),
         );
         return Ok(Some((
             VideoFrame {
@@ -2220,7 +2289,12 @@ pub fn reconstruct_av1_frame(
                 data: cropped,
                 width: frame_header.width,
                 height: frame_header.height,
-                pixel_format: pixel_format_for(bit_depth),
+                pixel_format: pixel_format_for(
+                    bit_depth,
+                    seq.color_config.mono_chrome,
+                    seq.color_config.subsampling_x,
+                    seq.color_config.subsampling_y,
+                ),
                 is_key_frame: true,
             },
             None,
@@ -2284,9 +2358,11 @@ pub fn reconstruct_av1_frame(
             let (x0, y0, x1, y1) = geometry[i];
             let tw = x1 - x0;
             let th = y1 - y0;
+            let tuw = if ss_x { tw / 2 } else { tw };
+            let tuh = if ss_y { th / 2 } else { th };
             let mut ty: Vec<Px> = vec![mid; tw * th];
-            let mut tu: Vec<Px> = vec![mid; (tw / 2) * (th / 2)];
-            let mut tv: Vec<Px> = vec![mid; (tw / 2) * (th / 2)];
+            let mut tu: Vec<Px> = vec![mid; tuw * tuh];
+            let mut tv: Vec<Px> = vec![mid; tuw * tuh];
             let mut meta = FrameMeta::new(tw, th);
             let mut mf_cells: Vec<MotionFieldCell> = Vec::new();
 
@@ -2315,7 +2391,7 @@ pub fn reconstruct_av1_frame(
                 &mut tu,
                 &mut tv,
                 tw,
-                tw / 2,
+                if ss_x { tw / 2 } else { tw },
                 frame_header.tx_mode_select,
                 frame_header.reduced_tx_set,
                 frame_header.loop_filter_level,
@@ -2328,6 +2404,9 @@ pub fn reconstruct_av1_frame(
                 seq.enable_filter_intra,
                 seq.enable_intra_edge_filter,
                 frame_header.allow_screen_content_tools,
+                seq.color_config.subsampling_x,
+                seq.color_config.subsampling_y,
+                seq.color_config.mono_chrome,
                 frame_header.allow_intrabc,
                 LrDecodeParams {
                     frame_restoration_type: frame_header.frame_restoration_type,
@@ -2336,6 +2415,8 @@ pub fn reconstruct_av1_frame(
                     upscaled_width: frame_header.upscaled_width as usize,
                     frame_height: frame_header.height as usize,
                     num_planes: if seq.color_config.mono_chrome { 1 } else { 3 },
+                    coded_width: frame_header.width as usize,
+                    superres_denom: frame_header.superres_denom,
                 },
                 CdefDeltaParams {
                     enable_cdef: seq.enable_cdef,
@@ -2415,10 +2496,14 @@ pub fn reconstruct_av1_frame(
             dst.copy_from_slice(src);
         }
         for (src_plane, dst_plane) in [(&tile.u, &mut u_plane), (&tile.v, &mut v_plane)] {
-            for (dy, sy) in (tile.y0 / 2..tile.y1.div_ceil(2)).enumerate() {
-                let drow = sy * uv_grid_w + tile.x0 / 2;
-                let srow = dy * (tw / 2);
-                dst_plane[drow..drow + tw / 2].copy_from_slice(&src_plane[srow..srow + tw / 2]);
+            let x0c = if ss_x { tile.x0 / 2 } else { tile.x0 };
+            let twc = if ss_x { tw / 2 } else { tw };
+            let y0c = if ss_y { tile.y0 / 2 } else { tile.y0 };
+            let y1c = if ss_y { tile.y1.div_ceil(2) } else { tile.y1 };
+            for (dy, sy) in (y0c..y1c).enumerate() {
+                let drow = sy * uv_grid_w + x0c;
+                let srow = dy * twc;
+                dst_plane[drow..drow + twc].copy_from_slice(&src_plane[srow..srow + twc]);
             }
         }
         // Merge this tile's motion field into the full-frame grid.  Each tile's
@@ -2456,15 +2541,18 @@ pub fn reconstruct_av1_frame(
         }
     }
 
-    // Phase D: full-frame in-loop post-filters (deblock → CDEF → LR).
-    // Running on the assembled frame — not per-tile — matches the AV1 spec
-    // §7.14 requirement that deblocking crosses tile boundaries. The planes are
-    // grid-aligned (grid_w × grid_h), but CDEF writes only to visible-area
-    // pixels (dav1d clips output to visible height) — padding rows hold real
-    // reconstructed content so CDEF secondary taps can read them, but the
-    // filter output must not overwrite them.
-    if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
-        let _ = apply_post_filters(
+    // Phase D: full-frame in-loop post-filters (deblock → CDEF → superres
+    // upscale → LR). Running on the assembled frame — not per-tile — matches
+    // the AV1 spec §7.14 requirement that deblocking crosses tile boundaries.
+    // The planes are grid-aligned (grid_w × grid_h), but CDEF writes only to
+    // visible-area pixels (dav1d clips output to visible height) — padding
+    // rows hold real reconstructed content so CDEF secondary taps can read
+    // them, but the filter output must not overwrite them. A superres frame
+    // comes back upscaled: the returned planes own the post-upscale pixels
+    // (stride = upscaled grid stride) and become both the stored reference
+    // and the cropped output.
+    let upscaled_planes = if std::env::var("KINETIX_AV1_NOFILTER").is_err() {
+        apply_post_filters(
             &mut y_plane,
             &mut u_plane,
             &mut v_plane,
@@ -2478,8 +2566,26 @@ pub fn reconstruct_av1_frame(
             seq,
             0,
             0,
-        );
-    }
+        )?
+    } else {
+        None
+    };
+    let (y_plane, u_plane, v_plane, plane_stride, real_width): (
+        Vec<Px>,
+        Vec<Px>,
+        Vec<Px>,
+        usize,
+        usize,
+    ) = match upscaled_planes {
+        Some((y, u, v, s)) => (y, u, v, s, frame_header.upscaled_width as usize),
+        None => (
+            y_plane,
+            u_plane,
+            v_plane,
+            grid_w,
+            frame_header.width as usize,
+        ),
+    };
 
     let motion_field = if !frame_is_intra {
         Some(MotionField {
@@ -2497,10 +2603,10 @@ pub fn reconstruct_av1_frame(
         y: y_plane.clone(),
         u: u_plane.clone(),
         v: v_plane.clone(),
-        stride: grid_w,
-        grid_width: grid_w,
+        stride: plane_stride,
+        grid_width: plane_stride,
         grid_height: grid_h,
-        real_width: width,
+        real_width,
         real_height: height,
     };
     if std::env::var("KINETIX_AV1_DUMP_GRID").is_ok() {
@@ -2526,8 +2632,20 @@ pub fn reconstruct_av1_frame(
         let _ = std::fs::write(&path, &blob);
         eprintln!("dumped {path} ({} bytes)", blob.len());
     }
+    let pixel_format = pixel_format_for(
+        bit_depth,
+        seq.color_config.mono_chrome,
+        seq.color_config.subsampling_x,
+        seq.color_config.subsampling_y,
+    );
     let data = crop_planes(
-        &padded.y, &padded.u, &padded.v, grid_w, width, height, bit_depth,
+        &padded.y,
+        &padded.u,
+        &padded.v,
+        plane_stride,
+        real_width,
+        height,
+        pixel_format,
     );
 
     Ok(Some((
@@ -2535,9 +2653,9 @@ pub fn reconstruct_av1_frame(
             pts: Timestamp::NONE,
             dts: Timestamp::NONE,
             data,
-            width: frame_header.width,
+            width: real_width as u32,
             height: frame_header.height,
-            pixel_format: pixel_format_for(bit_depth),
+            pixel_format,
             is_key_frame: true,
         },
         motion_field,
@@ -2647,6 +2765,9 @@ fn split_tile_group_payloads(
 
 /// Crop mi-grid-extent planes (dense, `grid_w` stride) down to the visible
 /// `width × height` frame, packed Y then U then V.
+/// Crop the visible area out of the (grid-extent) reconstructed planes and
+/// serialise into the frame's `pixel_format` sample layout. Monochrome formats
+/// emit the luma plane only; 4:2:0 formats emit half-size chroma.
 pub(crate) fn crop_planes(
     y: &[Px],
     u: &[Px],
@@ -2654,13 +2775,18 @@ pub(crate) fn crop_planes(
     grid_w: usize,
     width: usize,
     height: usize,
-    bit_depth: u32,
+    pixel_format: PixelFormat,
 ) -> Vec<u8> {
-    let mut data = Vec::with_capacity(width * height * 3 / 2);
-    let mut put = |row: &[Px]| {
-        if bit_depth == 8 {
+    let mono = matches!(
+        pixel_format,
+        PixelFormat::Gray | PixelFormat::Gray10le | PixelFormat::Gray12le
+    );
+    let mut data = Vec::with_capacity(width * height * usize::from(!mono) * 3 / 2);
+    let mut put = |row: &[Px]| match pixel_format {
+        PixelFormat::Gray | PixelFormat::Yuv420p | PixelFormat::Yuv422p | PixelFormat::Yuv444p => {
             data.extend(row.iter().map(|&p| p as u8));
-        } else {
+        }
+        _ => {
             for &p in row {
                 data.extend_from_slice(&p.to_le_bytes());
             }
@@ -2669,21 +2795,47 @@ pub(crate) fn crop_planes(
     for row in 0..height {
         put(&y[row * grid_w..row * grid_w + width]);
     }
-    let uw = grid_w / 2;
-    for row in 0..height.div_ceil(2) {
-        put(&u[row * uw..row * uw + width / 2]);
+    if mono {
+        return data;
     }
-    for row in 0..height.div_ceil(2) {
-        put(&v[row * uw..row * uw + width / 2]);
+    // 4:2:0 formats halve both axes; 4:2:2 halves height; 4:4:4 keeps full.
+    let (ss_x, ss_y) = match pixel_format {
+        PixelFormat::Yuv420p | PixelFormat::Yuv420p10le | PixelFormat::Yuv420p12le => (1, 1),
+        PixelFormat::Yuv422p => (0, 1),
+        _ => (0, 0),
+    };
+    let uw = grid_w >> ss_x;
+    let cw = width >> ss_x;
+    let ch = height.div_ceil(1 + ss_y);
+    for row in 0..ch {
+        put(&u[row * uw..row * uw + cw]);
+    }
+    for row in 0..ch {
+        put(&v[row * uw..row * uw + cw]);
     }
     data
 }
 
-/// Output pixel format for a given `BitDepth`.
-pub(crate) fn pixel_format_for(bit_depth: u32) -> PixelFormat {
-    match bit_depth {
-        8 => PixelFormat::Yuv420p,
-        10 => PixelFormat::Yuv420p10le,
-        _ => PixelFormat::Yuv420p12le,
+/// Output pixel format for a given `BitDepth`, `mono_chrome` flag and
+/// chroma subsampling. 4:2:2/4:4:4 exist only for 8-bit in
+/// [`PixelFormat`] so 10/12-bit subsampled input falls back to the 4:2:0
+/// family's depth handling (those combinations are not decodable yet).
+pub(crate) fn pixel_format_for(
+    bit_depth: u32,
+    monochrome: bool,
+    ss_x: bool,
+    ss_y: bool,
+) -> PixelFormat {
+    match (bit_depth, monochrome) {
+        (_, true) if bit_depth == 8 => PixelFormat::Gray,
+        (_, true) if bit_depth == 10 => PixelFormat::Gray10le,
+        (_, true) => PixelFormat::Gray12le,
+        (_, false) if ss_x && ss_y => match bit_depth {
+            8 => PixelFormat::Yuv420p,
+            10 => PixelFormat::Yuv420p10le,
+            _ => PixelFormat::Yuv420p12le,
+        },
+        (_, false) if !ss_x && ss_y => PixelFormat::Yuv422p,
+        (_, false) => PixelFormat::Yuv444p,
     }
 }
