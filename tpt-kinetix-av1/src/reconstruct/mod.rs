@@ -2169,6 +2169,10 @@ pub struct PaddedPlanes {
     /// Plane stride = `grid_width` (planes are dense).
     pub stride: usize,
     pub grid_width: usize,
+    /// Chroma plane stride = `grid_width >> ss_x`. Equals `grid_width` for
+    /// 4:2:2/4:4:4; only 4:2:0 halves it. `crop_planes` needs the real value —
+    /// deriving it from the luma stride is wrong for `ss_x == 0`.
+    pub uv_grid_width: usize,
     pub grid_height: usize,
     pub real_width: usize,
     pub real_height: usize,
@@ -2273,6 +2277,7 @@ pub fn reconstruct_av1_frame(
             &u_plane,
             &v_plane,
             grid_w,
+            uv_grid_w,
             width,
             height,
             pixel_format_for(
@@ -2605,6 +2610,10 @@ pub fn reconstruct_av1_frame(
         v: v_plane.clone(),
         stride: plane_stride,
         grid_width: plane_stride,
+        // `apply_post_filters` returns superres-upscaled planes, whose chroma
+        // stride is likewise `luma_stride >> ss_x`; without it (or for 4:2:0)
+        // it is the un-upscaled `uv_grid_w`.
+        uv_grid_width: plane_stride >> usize::from(ss_x),
         grid_height: grid_h,
         real_width,
         real_height: height,
@@ -2643,6 +2652,7 @@ pub fn reconstruct_av1_frame(
         &padded.u,
         &padded.v,
         plane_stride,
+        padded.uv_grid_width,
         real_width,
         height,
         pixel_format,
@@ -2763,16 +2773,25 @@ fn split_tile_group_payloads(
     Ok(tiles)
 }
 
-/// Crop mi-grid-extent planes (dense, `grid_w` stride) down to the visible
+/// Crop mi-grid-extent planes (dense, `grid_w` luma stride) down to the visible
 /// `width × height` frame, packed Y then U then V.
-/// Crop the visible area out of the (grid-extent) reconstructed planes and
-/// serialise into the frame's `pixel_format` sample layout. Monochrome formats
-/// emit the luma plane only; 4:2:0 formats emit half-size chroma.
+/// The visible area is cropped out of the (grid-extent) reconstructed planes and
+/// serialised into the frame's `pixel_format` sample layout. Monochrome formats
+/// emit the luma plane only; subsampled formats emit correspondingly smaller
+/// chroma.
+///
+/// `uv_grid_w` is the chroma planes' own stride (`grid_w >> ss_x`) and MUST be
+/// passed in rather than re-derived here. Deriving it by halving the luma
+/// stride is only correct for 4:2:0: 4:2:2 has `ss_x == 0`, so its chroma
+/// planes are allocated full-width and halving produced a stride twice the real
+/// one, reading past the end of the plane (a panic on real 4:2:2 streams).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn crop_planes(
     y: &[Px],
     u: &[Px],
     v: &[Px],
     grid_w: usize,
+    uv_grid_w: usize,
     width: usize,
     height: usize,
     pixel_format: PixelFormat,
@@ -2782,7 +2801,7 @@ pub(crate) fn crop_planes(
         PixelFormat::Gray | PixelFormat::Gray10le | PixelFormat::Gray12le
     );
     let mut data = Vec::with_capacity(width * height * usize::from(!mono) * 3 / 2);
-    let mut put = |row: &[Px]| match pixel_format {
+    let put = |data: &mut Vec<u8>, row: &[Px]| match pixel_format {
         PixelFormat::Gray | PixelFormat::Yuv420p | PixelFormat::Yuv422p | PixelFormat::Yuv444p => {
             data.extend(row.iter().map(|&p| p as u8));
         }
@@ -2792,27 +2811,39 @@ pub(crate) fn crop_planes(
             }
         }
     };
-    for row in 0..height {
-        put(&y[row * grid_w..row * grid_w + width]);
-    }
-    if mono {
-        return data;
-    }
-    // 4:2:0 formats halve both axes; 4:2:2 halves height; 4:4:4 keeps full.
+    // 4:2:0 halves both axes; 4:2:2 halves height only; 4:4:4 keeps full size.
     let (ss_x, ss_y) = match pixel_format {
         PixelFormat::Yuv420p | PixelFormat::Yuv420p10le | PixelFormat::Yuv420p12le => (1, 1),
         PixelFormat::Yuv422p => (0, 1),
         _ => (0, 0),
     };
-    let uw = grid_w >> ss_x;
+    let uw = uv_grid_w;
     let cw = width >> ss_x;
     let ch = height.div_ceil(1 + ss_y);
-    for row in 0..ch {
-        put(&u[row * uw..row * uw + cw]);
+    // Emit only the rows/columns the plane actually holds. The stride passed in
+    // is authoritative, but a stream whose geometry disagrees with its
+    // allocation must not read out of bounds — emit what is really there.
+    let emit = |plane: &[Px], data: &mut Vec<u8>| {
+        for row in 0..ch {
+            let start = row * uw;
+            let Some(end) = start.checked_add(cw).filter(|e| *e <= plane.len()) else {
+                break;
+            };
+            put(data, &plane[start..end]);
+        }
+    };
+    for row in 0..height {
+        let start = row * grid_w;
+        let Some(end) = start.checked_add(width).filter(|e| *e <= y.len()) else {
+            break;
+        };
+        put(&mut data, &y[start..end]);
     }
-    for row in 0..ch {
-        put(&v[row * uw..row * uw + cw]);
+    if mono {
+        return data;
     }
+    emit(u, &mut data);
+    emit(v, &mut data);
     data
 }
 

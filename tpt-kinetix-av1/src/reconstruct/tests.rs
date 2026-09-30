@@ -2387,3 +2387,89 @@ fn palette_prediction_with_sub_block_offset() {
     assert_eq!(out[6], 100);
     assert_eq!(out[7], 100);
 }
+
+/// Regression: `crop_planes` used to derive the chroma stride by halving the
+/// luma stride. That is only correct for 4:2:0 — 4:2:2 has `ss_x == 0`, so its
+/// chroma planes are allocated full-width and the derived stride was twice the
+/// real one, reading past the end of the plane. A real 192x128 4:2:2 keyframe
+/// panicked in `reconstruct_av1_frame`. The chroma stride is now passed in.
+#[test]
+fn crop_planes_uses_the_real_chroma_stride_for_422() {
+    // 8x4 visible frame on an 8x4 grid extent: 4:2:2 keeps full chroma width
+    // and halves only the height, so the chroma plane is 8x2 with stride 8.
+    let (w, h) = (8usize, 4usize);
+    let y: Vec<Px> = (0..(w * h) as Px).collect();
+    let u: Vec<Px> = (0..(w * (h / 2)) as Px).map(|v| v + 100).collect();
+    let v: Vec<Px> = (0..(w * (h / 2)) as Px).map(|v| v + 200).collect();
+    // The wrong stride (w/2) would index row 1 at 4..8 of a 16-long plane and
+    // row 2 at 8..12, 12..16, then row 3 at 12..16 of a 32-long plane: out of
+    // range. The right stride is the full 8.
+    let out = crop_planes(&y, &u, &v, w, w, w, h, PixelFormat::Yuv422p);
+    assert_eq!(out.len(), w * h * 2, "4:2:2 is 2 bytes per pixel");
+    // Luma first, unchanged.
+    for (i, &sample) in y.iter().enumerate().take(w * h) {
+        assert_eq!(out[i], sample as u8, "luma sample {i}");
+    }
+    // Then U (rows 0..2, each 8 wide, stride 8).
+    for row in 0..(h / 2) {
+        for col in 0..w {
+            assert_eq!(
+                out[w * h + row * w + col],
+                (100 + row * w + col) as u8,
+                "U sample r{row} c{col}"
+            );
+        }
+    }
+    // Then V.
+    let v_base = w * h + w * (h / 2);
+    for row in 0..(h / 2) {
+        for col in 0..w {
+            assert_eq!(
+                out[v_base + row * w + col],
+                (200 + row * w + col) as u8,
+                "V sample r{row} c{col}"
+            );
+        }
+    }
+}
+
+/// 4:2:0 must keep halving BOTH axes, so this pins that the stride fix above
+/// did not regress the well-tested 4:2:0 path: chroma is half width, half
+/// height, stride 4.
+#[test]
+fn crop_planes_still_halves_both_axes_for_420() {
+    let (w, h) = (8usize, 8usize);
+    let y: Vec<Px> = (0..(w * h) as Px).collect();
+    let u: Vec<Px> = (0..((w / 2) * (h / 2)) as Px).map(|v| v + 100).collect();
+    let v: Vec<Px> = (0..((w / 2) * (h / 2)) as Px).map(|v| v + 200).collect();
+    let out = crop_planes(&y, &u, &v, w, w / 2, w, h, PixelFormat::Yuv420p);
+    assert_eq!(out.len(), w * h * 3 / 2, "4:2:0 is 1.5 bytes per pixel");
+    let cw = w / 2;
+    let ch = h / 2;
+    for row in 0..ch {
+        for col in 0..cw {
+            assert_eq!(out[w * h + row * cw + col], (100 + row * cw + col) as u8);
+        }
+    }
+}
+
+/// A plane shorter than the requested geometry must not read out of bounds —
+/// `crop_planes` emits only the rows the plane actually holds.
+#[test]
+fn crop_planes_truncates_rather_than_reading_out_of_bounds() {
+    let (w, h) = (8usize, 8usize);
+    let y: Vec<Px> = vec![7; w * h];
+    // Chroma allocated for a single row only, but 4:2:0 geometry wants 4.
+    let u: Vec<Px> = vec![1; cw_len(w)];
+    let v: Vec<Px> = vec![2; cw_len(w)];
+    let out = crop_planes(&y, &u, &v, w, w / 2, w, h, PixelFormat::Yuv420p);
+    // Full luma plus the single chroma row each of U and V.
+    assert_eq!(out.len(), w * h + 2 * (w / 2));
+    assert!(out[w * h..].iter().all(|&b| b == 1 || b == 2));
+}
+
+/// Helper for `crop_planes_truncates_rather_than_reading_out_of_bounds`: the
+/// length of a single 4:2:0 chroma row (stride `w/2`).
+fn cw_len(w: usize) -> usize {
+    w / 2
+}

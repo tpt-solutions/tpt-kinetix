@@ -56,6 +56,10 @@ pub struct StoredFrame {
     pub v: Vec<crate::Px>,
     /// Grid width (= plane stride; planes are dense).
     pub width: usize,
+    /// Chroma plane stride (`width >> ss_x`). Only 4:2:0 halves it; for
+    /// 4:2:2/4:4:4 it equals `width`. Needed by `crop_planes` to crop the
+    /// visible chroma region out of the grid-extent planes.
+    pub uv_width: usize,
     /// Grid height (mi rows × 4).
     pub height: usize,
     /// The visible frame dimensions (≤ grid dims) used for output cropping.
@@ -78,6 +82,7 @@ impl StoredFrame {
             &self.u,
             &self.v,
             self.width,
+            self.uv_width,
             self.real_width,
             self.real_height,
             self.pixel_format,
@@ -170,6 +175,7 @@ impl RefFrameStore {
                 u: u.clone(),
                 v: v.clone(),
                 width: planes.grid_width,
+                uv_width: planes.uv_grid_width,
                 height: planes.grid_height,
                 real_width: planes.real_width,
                 real_height: planes.real_height,
