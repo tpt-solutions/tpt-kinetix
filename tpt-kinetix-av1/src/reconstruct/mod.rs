@@ -2106,6 +2106,8 @@ fn build_ref_frames(ref_store: Option<&RefFrameStore>) -> RefFrames<'_> {
                     v: &f.v,
                     width: f.width,
                     height: f.height,
+                    uv_width: f.uv_width,
+                    uv_height: f.u.len().checked_div(f.uv_width).unwrap_or(0),
                     real_width: f.real_width,
                     real_height: f.real_height,
                 });

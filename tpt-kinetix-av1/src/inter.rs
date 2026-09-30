@@ -120,6 +120,10 @@ pub struct RefSlot<'a> {
     pub v: &'a [Px],
     pub width: usize,
     pub height: usize,
+    /// Chroma plane stride / row count (4:2:0 halves both; 4:2:2 halves only
+    /// the width; 4:4:4 halves neither).
+    pub uv_width: usize,
+    pub uv_height: usize,
     /// Visible frame dims (≤ `width`/`height`). Motion compensation clamps
     /// reference reads at these — dav1d's `mc()`/`warp_affine()` use
     /// `p.p.w/p.p.h` (not the mi-grid extent) as the `emu_edge` bounds for
@@ -133,8 +137,8 @@ pub struct RefSlot<'a> {
 impl<'a> RefSlot<'a> {
     pub fn plane(&self, plane: usize) -> (&'a [Px], usize, usize) {
         match plane {
-            1 => (self.u, self.width / 2, self.height / 2),
-            2 => (self.v, self.width / 2, self.height / 2),
+            1 => (self.u, self.uv_width, self.uv_height),
+            2 => (self.v, self.uv_width, self.uv_height),
             _ => (self.y, self.width, self.height),
         }
     }
