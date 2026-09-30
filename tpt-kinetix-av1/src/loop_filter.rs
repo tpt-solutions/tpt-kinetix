@@ -963,12 +963,17 @@ fn filter_line_1d(
         let ps0 = p0 - half;
         let qs0 = q0 - half;
         let qs1 = q1 - half;
-        // §7.14.6.3: one clip over the complete sum, not two separate clips
-        let filter = clip3(
-            (if hev { ps1 - qs1 } else { 0 }) + 3 * (qs0 - ps0),
-            -half,
-            half - 1,
-        );
+        // §7.14.6.3 `filter4_clamp` is applied twice: to `ps1 - qs1` (only when
+        // `hevMask`), then to the sum with `3 * (qs0 - ps0)` — libaom's
+        // `signed_char_clamp` twice, dav1d's `iclip_diff` twice. A single clamp
+        // over the complete sum differs whenever `|ps1 - qs1|` alone exceeds
+        // the clamp range (strong edges at high filter levels).
+        let base = if hev {
+            clip3(ps1 - qs1, -half, half - 1)
+        } else {
+            0
+        };
+        let filter = clip3(base + 3 * (qs0 - ps0), -half, half - 1);
         let f1 = clip3(filter + 4, -half, half - 1) >> 3;
         let f2 = clip3(filter + 3, -half, half - 1) >> 3;
         let oq0 = clip3(qs0 - f1 + half, 0, pix_max);

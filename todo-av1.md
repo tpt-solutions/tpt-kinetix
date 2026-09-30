@@ -15201,3 +15201,36 @@ crate matched on it, so the blast radius was two files). An 18-case sweep (10/12
   clamped to 0. Affects 4:2:0 12-bit too.
 Note: ffmpeg's lavfi/libaom path may hand you 332x210 when you ask for 333x211 -- check the
 decoded frame size before analysing diffs (an hour was lost to a wrong-geometry diff script).
+
+## Session 2026-09-30 #12 -- three residual bugs found by the dav1d `r=` desync walk
+
+Session #11's chroma-geometry sweep left three uncommitted fixes in the tree. All three are
+real bugs, all three are in different subsystems, and all three were found by the same
+`r=`-checkpoint walk documented at the end of #11 (not by reading code).
+
+1. **`byte_align` rejected the `trailing_bits()` stop bit** (`frame.rs`). The function was
+   written to validate that every padding bit was `0` and errored otherwise, but an
+   `OBU_FRAME_HEADER` sent as its own OBU terminates with `trailing_bits()` -- a `1` bit,
+   then zeros. Every such header was rejected with "trailing_bits padding bit was not 0".
+   Both syntaxes just advance to the byte boundary, so the padding *values* are now skipped
+   and not validated; the comment records why.
+2. **CDEF `filter4_clamp` was clamped once instead of twice** (`loop_filter.rs::filter_line_1d`).
+   §7.14.6.3 applies the clamp to `ps1 - qs1` (only when `hevMask`) *and then again* to the
+   sum with `3 * (qs0 - ps0)` -- libaom's two `signed_char_clamp` calls, dav1d's two
+   `iclip_diff` calls. A single clamp over the complete sum differs whenever `|ps1 - qs1|`
+   alone exceeds the clamp range, i.e. on strong edges at high filter levels. Now two
+   clamps, matching both references.
+3. **Inter chroma `TxBlockCtx` reported the transform block's size as the coded block's**
+   (`reconstruct/inter_block.rs`). `block_w`/`block_h` were `(bw * MI_SIZE) >> ss_x` /
+   `(bh * MI_SIZE) >> ss_y`, but the luma path had already been fixed to pass the
+   coded block's chroma-plane size (`chroma_bw`/`chroma_bh`, from
+   `get_plane_residual_size(bsize, sub_x, sub_y)`). The inter path now uses the same
+   `chroma_bw`/`chroma_bh` locals, which also removes the two now-unused `subsampling_*`
+   casts.
+
+Verification: `cargo fmt -p tpt-kinetix-av1 -- --check` clean, `cargo clippy -p
+tpt-kinetix-av1 --all-targets -- -D warnings` clean, `cargo test -p tpt-kinetix-av1` fully
+green (173 lib + 12 integration, including the 98s `libaom_crosscheck`). Not re-measured
+against a dav1d sweep in this session -- the three fixes are reference-transcription
+corrections, and the existing bit-exactness corpus already passes with them applied.
+

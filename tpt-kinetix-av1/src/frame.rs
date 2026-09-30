@@ -1381,20 +1381,17 @@ fn dbg_dump_frame_header(
 // Frame header sub-parsers (AV1 spec §5.9 uncompressed_header helpers)
 // ===========================================================================
 
-/// `trailing_bits()` (§6.8.2): pad with `0`-valued bits up to the next byte
-/// boundary. The `frame_header_obu` terminates with `trailing_bits()`, not
-/// `byte_alignment()` (which would consume the first tile-group bit expecting it
-/// to be `1` and desync the following tile payload).
+/// Skip to the next byte boundary after the uncompressed header.
+///
+/// Two different syntaxes end a frame header: inside an `OBU_FRAME`,
+/// `byte_alignment()` (zero bits) precedes the tile group; a standalone
+/// `OBU_FRAME_HEADER` ends with `trailing_bits()` (a `1` bit, then zeros). Both
+/// just advance to the boundary, so the padding values are not validated here
+/// (rejecting the trailing `1` dropped every header sent as its own OBU).
 fn byte_align(br: &mut BitReader<'_>) -> Result<(), KinetixError> {
     while br.bits_read() & 7 != 0 {
-        let b = br
-            .read_bit()
+        br.read_bit()
             .ok_or_else(|| KinetixError::Parse("trailing_bits truncated".into()))?;
-        if b != 0 {
-            return Err(KinetixError::Parse(
-                "trailing_bits padding bit was not 0".into(),
-            ));
-        }
     }
     Ok(())
 }

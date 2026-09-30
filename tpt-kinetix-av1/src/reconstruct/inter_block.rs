@@ -3959,8 +3959,6 @@ impl<'a> TileDecodeState<'a> {
         let luma_tx = leaves.first().map(|l| l.2).unwrap_or(TX_4X4);
         let luma_tx_w = av1::TX_WIDTH[luma_tx];
         let luma_tx_h = av1::TX_HEIGHT[luma_tx];
-        let subsampling_x = self.subsampling_x as u8;
-        let subsampling_y = self.subsampling_y as u8;
 
         // The `FrameMeta` geometry recording below always runs (the deblock
         // filter needs every inter block's transform geometry, skipped or
@@ -4508,8 +4506,8 @@ impl<'a> TileDecodeState<'a> {
                                         // (see the `c_tx` heuristic above it), so this
                                         // matches that same approximation rather than the
                                         // exact spec table.
-                                        block_w: (bw * MI_SIZE) >> subsampling_x,
-                                        block_h: (bh * MI_SIZE) >> subsampling_y,
+                                        block_w: chroma_bw,
+                                        block_h: chroma_bh,
                                         intra_dir: 0,
                                         uv_mode: 0,
                                         qindex_positive: self.qidx_pos,
