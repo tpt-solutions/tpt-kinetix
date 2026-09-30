@@ -21,7 +21,7 @@
 //! `volumetric_geometry_cross_checks_tmc3_bit_exact` drives it).
 //!
 //! The geometry cross-check was run on 2026-09-30 against `tmc3 release-v23.0-rc2` built
-//! from https://github.com/MPEGGroup/mpeg-pcc-tmc13 (cmake needs
+//! from <https://github.com/MPEGGroup/mpeg-pcc-tmc13> (cmake needs
 //! `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`; use a **Debug** build under mingw, because the
 //! optimized build segfaults on a plain run) and passed. Note this only demonstrates that
 //! both codecs preserve the lattice losslessly; it says nothing about bitstream

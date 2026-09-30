@@ -19,6 +19,9 @@ pub const SEGMENT_DELTAS: usize = MAX_SEGMENTS;
 const FRAME_MARKER: u32 = 0b10;
 /// 24-bit sync code for key frames and intra-only frames.
 const SYNC_CODE: u32 = 0x49_83_42;
+/// Largest decodable frame area (8192x8192); larger sizes are rejected before any
+/// plane is allocated.
+const MAX_FRAME_PIXELS: u64 = 8192 * 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
@@ -429,6 +432,16 @@ pub fn parse_uncompressed_header(
                 h.segmentation.feat_enabled[i][3] = br.try_f(1, "skip_enabled")? == 1;
             }
         }
+    }
+
+    // Bound the frame-buffer allocation: the 16-bit size fields allow 65536x65536
+    // (>6 GB of planes) from a handful of header bytes, which a hostile stream
+    // could use to OOM the process.
+    if u64::from(h.width) * u64::from(h.height) > MAX_FRAME_PIXELS {
+        return Err(KinetixError::Parse(format!(
+            "vp9: frame size {}x{} exceeds supported maximum",
+            h.width, h.height
+        )));
     }
 
     // Tile info.

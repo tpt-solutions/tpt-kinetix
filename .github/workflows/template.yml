@@ -21,21 +21,18 @@ jobs:
         run: cargo install cargo-generate --locked
       - name: Generate a sample codec crate
         run: |
-          # Generate straight into a temp dir so it doesn't pollute the workspace.
-          mkdir -p /tmp/gen
+          # The generated crate inherits workspace.package fields and depends on
+          # ../tpt-kinetix-core, so it must live at the workspace root (throwaway CI checkout).
           cargo generate --path templates/codec-crate \
             --name tpt-kinetix-samplecodec \
             --define codec_name=samplecodec \
             --define codec_cap=Samplecodec \
             --define codec_title="Sample Codec" \
             --define codec_kind=video \
-            --destination /tmp/gen
+            --destination .
+      - name: Register the generated crate as a workspace member
+        run: sed -i '0,/^members = \[/s//members = [\n  "tpt-kinetix-samplecodec",/' Cargo.toml
       - name: Build the generated crate against the workspace
-        run: |
-          cd /tmp/gen/tpt-kinetix-samplecodec
-          cargo build --workspace 2>/dev/null || true
-          cargo build
+        run: cargo build -p tpt-kinetix-samplecodec
       - name: Test the generated crate
-        run: |
-          cd /tmp/gen/tpt-kinetix-samplecodec
-          cargo test
+        run: cargo test -p tpt-kinetix-samplecodec
