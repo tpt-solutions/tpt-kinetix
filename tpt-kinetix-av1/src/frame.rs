@@ -2119,7 +2119,8 @@ fn frame_id_none(_seq: &crate::obu::SequenceHeaderObu) -> bool {
 /// Compute the effective bit depth from the sequence header.
 fn seq_bit_depth(seq: &crate::obu::SequenceHeaderObu) -> u8 {
     if seq.color_config.high_bitdepth {
-        if seq.seq_profile == 2 {
+        // §5.5.4: only profile 2 can be 12-bit, and only when `twelve_bit` is set.
+        if seq.seq_profile == 2 && seq.color_config.twelve_bit {
             12
         } else {
             10

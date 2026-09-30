@@ -142,6 +142,20 @@ fn libaom_streams_match_libdav1d() {
             aom: &["-cpu-used", "1"],
         },
         Case {
+            // Profile-2 10-bit (`twelve_bit == 0`) was mis-read as 12-bit.
+            name: "testsrc2 320x240 4:2:2 10-bit (profile 2, twelve_bit=0)",
+            lavfi: "testsrc2=size=320x240:rate=10",
+            pix_fmt: "yuv422p10le",
+            aom: &["-cpu-used", "2"],
+        },
+        Case {
+            // 12-bit SGR: alpha*sum*one_by_n reaches ~4.28e9 (i32 overflow).
+            name: "testsrc2 332x210 4:4:4 12-bit (SGR overflow)",
+            lavfi: "testsrc2=size=332x210:rate=10",
+            pix_fmt: "yuv444p12le",
+            aom: &["-cpu-used", "4"],
+        },
+        Case {
             name: "testsrc2 192x128 4:4:4 (unsubsampled chroma planes and refs)",
             lavfi: "testsrc2=size=192x128:rate=10",
             pix_fmt: "yuv444p",

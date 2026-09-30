@@ -471,8 +471,8 @@ impl<'a> TileDecodeState<'a> {
                 let size = 2 + self.mode_cdfs.read_palette_size_y(&mut self.dec, bsize_ctx);
                 let cache = self.get_palette_cache(0, mi_row, mi_col);
                 let pal_dbg = std::env::var("KINETIX_AV1_DBG_PAL").is_ok()
-                    && mi_row == 8
-                    && (mi_col == 20 || mi_col == 24);
+                    && (std::env::var("KINETIX_AV1_DBG_PAL_ALL").is_ok()
+                        || (mi_row == 8 && (mi_col == 20 || mi_col == 24)));
                 colors_y = self.read_palette_colors_yu(size, &cache, false, pal_dbg);
                 if std::env::var("KINETIX_AV1_DBG_PAL").is_ok() {
                     eprintln!(

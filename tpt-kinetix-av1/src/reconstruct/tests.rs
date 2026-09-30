@@ -2493,6 +2493,23 @@ fn pixel_format_for_maps_each_chroma_sampling_case() {
         pixel_format_for(8, false, true, false),
         PixelFormat::Yuv422p
     );
+    // High bit depth keeps the chroma layout.
+    assert_eq!(
+        pixel_format_for(10, false, true, false),
+        PixelFormat::Yuv422p10le
+    );
+    assert_eq!(
+        pixel_format_for(12, false, true, false),
+        PixelFormat::Yuv422p12le
+    );
+    assert_eq!(
+        pixel_format_for(10, false, false, false),
+        PixelFormat::Yuv444p10le
+    );
+    assert_eq!(
+        pixel_format_for(12, false, false, false),
+        PixelFormat::Yuv444p12le
+    );
     // 4:4:4: neither axis subsampled.
     assert_eq!(
         pixel_format_for(8, false, false, false),

@@ -15189,6 +15189,15 @@ values, so a 40-line script that walks both lists and reports the first Kinetix 
 within a small lookahead finds the first desynced symbol in seconds (Kinetix's `PALUV` line logs
 before the colours are read, so drop it from the comparison).
 
-Still open: 10/12-bit 4:2:2/4:4:4 (needs new `PixelFormat` variants in `tpt-kinetix-core`, a
-workspace-breaking change; today the decoder silently emits 8-bit-sized buffers for them);
-film grain on odd-width frames (skipped by design); FATE samples not on disk.
+Still open: film grain on odd-width frames (skipped by design); FATE samples not on disk.
+
+### Addendum: 10/12-bit 4:2:2 and 4:4:4 (same day)
+Added `Yuv422p10le/12le` and `Yuv444p10le/12le` to `tpt-kinetix-core::PixelFormat` (only the AV1
+crate matched on it, so the blast radius was two files). An 18-case sweep (10/12-bit x
+4:2:0/4:2:2/4:4:4 x 3 sources) is now bit-exact. Two more real bugs surfaced:
+- `seq_bit_depth` returned 12 for every profile-2 high-bitdepth stream, ignoring `twelve_bit`;
+  10-bit 4:2:2 (which is profile 2) decoded as 12-bit (wrong palette literal width etc.).
+- SGR `alpha * sum * one_by_n` overflowed i32 at 12-bit (~4.28e9; dav1d uses u32) -> pixels
+  clamped to 0. Affects 4:2:0 12-bit too.
+Note: ffmpeg's lavfi/libaom path may hand you 332x210 when you ask for 333x211 -- check the
+decoded frame size before analysing diffs (an hour was lost to a wrong-geometry diff script).

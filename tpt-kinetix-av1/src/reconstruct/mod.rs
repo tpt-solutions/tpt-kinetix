@@ -2820,7 +2820,7 @@ pub(crate) fn crop_planes(
     // emitted a row-duplicated chroma plane.
     let (ss_x, ss_y) = match pixel_format {
         PixelFormat::Yuv420p | PixelFormat::Yuv420p10le | PixelFormat::Yuv420p12le => (1, 1),
-        PixelFormat::Yuv422p => (1, 0),
+        PixelFormat::Yuv422p | PixelFormat::Yuv422p10le | PixelFormat::Yuv422p12le => (1, 0),
         _ => (0, 0),
     };
     let uw = uv_grid_w;
@@ -2878,7 +2878,15 @@ pub(crate) fn pixel_format_for(
         // produces), so every 4:2:2 stream fell through to `Yuv444p` and
         // `crop_planes` used the 4:4:4 chroma extent — emitting a 73344-byte
         // buffer for a 192x128 frame that needs 49152.
-        (_, false) if ss_x && !ss_y => PixelFormat::Yuv422p,
-        (_, false) => PixelFormat::Yuv444p,
+        (_, false) if ss_x && !ss_y => match bit_depth {
+            8 => PixelFormat::Yuv422p,
+            10 => PixelFormat::Yuv422p10le,
+            _ => PixelFormat::Yuv422p12le,
+        },
+        (_, false) => match bit_depth {
+            8 => PixelFormat::Yuv444p,
+            10 => PixelFormat::Yuv444p10le,
+            _ => PixelFormat::Yuv444p12le,
+        },
     }
 }

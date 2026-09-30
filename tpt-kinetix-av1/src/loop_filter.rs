@@ -1897,7 +1897,10 @@ fn sgrproj_filter_plane(
                     let z = ((p_val * s as u64 + (1 << 19)) >> 20).min(255) as usize;
                     let alpha = SGR_X_BY_X[z] as i32;
                     let ai = a_idx(lx, ly);
-                    a_tab[ai] = (alpha * sum * one_by_n + (1 << 11)) >> 12;
+                    // dav1d does this product in unsigned 32-bit; at 12-bit it reaches
+                    // ~4.28e9 (255 * 25*4095 * 164), which overflows i32.
+                    a_tab[ai] =
+                        ((alpha as i64 * sum as i64 * one_by_n as i64 + (1 << 11)) >> 12) as i32;
                     b_tab[ai] = alpha;
                 }
             }

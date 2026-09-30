@@ -19,6 +19,14 @@ pub enum PixelFormat {
     Yuv420p10le,
     /// 4:2:0 planar YUV, 12 bits per sample stored as little-endian 16-bit words.
     Yuv420p12le,
+    /// 4:2:2 planar YUV, 10 bits per sample (little-endian 16-bit words).
+    Yuv422p10le,
+    /// 4:2:2 planar YUV, 12 bits per sample (little-endian 16-bit words).
+    Yuv422p12le,
+    /// 4:4:4 planar YUV, 10 bits per sample (little-endian 16-bit words).
+    Yuv444p10le,
+    /// 4:4:4 planar YUV, 12 bits per sample (little-endian 16-bit words).
+    Yuv444p12le,
     /// Monochrome planar greyscale, 10 bits per sample stored as little-endian
     /// 16-bit words.
     Gray10le,
@@ -35,7 +43,11 @@ impl PixelFormat {
             | PixelFormat::Yuv422p
             | PixelFormat::Yuv444p
             | PixelFormat::Yuv420p10le
-            | PixelFormat::Yuv420p12le => 3,
+            | PixelFormat::Yuv420p12le
+            | PixelFormat::Yuv422p10le
+            | PixelFormat::Yuv422p12le
+            | PixelFormat::Yuv444p10le
+            | PixelFormat::Yuv444p12le => 3,
             PixelFormat::Gray | PixelFormat::Gray10le | PixelFormat::Gray12le => 1,
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => 1,
         }
@@ -58,6 +70,8 @@ impl PixelFormat {
             PixelFormat::Rgb24 | PixelFormat::Bgr24 => 24,
             // 16-bit storage per sample, 4:2:0: 1.5 samples per pixel.
             PixelFormat::Yuv420p10le | PixelFormat::Yuv420p12le => 24,
+            PixelFormat::Yuv422p10le | PixelFormat::Yuv422p12le => 32,
+            PixelFormat::Yuv444p10le | PixelFormat::Yuv444p12le => 48,
             PixelFormat::Gray10le | PixelFormat::Gray12le => 16,
         }
     }
@@ -74,6 +88,10 @@ impl std::fmt::Display for PixelFormat {
             PixelFormat::Bgr24 => "bgr24",
             PixelFormat::Yuv420p10le => "yuv420p10le",
             PixelFormat::Yuv420p12le => "yuv420p12le",
+            PixelFormat::Yuv422p10le => "yuv422p10le",
+            PixelFormat::Yuv422p12le => "yuv422p12le",
+            PixelFormat::Yuv444p10le => "yuv444p10le",
+            PixelFormat::Yuv444p12le => "yuv444p12le",
             PixelFormat::Gray10le => "gray10le",
             PixelFormat::Gray12le => "gray12le",
         };
