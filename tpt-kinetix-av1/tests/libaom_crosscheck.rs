@@ -121,6 +121,18 @@ fn libaom_streams_match_libdav1d() {
     }
     let cases = [
         Case {
+            name: "testsrc2 192x128 4:2:2 (chroma deblock/CDEF/LR grids, sub-8x8 chroma MC)",
+            lavfi: "testsrc2=size=192x128:rate=10",
+            pix_fmt: "yuv422p",
+            aom: &["-cpu-used", "4"],
+        },
+        Case {
+            name: "testsrc2 192x128 4:4:4 (unsubsampled chroma planes and refs)",
+            lavfi: "testsrc2=size=192x128:rate=10",
+            pix_fmt: "yuv444p",
+            aom: &["-cpu-used", "4"],
+        },
+        Case {
             name: "testsrc 548x388 cpu0 (128x128 inter blocks: per-64x64-chunk residual order)",
             lavfi: "testsrc=size=548x388:rate=10",
             pix_fmt: "yuv420p",

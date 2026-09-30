@@ -936,8 +936,18 @@ impl<'a> TileDecodeState<'a> {
                 // Record chroma tx/skip metadata for the same 8×8-luma grid region.
                 let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
                 let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
-                for by in self.meta.ccy(blk_px_y)..self.meta.ccy_end(blk_px_y + bh * MI_SIZE).min(self.meta.ch4) {
-                    for bx in self.meta.ccx(blk_px_x)..self.meta.ccx_end(blk_px_x + bw * MI_SIZE).min(self.meta.cw4) {
+                for by in self.meta.ccy(blk_px_y)
+                    ..self
+                        .meta
+                        .ccy_end(blk_px_y + bh * MI_SIZE)
+                        .min(self.meta.ch4)
+                {
+                    for bx in self.meta.ccx(blk_px_x)
+                        ..self
+                            .meta
+                            .ccx_end(blk_px_x + bw * MI_SIZE)
+                            .min(self.meta.cw4)
+                    {
                         self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
                     }
                 }
@@ -2636,8 +2646,18 @@ impl<'a> TileDecodeState<'a> {
 
             let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
             let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
-            for by in self.meta.ccy(blk_px_y)..self.meta.ccy_end(blk_px_y + bh * MI_SIZE).min(self.meta.ch4) {
-                for bx in self.meta.ccx(blk_px_x)..self.meta.ccx_end(blk_px_x + bw * MI_SIZE).min(self.meta.cw4) {
+            for by in self.meta.ccy(blk_px_y)
+                ..self
+                    .meta
+                    .ccy_end(blk_px_y + bh * MI_SIZE)
+                    .min(self.meta.ch4)
+            {
+                for bx in self.meta.ccx(blk_px_x)
+                    ..self
+                        .meta
+                        .ccx_end(blk_px_x + bw * MI_SIZE)
+                        .min(self.meta.cw4)
+                {
                     self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
                 }
             }

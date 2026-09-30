@@ -263,6 +263,47 @@ pub(super) fn wedge_mask_420(bsize: usize, wedge_sign: bool, wedge_index: usize)
     }
 }
 
+/// Chroma-layout wedge mask for any subsampling: the luma mask averaged over
+/// the subsampled axes (dav1d `init_chroma`: `(a + b + 1) >> 1` for one axis,
+/// `(a + b + c + d + 2) >> 2` for both). 4:2:0 defers to the precomputed
+/// table; 4:4:4 returns the luma mask unchanged.
+pub(super) fn wedge_mask_ss(
+    bsize: usize,
+    wedge_sign: bool,
+    wedge_index: usize,
+    subx: bool,
+    suby: bool,
+) -> Vec<u8> {
+    match (subx, suby) {
+        (true, true) => wedge_mask_420(bsize, wedge_sign, wedge_index),
+        (false, false) => wedge_mask(bsize, wedge_sign, wedge_index),
+        (true, false) => {
+            let m = wedge_mask(bsize, wedge_sign, wedge_index);
+            let (w, h) = (BLOCK_WIDTH[bsize], BLOCK_HEIGHT[bsize]);
+            let mut out = vec![0u8; (w >> 1) * h];
+            for y in 0..h {
+                for x in 0..w >> 1 {
+                    let (a, b) = (m[y * w + 2 * x] as u32, m[y * w + 2 * x + 1] as u32);
+                    out[y * (w >> 1) + x] = ((a + b + 1) >> 1) as u8;
+                }
+            }
+            out
+        }
+        (false, true) => {
+            let m = wedge_mask(bsize, wedge_sign, wedge_index);
+            let (w, h) = (BLOCK_WIDTH[bsize], BLOCK_HEIGHT[bsize]);
+            let mut out = vec![0u8; w * (h >> 1)];
+            for y in 0..h >> 1 {
+                for x in 0..w {
+                    let (a, b) = (m[2 * y * w + x] as u32, m[(2 * y + 1) * w + x] as u32);
+                    out[y * w + x] = ((a + b + 1) >> 1) as u8;
+                }
+            }
+            out
+        }
+    }
+}
+
 /// Difference-weighted mask (§7.11.3.12) from the two intermediate-domain
 /// predictions. `mask_type == true` inverts (`DIFFWTD_38_INV`).
 pub(super) fn diffwtd_mask(

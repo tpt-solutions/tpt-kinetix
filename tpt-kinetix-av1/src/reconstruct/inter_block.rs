@@ -1687,14 +1687,17 @@ impl<'a> TileDecodeState<'a> {
         let cpx_y0 = px_y0 >> self.subsampling_y as u32;
         let cbw_px = bw_px >> self.subsampling_x as u32;
         let cbh_px = bh_px >> self.subsampling_y as u32;
-        let is_420 = self.subsampling_x && self.subsampling_y;
         // dav1d `has_chroma`: only the odd-parity half of a sub-8x8 pair (or
         // the bottom-right 4x4 of a quad) owns the parent 8x8's chroma — at
         // 4:2:0. General form (spec §7.3.1): `bw4 > SubX || MiCol odd`; with
         // subsampling 0 every block owns chroma.
         let has_chroma = (bw > self.subsampling_x as usize || (mi_col & 1) == 1)
             && (bh > self.subsampling_y as usize || (mi_row & 1) == 1);
-        let sub8x8_leaf = is_420 && (bw == 1 || bh == 1) && has_chroma;
+        // dav1d `is_sub8x8 = bw4 == ss_hor || bh4 == ss_ver`: a 4-wide leaf
+        // only shares chroma when x is subsampled, a 4-tall leaf only when y is.
+        let sw = bw == 1 && self.subsampling_x;
+        let sh = bh == 1 && self.subsampling_y;
+        let sub8x8_leaf = (sw || sh) && has_chroma;
         // dav1d `recon_tmpl.c`: `if (!has_chroma) goto skip_inter_chroma_pred;`
         // runs BEFORE the `is_sub8x8` branch — a `has_chroma == false` leaf
         // (the TL/TR/BL leaves of a split-8x8, or any other narrow leaf that
@@ -1715,18 +1718,19 @@ impl<'a> TileDecodeState<'a> {
         } else if sub8x8_leaf {
             // All sub-8x8 chroma MCs are based at the PARENT 8x8's chroma
             // origin (dav1d's `uvdstoff` floors `t->bx/by >> ss_hor/ver`).
-            let base_x = ((mi_col & !1) * MI_SIZE - self.tile_px_x0) / 2;
-            let base_y = ((mi_row & !1) * MI_SIZE - self.tile_px_y0) / 2;
+            let (ssx, ssy) = (self.subsampling_x as usize, self.subsampling_y as usize);
+            let base_x = (((mi_col & !ssx) * MI_SIZE) >> ssx) - (self.tile_px_x0 >> ssx);
+            let base_y = (((mi_row & !ssy) * MI_SIZE) >> ssy) - (self.tile_px_y0 >> ssy);
             let mut gate = true;
-            if bw == 1 {
+            if sw {
                 gate &= mi_col > 0
                     && self.refmv_cell(mi_row, mi_col - 1).refs[0] > crate::inter::INTRA_FRAME;
             }
-            if bh == 1 {
+            if sh {
                 gate &= mi_row > 0
                     && self.refmv_cell(mi_row - 1, mi_col).refs[0] > crate::inter::INTRA_FRAME;
             }
-            if bw == 1 && bh == 1 {
+            if sw && sh {
                 gate &= mi_col > 0
                     && mi_row > 0
                     && self.refmv_cell(mi_row - 1, mi_col - 1).refs[0] > crate::inter::INTRA_FRAME;
@@ -1736,7 +1740,7 @@ impl<'a> TileDecodeState<'a> {
                 // origin plus the running offsets.
                 let mut h_off = 0usize;
                 let mut v_off = 0usize;
-                if bw == 1 && bh == 1 {
+                if sw && sh {
                     // TL quadrant from the diagonal cell; its filter is the
                     // running `tl_filter2d` (dav1d `t->tl_4x4_filter`).
                     let cell = self.refmv_cell(mi_row - 1, mi_col - 1);
@@ -1782,7 +1786,7 @@ impl<'a> TileDecodeState<'a> {
                     v_off = 2;
                     h_off = 2;
                 }
-                if bw == 1 {
+                if sw {
                     // BL quadrant from the left cell (4x4) / the whole leaf
                     // (4x8), with the left cell's filters.
                     let cell = self.refmv_cell(mi_row, mi_col - 1);
@@ -1811,7 +1815,7 @@ impl<'a> TileDecodeState<'a> {
                     }
                     h_off = 2;
                 }
-                if bh == 1 {
+                if sh {
                     // TR quadrant from the above cell with the above cell's
                     // filters.
                     let cell = self.refmv_cell(mi_row - 1, mi_col);
@@ -1863,8 +1867,8 @@ impl<'a> TileDecodeState<'a> {
                 // Normal path: one mc over the WHOLE parent 8x8's chroma
                 // (dav1d `bw4 << (bw4 == ss_hor)`, `t->bx & ~ss_hor`) with
                 // this leaf's own mv and filters.
-                let pw = cbw_px << (bw == 1) as u32;
-                let ph = cbh_px << (bh == 1) as u32;
+                let pw = cbw_px << sw as u32;
+                let ph = cbh_px << sh as u32;
                 for plane in 1..=2usize {
                     self.inter_predict_plane(
                         plane,
@@ -3226,7 +3230,13 @@ impl<'a> TileDecodeState<'a> {
             2, 2, 2, 1, 1, 1, 1, 1,
         ];
         let wedge_mask = crate::reconstruct::wedge::wedge_mask(bsize, false, wedge_index);
-        let chroma_mask = crate::reconstruct::wedge::wedge_mask_420(bsize, false, wedge_index);
+        let chroma_mask = crate::reconstruct::wedge::wedge_mask_ss(
+            bsize,
+            false,
+            wedge_index,
+            self.subsampling_x,
+            self.subsampling_y,
+        );
         for plane in 0..3usize {
             let (subx, suby) = if plane == 0 {
                 (0usize, 0usize)
@@ -4592,8 +4602,18 @@ impl<'a> TileDecodeState<'a> {
         // (mirrors the intra keyframe path's identical call).
         let c_tx_w = av1::TX_WIDTH[c_tx] as u8;
         let c_tx_h = av1::TX_HEIGHT[c_tx] as u8;
-        for by in self.meta.ccy(blk_px_y)..self.meta.ccy_end(blk_px_y + bh * MI_SIZE).min(self.meta.ch4) {
-            for bx in self.meta.ccx(blk_px_x)..self.meta.ccx_end(blk_px_x + bw * MI_SIZE).min(self.meta.cw4) {
+        for by in self.meta.ccy(blk_px_y)
+            ..self
+                .meta
+                .ccy_end(blk_px_y + bh * MI_SIZE)
+                .min(self.meta.ch4)
+        {
+            for bx in self.meta.ccx(blk_px_x)
+                ..self
+                    .meta
+                    .ccx_end(blk_px_x + bw * MI_SIZE)
+                    .min(self.meta.cw4)
+            {
                 self.meta.record_chroma(bx, by, c_tx_w, c_tx_h, skip);
             }
         }
