@@ -257,9 +257,9 @@ fn parse_p_grid(annexb: &[u8], mb_cols: u32, mb_rows: u32, label: &str) {
 }
 
 fn full_decode_grid(annexb: &[u8], label: &str) {
+    use out_kinetix_h264::H264Decoder;
     use tpt_kinetix_core::packet::Packet;
     use tpt_kinetix_core::timestamp::Timestamp;
-    use out_kinetix_h264::H264Decoder;
     // ffmpeg reference P frame.
     let dir = std::env::temp_dir().join("out_kinetix_h264_mbaff_cvc");
     let h = dir.join(format!("{}.h264", label.replace(' ', "_")));

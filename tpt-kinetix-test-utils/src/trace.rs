@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
+use out_kinetix_h264::TracePlane;
 use serde::{Deserialize, Serialize};
 use tpt_kinetix_av1::entropy::{BlockMarker, SymbolTraceEntry};
-use out_kinetix_h264::TracePlane;
 
 use crate::trace_dump::{MapTracer, MbInfo, Stage};
 

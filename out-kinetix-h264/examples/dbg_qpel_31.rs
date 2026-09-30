@@ -1,3 +1,5 @@
+use out_kinetix_h264::motion_comp;
+use out_kinetix_h264::H264Decoder;
 /// Debug quarter-pel position (3,1) for the IPPPP frame 2 issue.
 /// MV for block 10 of MB(3,2) = (27,1), giving fx=3, fy=1.
 /// Block 10 base = global (56, 40).
@@ -5,8 +7,6 @@
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::motion_comp;
-use out_kinetix_h264::H264Decoder;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;

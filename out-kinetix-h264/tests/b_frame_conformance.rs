@@ -18,9 +18,9 @@
 
 use std::process::Command;
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;

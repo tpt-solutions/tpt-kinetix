@@ -2,10 +2,10 @@
 #![allow(warnings)]
 //! Run: cargo test -p out-kinetix-h264 --test h264_8x8_pixel_compare -- --nocapture
 
+use out_kinetix_h264::H264Decoder;
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 fn ffmpeg_ok() -> bool {
     Command::new("ffmpeg")

@@ -12,13 +12,13 @@
 //! `H264Decoder::store_reference_picture` wiring (which is what a real stream
 //! goes through) is covered too, not just `SliceHeader` → `Dpb`.
 
-use tpt_kinetix_core::{
-    frame::VideoFrame, packet::Packet, pixel_format::PixelFormat, timestamp::Timestamp,
-};
 use out_kinetix_h264::nal::NalUnitType;
 use out_kinetix_h264::ref_pic::{build_ref_list_l0, Dpb, DpbEntry, MmcoError, PicNumContext};
 use out_kinetix_h264::slice::{DecRefPicMarking, MmcoOp, SliceHeader, SliceHeaderContext};
 use out_kinetix_h264::H264Decoder;
+use tpt_kinetix_core::{
+    frame::VideoFrame, packet::Packet, pixel_format::PixelFormat, timestamp::Timestamp,
+};
 
 /// `MaxFrameNum` for every stream synthesised here
 /// (`log2_max_frame_num_minus4 == 0`).

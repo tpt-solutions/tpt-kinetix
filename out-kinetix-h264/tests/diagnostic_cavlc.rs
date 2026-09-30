@@ -5,9 +5,9 @@
 
 use std::process::Command;
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_test_utils::trace_dump::{MapTracer, Stage};
 
 const WIDTH: u32 = 64;

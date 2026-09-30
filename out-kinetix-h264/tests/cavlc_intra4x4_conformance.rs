@@ -19,10 +19,10 @@
 
 use std::process::Command;
 
-use tpt_kinetix_core::packet::Packet;
-use tpt_kinetix_core::timestamp::Timestamp;
 use out_kinetix_h264::trace::DecodeTracer;
 use out_kinetix_h264::H264Decoder;
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
 
 fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")

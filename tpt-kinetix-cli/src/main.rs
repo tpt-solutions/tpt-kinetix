@@ -392,7 +392,9 @@ fn transcode_to_av1(
     _speed: u8,
     _geometry: VideoGeometry,
 ) -> Result<()> {
-    anyhow::bail!("transcode requires the `codec-vp9` decode feature, which is not enabled in this build")
+    anyhow::bail!(
+        "transcode requires the `codec-vp9` decode feature, which is not enabled in this build"
+    )
 }
 
 #[cfg(feature = "codec-vp9")]

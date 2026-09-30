@@ -2,10 +2,10 @@
 //! intra_chroma_pred_mode) and per-block CAVLC info for comparison against
 //! ffmpeg / reference decoder output.
 
+use out_kinetix_h264::H264Decoder;
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_test_utils::trace_dump::{MapTracer, Stage};
 
 fn encode_testsrc(w: u32, h: u32, extra_args: &[&str]) -> Option<Vec<u8>> {

@@ -7,8 +7,8 @@
 //! Run with `cargo bench -p out-kinetix-h264`.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
 use out_kinetix_h264::{sps::SeqParameterSet, transform::ScalingLists, H264Decoder};
+use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
 
 /// Build an SPS describing a `width`x`height` frame (in pixels).
 fn sps_for(width_mbs: u32, height_mbs: u32) -> SeqParameterSet {

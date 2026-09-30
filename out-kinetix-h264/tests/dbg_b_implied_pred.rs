@@ -17,11 +17,11 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use tpt_kinetix_core::packet::Packet;
-use tpt_kinetix_core::timestamp::Timestamp;
 use out_kinetix_h264::motion_comp::interpolate_luma;
 use out_kinetix_h264::trace::{DecodeTracer, TracePlane};
 use out_kinetix_h264::H264Decoder;
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
 
 #[derive(Default)]
 struct Tracer {

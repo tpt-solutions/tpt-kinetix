@@ -1,7 +1,7 @@
 //! Scratch: print SPS fields (esp. `direct_8x8_inference_flag`) for an ITU clip.
-use std::path::Path;
 use out_kinetix_h264::nal::parse_nal_units_from_annexb;
 use out_kinetix_h264::sps::SeqParameterSet as Sps;
+use std::path::Path;
 
 #[test]
 #[ignore = "diagnostic"]

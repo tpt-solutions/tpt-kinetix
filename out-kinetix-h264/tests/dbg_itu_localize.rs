@@ -14,9 +14,9 @@
 
 use std::path::{Path, PathBuf};
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 /// The clip under investigation.
 const CLIP: &str = "cavlc_mot_picaff0_full_B";

@@ -14,8 +14,6 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
 
-use tpt_kinetix_core::packet::Packet;
-use tpt_kinetix_core::timestamp::Timestamp;
 use out_kinetix_h264::bitreader::BitReader;
 use out_kinetix_h264::cavlc_tables::{
     read_coeff_token, read_run_before, read_total_zeros_4x4, read_total_zeros_chroma_dc,
@@ -27,6 +25,8 @@ use out_kinetix_h264::slice_data::parse_p_slice;
 use out_kinetix_h264::sps::SeqParameterSet;
 use out_kinetix_h264::trace::{DecodeTracer, TracePlane};
 use out_kinetix_h264::H264Decoder;
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
 
 // Fresh, independent level assembly. Mirrors §9.2.2 exactly but is written
 // separately from parse_cavlc_block so any bug there is not mirrored here.

@@ -10,8 +10,6 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
 
-use tpt_kinetix_core::frame::VideoFrame;
-use tpt_kinetix_core::pixel_format::PixelFormat;
 use out_kinetix_h264::bitreader::BitReader;
 use out_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnitType};
 use out_kinetix_h264::pps::PicParameterSet;
@@ -20,6 +18,8 @@ use out_kinetix_h264::slice::{SliceHeader, SliceHeaderContext};
 use out_kinetix_h264::slice_data::parse_p_slice;
 use out_kinetix_h264::sps::SeqParameterSet;
 use out_kinetix_h264::trace::{DecodeTracer, TracePlane};
+use tpt_kinetix_core::frame::VideoFrame;
+use tpt_kinetix_core::pixel_format::PixelFormat;
 
 fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")

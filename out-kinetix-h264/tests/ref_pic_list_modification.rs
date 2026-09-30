@@ -8,10 +8,10 @@
 //! the header field again) fails here even if `modify_ref_pic_list` stays
 //! correct in isolation.
 
-use tpt_kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
 use out_kinetix_h264::nal::NalUnitType;
 use out_kinetix_h264::ref_pic::{build_ref_list_l0, Dpb, DpbEntry, PicNumContext};
 use out_kinetix_h264::slice::{RefPicListModification, SliceHeader, SliceHeaderContext};
+use tpt_kinetix_core::{frame::VideoFrame, pixel_format::PixelFormat, timestamp::Timestamp};
 
 /// Minimal MSB-first bit writer for synthesising a slice header.
 struct BitWriter {

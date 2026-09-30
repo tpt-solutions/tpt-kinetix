@@ -3,10 +3,10 @@
 //! against ffmpeg at the 4×4 block level, to pinpoint exactly which block
 //! first diverges.
 
+use out_kinetix_h264::H264Decoder;
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_test_utils::trace_dump::{MapTracer, Stage};
 
 const W: u32 = 16;

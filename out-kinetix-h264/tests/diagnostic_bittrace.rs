@@ -2,10 +2,10 @@
 //! and dumps mb_type, qp, intra modes, cbp, then also decodes a 4x4 block
 //! manually from the raw bits to verify CAVLC.
 
+use out_kinetix_h264::H264Decoder;
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_test_utils::trace_dump::{MapTracer, Stage};
 
 fn gen_single_mb_h264() -> Option<Vec<u8>> {

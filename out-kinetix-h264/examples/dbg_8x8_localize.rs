@@ -2,9 +2,9 @@
 //! ffmpeg. Not committed; for debugging only.
 use std::process::Command;
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 fn run(cmd: &mut Command) -> bool {
     cmd.output().map(|o| o.status.success()).unwrap_or(false)

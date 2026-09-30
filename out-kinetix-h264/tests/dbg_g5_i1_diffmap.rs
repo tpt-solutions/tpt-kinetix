@@ -5,9 +5,9 @@
 //!
 //! Run `g5_interlaced_corpus` first (needs ffmpeg); skips otherwise.
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 const W: usize = 64;
 const H: usize = 64;

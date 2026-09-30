@@ -6,9 +6,9 @@
 
 use std::path::PathBuf;
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 fn nal_starts(annexb: &[u8]) -> Vec<usize> {
     let mut starts = Vec::new();

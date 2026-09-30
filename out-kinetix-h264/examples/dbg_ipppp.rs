@@ -1,9 +1,9 @@
+use out_kinetix_h264::H264Decoder;
 /// Decode the IPPPP clip and print per-block diagnostics for MB(3,2) in frame 2.
 /// Shows MC prediction, IDCT residual, and final reconstruction for the wrong block.
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;

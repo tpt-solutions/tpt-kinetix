@@ -8,9 +8,9 @@
 //! Usage: `cargo run -p out-kinetix-h264 --example trace_mb -- [mb_x] [mb_y]`
 //! (defaults to MB(0,0)).
 
+use out_kinetix_h264::{H264Decoder, TracePlane};
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::{H264Decoder, TracePlane};
 use tpt_kinetix_test_utils::reference::ffmpeg_available;
 use tpt_kinetix_test_utils::trace_dump::{MapTracer, Stage};
 

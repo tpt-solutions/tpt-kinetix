@@ -1,8 +1,8 @@
 //! Debug helper: decode an Annex B .h264 file and dump first sample values.
 //! Usage: cargo run -p out-kinetix-h264 --example dbg_decode -- <file.h264> <refyuv?>
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

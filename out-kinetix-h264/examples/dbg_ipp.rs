@@ -1,8 +1,8 @@
 #![allow(warnings)]
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 fn split_nals(annexb: &[u8]) -> Vec<Vec<u8>> {
     let mut starts = Vec::new();

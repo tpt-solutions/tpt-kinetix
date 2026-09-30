@@ -10,10 +10,10 @@
 
 use std::process::Command;
 
-use tpt_kinetix_core::packet::Packet;
-use tpt_kinetix_core::timestamp::Timestamp;
 use out_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnitType};
 use out_kinetix_h264::H264Decoder;
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 48;

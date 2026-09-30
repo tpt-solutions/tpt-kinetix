@@ -23,13 +23,13 @@
 
 use std::process::Command;
 
-use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
 use out_kinetix_h264::{
     nal::{parse_nal_units_from_annexb, NalUnitType},
     pps::PicParameterSet,
     sps::SeqParameterSet,
     H264Decoder,
 };
+use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
 
 /// Width/height must be 16-px-aligned so the decoder's progressive path is
 /// exercised (the non-16-aligned crop gap is explicitly out of scope here).

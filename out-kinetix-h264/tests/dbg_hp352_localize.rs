@@ -11,10 +11,10 @@
 
 use std::process::Command;
 
-use tpt_kinetix_core::packet::Packet;
-use tpt_kinetix_core::timestamp::Timestamp;
 use out_kinetix_h264::trace::{DecodeTracer, TracePlane};
 use out_kinetix_h264::H264Decoder;
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
 
 fn gen(dir: &std::path::Path) -> Option<(Vec<u8>, Vec<u8>)> {
     let h264 = dir.join("dbg352.h264");

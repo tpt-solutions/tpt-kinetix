@@ -7,8 +7,6 @@
 //!
 //! Run: cargo test -p out-kinetix-h264 --test diag_pframe_localize -- --nocapture
 
-use tpt_kinetix_core::packet::Packet;
-use tpt_kinetix_core::timestamp::Timestamp;
 use out_kinetix_h264::bitreader::BitReader;
 use out_kinetix_h264::mv::MvCell;
 use out_kinetix_h264::nal::{parse_nal_units_from_annexb, NalUnitType};
@@ -17,6 +15,8 @@ use out_kinetix_h264::slice::{SliceHeader, SliceHeaderContext};
 use out_kinetix_h264::slice_data::parse_p_slice;
 use out_kinetix_h264::sps::SeqParameterSet;
 use out_kinetix_h264::H264Decoder;
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::timestamp::Timestamp;
 
 fn compare(a: &[u8], b: &[u8]) -> (i32, usize, usize) {
     let n = a.len().min(b.len());

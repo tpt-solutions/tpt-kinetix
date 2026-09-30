@@ -27,9 +27,9 @@
 
 use std::path::{Path, PathBuf};
 
+use out_kinetix_h264::H264Decoder;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 /// Expected outcome for a curated clip.
 #[derive(Clone, Copy, PartialEq, Debug)]

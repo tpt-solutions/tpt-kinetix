@@ -1,10 +1,10 @@
 //! Diagnostic: decode a solid-color I-frame and compare against ffmpeg.
 #![allow(warnings)]
 
+use out_kinetix_h264::H264Decoder;
 use std::process::Command;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::timestamp::Timestamp;
-use out_kinetix_h264::H264Decoder;
 
 fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")

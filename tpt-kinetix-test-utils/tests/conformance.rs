@@ -442,8 +442,8 @@ fn av1_vs_ffmpeg_reference_when_available() {
 /// and `with_strict(true)` modes. Skips when `ffmpeg` is absent.
 #[test]
 fn h264_real_sample_harness_across_profiles() {
-    use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
     use out_kinetix_h264::H264Decoder;
+    use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
     use tpt_kinetix_test_utils::pixel_diff::within_tolerance;
     use tpt_kinetix_test_utils::reference::{decode_h264_with_ffmpeg, ffmpeg_available};
 
