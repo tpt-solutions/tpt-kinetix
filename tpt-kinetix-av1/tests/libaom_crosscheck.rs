@@ -184,6 +184,13 @@ fn libaom_streams_match_libdav1d() {
             aom: &["-cpu-used", "4", "-aom-params", "lossless=1"],
         },
         Case {
+            // Film grain synthesis with non-4:2:0 chroma (previously skipped).
+            name: "testsrc2 192x128 4:2:2 10-bit film grain",
+            lavfi: "testsrc2=size=192x128:rate=10",
+            pix_fmt: "yuv422p10le",
+            aom: &["-cpu-used", "4", "-aom-params", "film-grain-test=8"],
+        },
+        Case {
             name: "testsrc2 192x128 4:4:4 (unsubsampled chroma planes and refs)",
             lavfi: "testsrc2=size=192x128:rate=10",
             pix_fmt: "yuv444p",

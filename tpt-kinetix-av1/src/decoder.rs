@@ -776,7 +776,8 @@ impl Default for Av1Decoder {
 }
 
 /// Synthesise film grain onto a cropped output frame (Y, U, V planar, 8-bit or
-/// 16-bit little-endian samples). Only even-width 4:2:0 layouts are handled.
+/// 16-bit little-endian samples), for any chroma subsampling. Odd-width frames
+/// with horizontally subsampled chroma are left ungrained.
 fn apply_grain_to_frame(
     frame: &mut VideoFrame,
     p: &FilmGrainParams,
@@ -784,16 +785,20 @@ fn apply_grain_to_frame(
     seq: &SequenceHeaderObu,
 ) {
     let (w, h) = (frame.width as usize, frame.height as usize);
+    let (ssx, ssy) = (
+        usize::from(seq.color_config.subsampling_x),
+        usize::from(seq.color_config.subsampling_y),
+    );
     if !p.apply_grain
         || w == 0
         || h == 0
-        || w % 2 != 0
+        || (ssx == 1 && w % 2 != 0)
         || std::env::var_os("KINETIX_AV1_NO_GRAIN").is_some()
     {
         return;
     }
     let bytes = if bit_depth == 8 { 1 } else { 2 };
-    let (cw, ch) = (w / 2, h.div_ceil(2));
+    let (cw, ch) = ((w + ssx) >> ssx, (h + ssy) >> ssy);
     if frame.data.len() != (w * h + 2 * cw * ch) * bytes {
         return;
     }
@@ -812,8 +817,8 @@ fn apply_grain_to_frame(
     crate::film_grain::apply_film_grain(
         p,
         u32::from(bit_depth),
-        1,
-        1,
+        ssx,
+        ssy,
         seq.color_config.matrix_coefficients == 0,
         w,
         h,
