@@ -2617,11 +2617,11 @@ pub fn apply_post_filters(
     if superres {
         let uw = fh.upscaled_width as usize;
         let ustride = uw.div_ceil(8) * 8;
-        let ucstride = ustride / 2;
-        let ucw = uw.div_ceil(2);
+        let ucstride = ustride >> sub_x;
+        let ucw = (uw + sub_x) >> sub_x;
         let vis_h = vis_height;
-        let vis_ch = vis_height.div_ceil(2);
-        let grid_ch = height.div_ceil(2);
+        let vis_ch = (vis_height + sub_y) >> sub_y;
+        let grid_ch = (height + sub_y) >> sub_y;
         // LR boundary rows: the deblocked (pre-CDEF) snapshots, upscaled.
         let (by, bu, bv) = if fh.uses_lr {
             (
@@ -2751,9 +2751,9 @@ pub fn apply_post_filters(
         // the next frame's CDEF, which reads those rows as sbrow-boundary
         // context (dav1d's `lr_lpf_line` holds unrestored padding rows).
         let vis_h = fh.height as usize;
-        let vis_ch = vis_h.div_ceil(2);
+        let vis_ch = (vis_h + sub_y) >> sub_y;
         let vis_w = (fh.upscaled_width as usize).min(width);
-        let vis_cw = vis_w.div_ceil(2).min(uv_w);
+        let vis_cw = ((vis_w + sub_x) >> sub_x).min(uv_w);
         apply_loop_restoration_plane(
             y_plane,
             width,
