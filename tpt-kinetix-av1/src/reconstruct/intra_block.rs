@@ -194,8 +194,11 @@ impl<'a> TileDecodeState<'a> {
                 self.subsampling_y,
             );
         let uv_mode = if has_chroma {
-            self.mode_cdfs
-                .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode)
+            self.mode_cdfs.read_uv_mode(
+                &mut self.dec,
+                cfl_allowed(bsize, self.lossless, self.subsampling_x, self.subsampling_y),
+                y_mode,
+            )
         } else {
             DC_PRED as usize
         };
@@ -281,7 +284,10 @@ impl<'a> TileDecodeState<'a> {
         // `TX_MODE_SELECT`, desyncing the tile (first caught on mandelbrot at
         // mi (16,18)).
         let max_tx = max_tx_size_for_bsize(bsize);
-        let luma_tx = if bsize > BLOCK_4X4 && self.tx_mode_select && !self.lossless {
+        // `read_tx_size` (§5.11.15): a Lossless block is always TX_4X4.
+        let luma_tx = if self.lossless {
+            av1::TX_4X4
+        } else if bsize > BLOCK_4X4 && self.tx_mode_select {
             self.read_tx_size(bsize, max_tx, mi_row, mi_col)
         } else {
             max_tx
@@ -712,11 +718,15 @@ impl<'a> TileDecodeState<'a> {
                 // subsampled residual size is itself rectangular (e.g. every
                 // non-square bsize under 4:2:0), and recomputed uselessly once
                 // per luma tx sub-block instead of once per coded block.
-                let c_tx = chroma_tx_size(
-                    bsize,
-                    usize::from(self.subsampling_x),
-                    usize::from(self.subsampling_y),
-                );
+                let c_tx = if self.lossless {
+                    av1::TX_4X4
+                } else {
+                    chroma_tx_size(
+                        bsize,
+                        usize::from(self.subsampling_x),
+                        usize::from(self.subsampling_y),
+                    )
+                };
                 let cw = av1::TX_WIDTH[c_tx];
                 let ch = av1::TX_HEIGHT[c_tx];
                 // Chroma transform blocks tile the coded block's *chroma-space*
@@ -2411,7 +2421,11 @@ impl<'a> TileDecodeState<'a> {
             let sub_x = self.subsampling_x as usize;
             let sub_y = self.subsampling_y as usize;
 
-            let c_tx = chroma_tx_size(bsize, sub_x, sub_y);
+            let c_tx = if self.lossless {
+                av1::TX_4X4
+            } else {
+                chroma_tx_size(bsize, sub_x, sub_y)
+            };
             let cw = av1::TX_WIDTH[c_tx];
             let ch = av1::TX_HEIGHT[c_tx];
 

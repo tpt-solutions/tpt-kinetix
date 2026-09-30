@@ -621,8 +621,11 @@ impl<'a> TileDecodeState<'a> {
                     self.subsampling_y,
                 );
             let uv_mode = if has_chroma {
-                self.mode_cdfs
-                    .read_uv_mode(&mut self.dec, cfl_allowed_for_bsize(bsize), y_mode)
+                self.mode_cdfs.read_uv_mode(
+                    &mut self.dec,
+                    cfl_allowed(bsize, self.lossless, self.subsampling_x, self.subsampling_y),
+                    y_mode,
+                )
             } else {
                 DC_PRED as usize
             };
@@ -725,7 +728,10 @@ impl<'a> TileDecodeState<'a> {
             // the tile, including the `intra_tx_type`/`eob` reads for this
             // same block that earlier sessions chased as a separate bug.
             let max_tx = max_tx_size_for_bsize(bsize);
-            let luma_tx = if bsize > BLOCK_4X4 && self.tx_mode_select && !self.lossless {
+            // `read_tx_size` (§5.11.15): a Lossless block is always TX_4X4.
+            let luma_tx = if self.lossless {
+                av1::TX_4X4
+            } else if bsize > BLOCK_4X4 && self.tx_mode_select {
                 self.read_tx_size(bsize, max_tx, mi_row, mi_col)
             } else {
                 max_tx
@@ -3978,7 +3984,11 @@ impl<'a> TileDecodeState<'a> {
         // leaves. (Shared `sub_x`/`sub_y` with the luma loop above.)
         let sub_x = self.subsampling_x as usize;
         let sub_y = self.subsampling_y as usize;
-        let c_tx = chroma_tx_size(bsize, sub_x, sub_y);
+        let c_tx = if self.lossless {
+            av1::TX_4X4
+        } else {
+            chroma_tx_size(bsize, sub_x, sub_y)
+        };
         let cw = av1::TX_WIDTH[c_tx];
         let ch = av1::TX_HEIGHT[c_tx];
         let plane_sz = {
@@ -4026,6 +4036,12 @@ impl<'a> TileDecodeState<'a> {
                     if (leaf_mi_col - mi_col) / 16 != chunk_x
                         || (leaf_mi_row - mi_row) / 16 != chunk_y
                     {
+                        continue;
+                    }
+                    // `transform_block` (§5.11.35) returns immediately for a transform
+                    // block that starts outside the frame's mi grid (`startX >= maxX ||
+                    // startY >= maxY`): nothing is read and no contexts change.
+                    if leaf_mi_col >= self.mi_cols || leaf_mi_row >= self.mi_rows {
                         continue;
                     }
                     let leaf_tx_w = av1::TX_WIDTH[leaf_tx];

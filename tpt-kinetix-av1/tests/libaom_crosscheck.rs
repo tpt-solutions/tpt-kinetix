@@ -170,6 +170,20 @@ fn libaom_streams_match_libdav1d() {
             aom: &["-cpu-used", "4", "-aom-params", "aq-mode=3"],
         },
         Case {
+            // Lossless: WHT, forced TX_4X4, CFL only for 4x4 chroma, and inter
+            // blocks overhanging the frame edge (200 is not a multiple of 64).
+            name: "mandelbrot 200x202 4:2:0 lossless",
+            lavfi: "mandelbrot=size=200x202:rate=10",
+            pix_fmt: "yuv420p",
+            aom: &["-cpu-used", "4", "-aom-params", "lossless=1"],
+        },
+        Case {
+            name: "testsrc2 320x240 4:4:4 lossless",
+            lavfi: "testsrc2=size=320x240:rate=10",
+            pix_fmt: "yuv444p",
+            aom: &["-cpu-used", "4", "-aom-params", "lossless=1"],
+        },
+        Case {
             name: "testsrc2 192x128 4:4:4 (unsubsampled chroma planes and refs)",
             lavfi: "testsrc2=size=192x128:rate=10",
             pix_fmt: "yuv444p",

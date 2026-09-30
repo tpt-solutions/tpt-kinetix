@@ -428,6 +428,16 @@ const fn cfl_allowed_for_bsize(bsize: usize) -> bool {
     BLOCK_WIDTH[bsize] <= 32 && BLOCK_HEIGHT[bsize] <= 32
 }
 
+/// `is_cfl_allowed()` (§5.11.5) including the Lossless branch: a lossless block
+/// may use CFL only when its chroma residual block is exactly 4x4.
+fn cfl_allowed(bsize: usize, lossless: bool, ss_x: bool, ss_y: bool) -> bool {
+    if lossless {
+        get_plane_residual_size(bsize, usize::from(ss_x), usize::from(ss_y)) == BLOCK_4X4
+    } else {
+        cfl_allowed_for_bsize(bsize)
+    }
+}
+
 fn bsize_from_wh(w: usize, h: usize) -> usize {
     for i in 0..BLOCK_SIZES {
         if BLOCK_WIDTH[i] == w && BLOCK_HEIGHT[i] == h {

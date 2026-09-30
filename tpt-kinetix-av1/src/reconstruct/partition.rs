@@ -728,7 +728,7 @@ impl<'a> TileDecodeState<'a> {
         let max_ytx = max_tx_size_for_bsize(bsize);
         let mut leaves = Vec::new();
 
-        if !skip && (self.lossless || max_ytx == av1::TX_4X4) {
+        if self.lossless || (!skip && max_ytx == av1::TX_4X4) {
             if self.tx_mode_select {
                 self.set_tx_ctx_range(
                     mi_col,

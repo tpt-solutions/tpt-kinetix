@@ -469,35 +469,45 @@ fn col_axis_transform(tx_type: usize) -> (AxisTransform, bool) {
     (kind, flip)
 }
 
-/// 4×4 Walsh-Hadamard transform (AV1 spec §6.10.3).
+/// Inverse Walsh-Hadamard transform, one dimension (AV1 spec §7.13.2.10).
 ///
-/// Selected when `Lossless` is set: AV1 §7.13.3 substitutes the inverse WHT
-/// for the regular inverse transform in that case. The 4×4 WHT output is
-/// already at residual scale (the lossless dequant step is unity), so no
-/// further scaling is applied beyond the spec's `+2 >> 2` rounding.
+/// `shift` is 2 for the row pass and 0 for the column pass (§7.13.3, Lossless).
 #[inline]
+fn wht_1d(t: &mut [i32; 4], shift: u32) {
+    let mut a = t[0] >> shift;
+    let mut c = t[1] >> shift;
+    let mut d = t[2] >> shift;
+    let mut b = t[3] >> shift;
+    a += c;
+    d -= b;
+    let e = (a - d) >> 1;
+    b = e - b;
+    c = e - c;
+    a -= b;
+    d += c;
+    t[0] = a;
+    t[1] = b;
+    t[2] = c;
+    t[3] = d;
+}
+
+/// 4×4 inverse WHT (§7.13.3, `Lossless`): rows with `shift = 2`, then columns
+/// with `shift = 0`, no further rounding (`rowShift == colShift == 0`). The
+/// dequantized input is `coef * 4` (`Dc_Qlookup[0] == Ac_Qlookup[0] == 4`), so
+/// the row pass's `>> 2` restores unity gain.
 fn wht_4x4(src: &[i32; 16], dst: &mut [i32; 16]) {
-    let mut tmp = [0i32; 16];
+    let mut m = *src;
     for row in 0..4 {
-        let i = row * 4;
-        let s0 = src[i] + src[i + 3];
-        let s1 = src[i + 1] + src[i + 2];
-        let s2 = src[i + 1] - src[i + 2];
-        let s3 = src[i] - src[i + 3];
-        tmp[i] = s0 + s1;
-        tmp[i + 1] = s3 + s2;
-        tmp[i + 2] = s2 - s1;
-        tmp[i + 3] = s3 - s1;
+        let mut t = [m[row * 4], m[row * 4 + 1], m[row * 4 + 2], m[row * 4 + 3]];
+        wht_1d(&mut t, 2);
+        m[row * 4..row * 4 + 4].copy_from_slice(&t);
     }
     for col in 0..4 {
-        let s0 = tmp[col] + tmp[col + 12];
-        let s1 = tmp[col + 4] + tmp[col + 8];
-        let s2 = tmp[col + 4] - tmp[col + 8];
-        let s3 = tmp[col] - tmp[col + 12];
-        dst[col] = (s0 + s1 + 2) >> 2;
-        dst[col + 4] = (s3 + s2 + 2) >> 2;
-        dst[col + 8] = (s2 - s1 + 2) >> 2;
-        dst[col + 12] = (s3 - s2 + 2) >> 2;
+        let mut t = [m[col], m[col + 4], m[col + 8], m[col + 12]];
+        wht_1d(&mut t, 0);
+        for (i, v) in t.iter().enumerate() {
+            dst[col + 4 * i] = *v;
+        }
     }
 }
 
