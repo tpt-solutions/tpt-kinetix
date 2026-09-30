@@ -2811,10 +2811,14 @@ pub(crate) fn crop_planes(
             }
         }
     };
-    // 4:2:0 halves both axes; 4:2:2 halves height only; 4:4:4 keeps full size.
+    // Subsampling per plane as (ss_x, ss_y). MUST match pixel_format_for's
+    // classification: 4:2:2 is ss_x == 1, ss_y == 0 (width subsampled, full
+    // height) -- NOT the transposed (0, 1), which made cw the full width and
+    // ch the full height, so the chroma crop read rows at the wrong pitch and
+    // emitted a row-duplicated chroma plane.
     let (ss_x, ss_y) = match pixel_format {
         PixelFormat::Yuv420p | PixelFormat::Yuv420p10le | PixelFormat::Yuv420p12le => (1, 1),
-        PixelFormat::Yuv422p => (0, 1),
+        PixelFormat::Yuv422p => (1, 0),
         _ => (0, 0),
     };
     let uw = uv_grid_w;

@@ -14987,8 +14987,7 @@ grain, superres chroma). The 4:2:2 output-size mismatch above localises the
   6/24, `frames_refs_short_signaling` 1/50 -- all still open and unmeasurable
   without the FATE samples.
 
-## Session 2026-09-30 #9 -- 4:2:2 output layout fixed; chroma pixels localised to a
-## vertical row-duplication, NOT root-caused (one dead end recorded)
+## Session 2026-09-30 #9 (CORRECTED by #10) -- 4:2:2 chroma ROOT-CAUSED and fixed
 
 Picking up from #8's "next step: 4:2:2 is the closer of the two formats".
 
@@ -15055,3 +15054,74 @@ libdav1d's block grid before changing code.
 Still open and unchanged: 4:4:4 (diff=6260 maxabs=12, luma+chroma both off),
 `pixel_exact` false, FATE samples not on disk so the FATE-frame items cannot
 be measured here.
+
+## Session 2026-09-30 #10 -- 4:2:2 chroma row-duplication ROOT-CAUSED: `crop_planes`
+## mapped Yuv422p to the transposed (ss_x, ss_y)
+
+Continues #9, which had localised the 4:2:2 chroma divergence to a vertical
+row-duplication and (correctly) refused to guess further.
+
+**Root cause: the same transposition as #9's `pixel_format_for` bug, in a
+second place.** `crop_planes` mapped the chroma subsampling as:
+
+    PixelFormat::Yuv422p => (0, 1),
+
+i.e. `ss_x = 0, ss_y = 1` — chroma subsampled in HEIGHT only. AV1 4:2:2 is
+`ss_x == 1, ss_y == 0`: chroma is half WIDTH, full HEIGHT. So `cw` came out as
+the full frame width and `ch` as the full height, and the chroma crop walked
+the plane at the wrong pitch, re-emitting rows. The duplicated-row signature
+(63 of 127 chroma rows identical to the previous row, vs 14 in the reference)
+is exactly that mis-pitched walk.
+
+**The localisation that pinned it** (the useful part, since the earlier three
+hypotheses were all wrong): the in-memory plane is CORRECT at every stage, so
+the bug had to be found by probing *after* each stage rather than in the
+decoders:
+
+- `KINETIX_AV1_DBG_PX=0,0` in `reconstruct_tx_block` showed the chroma tx
+  write at `(0,2)=167, (1,2)=167` — already matching the reference, with the
+  right `stride=96, pw=96, ph=128`. So the tile decode was fine.
+- A probe on `u_plane` immediately before `apply_post_filters` matched the
+  reference exactly. So the tile→frame assembly was fine.
+- A probe on the `crop_planes` OUTPUT showed `203` at row 2 where the plane
+  held `167`. That is the corruption, and it is inside `crop_planes`.
+
+That is also why `KINETIX_AV1_NOFILTER=1` did not make the bug disappear: the
+bug is in the OUTPUT crop, which runs after (and independently of) the
+post-filter chain. #9 read that A/B as "pre-filter reconstruction bug" and was
+wrong; it was in neither.
+
+**Dead ends recorded so they are not retried** (each measured, each reverted
+rather than committed as a no-op):
+
+1. `SUBSAMPLED_SIZE[bsize][1][0]` (the 4:2:2 column) is `BLOCK_INVALID` for
+   all 22 entries. Fetched the published spec table: it is byte-identical, so
+   the table is CORRECT and needs no fix. Deriving the 4:2:2 plane size as
+   `(max(w/2,4), h)` in `chroma_tx_size` instead of falling back to `bsize`
+   measured as a **byte-for-byte no-op**. Reverted.
+2. The palette color map for a chroma block is genuinely 4x8 (correct for
+   4:2:2) — a `PALPRED` probe disproved the "4:2:0-shaped palette map" theory.
+3. Tile assembly, `tile_ch`, `uv_stride`, `predict_palette`, the inverse
+   transform and the post-filter chroma strides are ALL already correct for
+   4:2:2. Do not re-audit them.
+
+**Measured after the fix (192x128 keyframe vs libdav1d):**
+
+| plane | before | after |
+|---|---|---|
+| Y | 0 / 24576 | 0 / 24576 (bit-exact) |
+| U | 8296 / 12288, maxabs 186 | **220 / 12288, maxabs 3** |
+| V | 9355 / 12288, maxabs 230 | **278 / 12288, maxabs 6** |
+
+A ~97% reduction, and the residue is now a different, much smaller bug class:
+sparse 1-6 sample deviations of ±3/±6 scattered over 65 chroma rows. That
+residual is NOT root-caused and is left open.
+
+**Regression test**: the old 4:2:2 `crop_planes` test asserted the *wrong*
+geometry (full-width, half-height chroma) and so had enshrined the bug. It is
+replaced by `crop_planes_uses_half_width_full_height_chroma_for_422`, verified
+to FAIL when the fix is reverted (asserts on "U sample r2 c0") and pass with it.
+`pixel_format_for_maps_each_chroma_sampling_case` covers #9's fix.
+
+Still open: the ±3/±6 4:2:2 chroma residue; 4:4:4 (unchanged, diff=6260
+maxabs=12); `pixel_exact` false; FATE samples not on disk.
