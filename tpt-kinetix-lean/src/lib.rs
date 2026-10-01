@@ -1,7 +1,6 @@
 //! `tpt-kinetix-lean` — an original, embedded-first video codec.
 //!
-//! Unlike [`tpt-kinetix-h264`](https://docs.rs/tpt-kinetix-h264) and
-//! [`tpt-kinetix-av1`](https://docs.rs/tpt-kinetix-av1), which are from-scratch
+//! Unlike [`tpt-kinetix-av1`](https://docs.rs/tpt-kinetix-av1), which is a from-scratch
 //! *conformant* implementations of existing ITU/AOMedia standards, Lean is an
 //! original bitstream format designed by this project. It deliberately does
 //! not chase AV1-class compression ratio; it optimizes for the properties

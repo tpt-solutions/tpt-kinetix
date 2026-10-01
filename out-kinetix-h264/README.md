@@ -1,5 +1,10 @@
 # out-kinetix-h264
 
+> **Unpublished.** H.264 is patent-encumbered (encode and decode), so this crate is
+> `publish = false`, is not on crates.io, and is not a dependency of
+> `tpt-kinetix-pipeline` or `tpt-kinetix-cli`. It is kept for local/reference work only.
+> See [PATENTS.md](../PATENTS.md).
+
 H.264/AVC bitstream decoder for the TPT Kinetix engine, parallelised with `rayon`
 at the macroblock-row level.
 
@@ -14,10 +19,12 @@ MBAFF frames, reference-list construction, MMCO, and in-loop deblocking are
 byte-exact for the supported 8-bit 4:2:0 subset. Strict mode still returns
 `KinetixError::NotPixelExact` when a stream uses a feature outside that subset.
 
-The current official ITU fixture run has 33 hard-checked bit-exact clips. Three
-curated streams remain explicit `KnownGap` fixtures with reproduced diagnostics:
-`CAMA1_Sony_C` (real MBAFF CABAC I desync), `HCHP1_HHI_B` (hierarchical B
-intra-neighbour availability), and `Sharp_MP_PAFF_1r2` (real PAFF pixels). These
+The current official ITU fixture run (`cargo test --release -p out-kinetix-h264
+--test itu_conformance`, 2026-10-02) has 34 hard-checked bit-exact clips and 0
+failures. Two curated streams remain explicit `KnownGap` fixtures with reproduced
+diagnostics: `CAMA1_Sony_C` (real MBAFF CABAC I desync) and `HCHP1_HHI_B`
+(hierarchical B intra-neighbour availability). Further clips outside the
+curated set (some MBAFF, 4:2:2, multi-slice) are informational only. These
 are conformance-frontier failures, not permission to claim approximate output
 is exact. See `todo-h264.md` and `tests/itu_conformance.rs` for the current
 first-divergence evidence.

@@ -55,4 +55,15 @@ just build-royalty-free
 `out-kinetix-h264` and the test-only helper crate (`tpt-kinetix-test-utils`,
 `publish = false`) still build and run their own test suites directly, matching
 how FFmpeg keeps its conformance coverage (FATE) running for encumbered decoders.
-The H.264 decoder is unfinished and kept for local/reference work only.
+The H.264 decoder is kept for local/reference work only.
+
+**Enforcement.** `just check-publish-safe` (`tools/check_no_encumbered.py`, also a CI job and part
+of `just check`) fails if any `out-*` crate is publishable, is missing a `publish = false` entry in
+`release-plz.toml`, or is reachable through a normal/build dependency from a published crate.
+FFmpeg reference sources used by the H.264 crate's `dbg_*` tests live in
+`out-kinetix-h264/oracle/` and are not part of any published package.
+
+**Container-level H.264.** The published `tpt-kinetix-mux`, `tpt-kinetix-demux` and
+`tpt-kinetix-stream` crates frame and carry H.264 bitstreams (MP4 `avc1`, MPEG-TS/FLV, Annex-B
+framing). They contain no H.264 encoder or decoder. Applications that decode or encode H.264 must
+use a codec library they have licensed separately.

@@ -9,8 +9,7 @@ to FFmpeg for transcoding/streaming pipelines. It is **early-stage and pre-1.0**
 now reports `pixel_exact: true` — CAVLC/CABAC I/P/B, PAFF field pictures, MBAFF frames, and the
 High-profile 8×8 transform (progressive) are all bit-exact vs ffmpeg with full deblocking. Strict
 mode returns `KinetixError::NotPixelExact` only for slices that still hit an unsupported feature
-(multi-slice pictures, non-4:2:0 chroma, >8-bit, B slices using temporal — not spatial —
-direct-mode motion). The AV1 decoder is pixel-exact (FATE 204/204 + libaom crosscheck; `docs/CONFORMANCE.md`).
+(multi-slice pictures, non-4:2:0 chroma, >8-bit). Spatial and temporal direct are both implemented. The AV1 decoder is pixel-exact (FATE 204/204 + libaom crosscheck; `docs/CONFORMANCE.md`).
 `DecoderCapabilities` (`capabilities()`) reports this at runtime. See README.md's status table
 for the current state of every crate before assuming something works. AAC support has been
 removed from this repo (now covered by a separate project) — don't re-add a `tpt-kinetix-aac` crate.
@@ -126,8 +125,7 @@ any display dimensions, full deblocking) are bit-exact vs ffmpeg. PAFF field pic
 MBAFF I/P/B frames are bit-exact vs ffmpeg with full deblocking. The High-profile 8×8 transform
 (progressive Intra_8×8, CAVLC + CABAC) is bit-exact vs ffmpeg. Strict mode returns
 `KinetixError::NotPixelExact` only when a slice actually falls back to the flat-grey scaffold
-(multi-slice pictures, non-4:2:0 chroma, >8-bit depth, B slices with `direct_spatial_mv_pred_flag
-== 0` — temporal direct mode, §8.4.1.2.3, is unimplemented; only spatial direct is). The AV1
+(multi-slice pictures, non-4:2:0 chroma, >8-bit depth; spatial and temporal direct are both implemented). The AV1
 decoder is pixel-exact (FATE 204/204 frames vs dav1d, plus the libaom crosscheck).
 Don't assume a decoder path is correct without running `just conformance` — `capabilities()` is the
 source of truth, not README prose.

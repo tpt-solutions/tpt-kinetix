@@ -286,7 +286,7 @@ fn mbaff_ip_p_engine_lockstep_through_mb9_mb_type() {
             .join(" ")
     );
 
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cabac_ref.c");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
     let t = FfTables::parse(&src);
 
     // ctxIdx 70-72 (mb_field_decoding_flag): the crate's

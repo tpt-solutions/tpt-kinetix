@@ -1,9 +1,8 @@
 //! `tpt-kinetix-realtime` — an original low-latency, loss-resilient video
 //! codec.
 //!
-//! Unlike [`tpt-kinetix-h264`](https://docs.rs/tpt-kinetix-h264) /
-//! [`tpt-kinetix-av1`](https://docs.rs/tpt-kinetix-av1) (conformant
-//! implementations of existing standards) or [`tpt-kinetix-lean`] (an
+//! Unlike [`tpt-kinetix-av1`](https://docs.rs/tpt-kinetix-av1) (a conformant
+//! implementation of an existing standard) or [`tpt-kinetix-lean`] (an
 //! embedded-first original codec), Realtime's design center is **sub-frame
 //! latency** and **graceful degradation under packet loss**, not maximum
 //! compression ratio.

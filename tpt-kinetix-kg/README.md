@@ -42,7 +42,7 @@ cargo run -p tpt-kinetix-kg -- verify-tables path/to/some_file.rs
 See [`docs/adding-a-codec.md`](../docs/adding-a-codec.md)'s "Extracting spec-mandated
 numeric tables" section for the full table-verification workflow — it exists because
 spec tables transcribed by hand from a reference decoder are easy to get subtly wrong
-(see `TRANS_IDX_LPS[28]` in `tpt-kinetix-h264/src/entropy.rs`'s history) and hard to
+(see `TRANS_IDX_LPS[28]` in `out-kinetix-h264/src/entropy.rs`'s history) and hard to
 re-check without tooling.
 
 See [`examples/ingest_ffmpeg_h264.rs`](examples/ingest_ffmpeg_h264.rs) for the equivalent

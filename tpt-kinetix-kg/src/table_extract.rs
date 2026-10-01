@@ -5,7 +5,7 @@
 //! tables, VLC tables, scan orders, ...) are currently transcribed once by
 //! hand from a reference C decoder and then never re-checked — which is
 //! exactly how `TRANS_IDX_LPS[28]` stayed wrong for a long time (see
-//! `tpt-kinetix-h264/src/entropy.rs`). Both sides are flattened to a plain
+//! `out-kinetix-h264/src/entropy.rs`). Both sides are flattened to a plain
 //! `Vec<i64>` in source order, sidestepping the need to understand either
 //! language's exact type/shape (`[[u32; 4]; 64]` vs `[(i8, i8); 1024]` vs a
 //! packed subrange of a larger C array) — a mismatched flat sequence is still

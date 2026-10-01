@@ -1,6 +1,6 @@
 //! Session #32b: ENGINE-level differential — ffmpeg's REAL cabac engine
 //! arithmetic (mechanically ported from libavcodec/cabac_functions.h @ n5.1,
-//! repo-root `cabac_ref.c`/`cabac_funcs.h`) run in LOCKSTEP against the
+//! `oracle/cabac_ref.c`/`oracle/cabac_funcs.h`) run in LOCKSTEP against the
 //! crate's spec-literal `CabacDecoder`.
 //!
 //! Every previous oracle (sessions #28/#29/#31) executed ffmpeg-transcribed
@@ -259,7 +259,7 @@ fn run_payload(
 
 #[test]
 fn single_step_probe() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cabac_ref.c");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
     let t = FfTables::parse(&src);
     let mut rng = Rng(0xDEADBEEFCAFEBABE);
 
@@ -316,7 +316,7 @@ fn single_step_probe() {
 
 #[test]
 fn reverse_engineer_ff_state_mapping() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cabac_ref.c");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
     let t = FfTables::parse(&src);
 
     // Spec rangeTabLPS (Table 9-44), transcribed from src/entropy.rs.
@@ -411,7 +411,7 @@ fn reverse_engineer_ff_state_mapping() {
 
 #[test]
 fn engine_lockstep_vs_ffmpeg() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cabac_ref.c");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
     let tables = FfTables::parse(&src);
 
     let mut rng = Rng(0x9E3779B97F4A7C15);

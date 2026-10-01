@@ -7,8 +7,8 @@
 ## Summary
 
 `tpt-kinetix-kg` is the knowledge-graph ingestion / codegen tooling that was used
-to bootstrap the H.264 decoder in this workspace (AV1 and VP9 were implemented from the
-specs). It also verifies spec tables against pinned FFmpeg source. It turns
+to bootstrap the (unpublished, patent-encumbered) H.264 decoder in this workspace (AV1 and
+VP9 were implemented from the specs). It also verifies spec tables against pinned FFmpeg source. It turns
 FFmpeg C source into a Rust decoding scaffold (AST → bitstream parsing
 tree → macroblock/state machine → `rayon`-parallel codec scaffolding).
 

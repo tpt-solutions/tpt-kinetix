@@ -60,6 +60,14 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  publish-safe:
+    name: No encumbered crates in published set
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: python3 tools/check_no_encumbered.py
+
   docs:
     name: Docs (cargo doc)
     runs-on: ubuntu-latest

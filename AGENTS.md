@@ -45,8 +45,9 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
 - **Conformance tests are ffmpeg-gated.** In CI they only run where `ffmpeg` is installed
   (the `conformance` job installs it on Ubuntu). Locally use `just conformance`.
   The `--strict` (pixel-exact) conformance assertion is **currently non-blocking**
-  (`continue-on-error: true` in CI) because AV1, Lean, and Vision decoders are
-  **not pixel-exact yet** (H.264 reports `pixel_exact: true`).
+  (`continue-on-error: true` in CI) because the experimental original-format decoders (Lean,
+  Vision, ...) have no reference decoder and report `pixel_exact: false`. H.264, VP9 and AV1
+  all report `pixel_exact: true`.
 - **ffmpeg-dependent `dbg_*`/conformance tests must skip, not panic.** `out-kinetix-h264/tests/dbg_*.rs`
   and `examples/dbg_*.rs` (and the `conformance_*`/`phase_c_*` test files) shell out to `ffmpeg`
   to synthesize reference clips/YUV. Gate them on a `ffmpeg_available()` helper (either the shared
@@ -56,10 +57,10 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
   so they **skip** when `ffmpeg` is absent from `PATH`. Never `.unwrap()` a
   `Command::new("ffmpeg").output()` result — when `ffmpeg` is missing this panics with
   `Os { kind: NotFound, … "No such file or directory" }` and fails the whole test run.
-- **Decoders are incomplete by design.** H.264 and VP9 report `pixel_exact: true` for their supported
-  subsets (H.264: CAVLC/CABAC 8-bit 4:2:0 subset; VP9: profile 0 8-bit 4:2:0). AV1 implements
-  end-to-end reconstruction but still reports `pixel_exact: false`: its official FATE run is 1/198
-  comparable frames exact. Lean and Vision also report `pixel_exact: false`. `KinetixError::NotPixelExact`
+- **Decoders are incomplete by design.** H.264, VP9 and AV1 report `pixel_exact: true` for their supported
+  subsets (H.264: CAVLC/CABAC 8-bit 4:2:0 subset, unpublished; VP9: profile 0 8-bit 4:2:0; AV1:
+  FATE 204/204 vs libdav1d, see `docs/CONFORMANCE.md`). Lean, Vision and the other original-format
+  codecs report `pixel_exact: false`. `KinetixError::NotPixelExact`
   under strict mode signals these gaps. CLI `probe` works end-to-end; `transcode`/`stream` are still
   stubs. Don't treat decoder output as correct without checking `capabilities()` and the conformance
   status.
@@ -93,8 +94,11 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
 - Every crate carries its own `README.md`, `CHANGELOG.md`, `description`, `categories` and
   `keywords` in `Cargo.toml` — including `out-kinetix-h264` and `tpt-kinetix-test-utils`.
   `release-plz.toml` has a `[[package]]` block for all 19 workspace crates.
-- `out-kinetix-h264` is `publish = false` in `release-plz.toml`; it is the only
-  unpublished crate besides `tpt-kinetix-test-utils`.
+- `out-kinetix-h264` is `publish = false` in both its `Cargo.toml` and `release-plz.toml`
+  (H.264 is patent-encumbered; see `PATENTS.md`); it is the only unpublished crate besides
+  `tpt-kinetix-test-utils`. `just check-publish-safe` (also a CI job) fails if any publishable
+  crate depends on an `out-*` crate. FFmpeg reference sources used by its `dbg_*` tests live in
+  `out-kinetix-h264/oracle/`.
 - `tpt-kinetix-demux` and `tpt-kinetix-core` build for `wasm32-unknown-unknown`
   (the in-browser `web-demo`).
 
@@ -112,6 +116,6 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
 ## Other
 
 - `todo.md` (repo root) and `history/`, `scratch_cabac/`, `memory/`, `out.yuv`,
-  `p_frame_test_output.txt` are scratch/work artifacts — not documentation or build inputs.
+  are scratch/work artifacts — not documentation or build inputs.
 - Repo-local Kilo config: `.kilo/kilo.jsonc` (`snapshot: false`). Project instructions also
   live in `README.md`, `CONTRIBUTING.md`, and `docs/`.

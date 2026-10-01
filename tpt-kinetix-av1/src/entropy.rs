@@ -3,7 +3,7 @@
 //!
 //! This is the multi-symbol adaptive range decoder that all CDF-coded (`S()`)
 //! syntax elements in a real AV1 tile go through. It is a distinct entropy
-//! coding engine from H.264 CABAC (`tpt-kinetix-h264`) and from the ad hoc
+//! coding engine from H.264 CABAC (`out-kinetix-h264`) and from the ad hoc
 //! `BitReader`-based exp-golomb-like scheme `reconstruct::decode_tile_group`
 //! used to read coefficients before AV1 Phase B — that scheme could not
 //! decode a real AV1 bitstream, since real encoders never produce it.

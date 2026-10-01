@@ -120,8 +120,8 @@ Rationale, in priority order:
 2. **It gives us a spec + oracle, matching project methodology.** G-PCC
    (TMC13) is an openly-licensed reference we can transcribe tables from and
    diff bit-exact against — exactly the Phase 12 workflow already proven for
-   H.264/AV1. V-PCC (TMC2) additionally lets us reuse `tpt-kinetix-h264` /
-   `tpt-kinetix-av1` as the 2D layer for a projection-based variant.
+   H.264/AV1. V-PCC (TMC2) additionally lets us reuse `tpt-kinetix-av1` (royalty-free;
+   never H.264, see PATENTS.md) as the 2D layer for a projection-based variant.
 3. **It is the most general of the three.** Voxel grids and meshes are
    *sinks* that can be generated from a point cloud; starting there keeps the
    v1 data model open to those as later output representations without
@@ -314,7 +314,7 @@ portion.
   extracted from `lean`). Geometry/attribute symbols code through it, mirroring
   how `vision` planned to reuse it.
 - **V-PCC projection variant** (DECISION 1, alternative A's V-PCC path) would
-  feed geometry patches through `tpt-kinetix-h264` / `tpt-kinetix-av1` as the
+  feed geometry patches through `tpt-kinetix-av1` (not H.264: patent-encumbered, see PATENTS.md) as the
   2D layer — an explicit dependency *option*, gated behind a feature so the
   core point-cloud path has no 2D-codec dependency.
 - **Output type:** a `PointCloud` struct (positions + attribute buffers) added
@@ -326,8 +326,8 @@ portion.
   extracted from `lean`). Geometry/attribute symbols code through it, mirroring
   how `vision` reuses it. No bitreader/rANS reimplementation in this crate.
 - **V-PCC projection** (a future variant of DECISION 1's point-cloud path)
-  is an *optional* feature-gated dependency on `tpt-kinetix-h264` /
-  `tpt-kinetix-av1` as the 2D layer for geometry-patch projection. The core
+  is an *optional* feature-gated dependency on `tpt-kinetix-av1` (never the
+  encumbered `out-kinetix-h264`) as the 2D layer for geometry-patch projection. The core
   point-cloud (octree + lift/RAHT) path has **no** 2D-codec dependency, so the
   v1 crate depends only on `tpt-kinetix-core` + `tpt-kinetix-bitstream`.
 - **Output type:** a `PointCloud` struct (positions + per-attribute buffers)
@@ -455,7 +455,7 @@ and `lossless` already share:
   `KinetixError` / `DecoderCapabilities` / `Packet` / `Timestamp` contract
   plumbing (item 2 note).
 - **Optional, feature-gated** V-PCC projection path could feed geometry
-  patches through `tpt-kinetix-h264` / `tpt-kinetix-av1` as the 2D layer
+  patches through `tpt-kinetix-av1` as the 2D layer
   (DECISION 1/7) — an explicit *optional* dependency, never on the v1 core
   path.
 

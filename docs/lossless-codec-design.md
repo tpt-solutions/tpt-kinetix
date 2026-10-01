@@ -116,7 +116,7 @@ not just external testing:
   The decoder computes the checksum over its reconstructed plane and **must**
   match it; a mismatch returns a typed `ReversibilityError` (not `Ok` with
   wrong data — consistent with the Kinetix honesty contract every decoder
-  follows, see `tpt-kinetix-h264`/`tpt-kinetix-av1`).
+  follows, see `out-kinetix-h264`/`tpt-kinetix-av1`).
 - **Per-stream checksum.** The sequence/file header embeds a `SHA-256` over the
   entire encoded stream, so corruption anywhere (including header fields) is
   caught before decode.

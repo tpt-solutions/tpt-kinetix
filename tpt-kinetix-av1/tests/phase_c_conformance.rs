@@ -1,5 +1,5 @@
 //! Standalone AV1 Phase C conformance harness (does not depend on the broken
-//! `tpt-kinetix-h264` / `tpt-kinetix-test-utils` path).
+//! `out-kinetix-h264` / `tpt-kinetix-test-utils` path).
 //!
 //! Generates a real `ffmpeg`-encoded AV1 keyframe (IVF), decodes it with
 //! [`tpt_kinetix_av1::Av1Decoder`], decodes the same IVF to raw YUV with

@@ -8,8 +8,8 @@ An original, embedded-first video codec for the
 > transform, in-loop filter) is not. `LeanDecoder::capabilities()` reports
 > `pixel_exact = false` accordingly — see [LIMITATIONS](#limitations).
 
-Unlike `tpt-kinetix-h264` and `tpt-kinetix-av1`, which are from-scratch
-*conformant* implementations of existing standards, Lean is an original
+Unlike `tpt-kinetix-av1`, which is a from-scratch
+*conformant* implementation of an existing standard, Lean is an original
 bitstream format designed by this project. It trades roughly 10-15% worse
 compression than AV1 for a decoder that stays small, auditable, and
 genuinely parallel at the entropy-decode stage — see the crate-level docs in

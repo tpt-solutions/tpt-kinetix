@@ -1,7 +1,6 @@
 //! `tpt-kinetix-screen` — an original screen/UI-capture codec.
 //!
-//! Unlike general-purpose codecs ([`tpt-kinetix-h264`] /
-//! [`tpt-kinetix-av1`], tuned for natural-image statistics), Screen is built
+//! Unlike general-purpose codecs (e.g. [`tpt-kinetix-av1`], tuned for natural-image statistics), Screen is built
 //! for **synthetic screen content**: sharp edges, large flat regions, and
 //! repeated glyph/UI elements. Its bitstream classifies every coding block into
 //! one of three modes (see `docs/screen-codec-design.md`):
@@ -31,7 +30,6 @@
 //! - Design doc: `docs/screen-codec-design.md`
 //! - Adding a codec: `docs/adding-a-codec.md`
 //!
-//! [`tpt-kinetix-h264`]: https://docs.rs/tpt-kinetix-h264
 //! [`tpt-kinetix-av1`]: https://docs.rs/tpt-kinetix-av1
 //! [`tpt-kinetix-bitstream`]: https://docs.rs/tpt-kinetix-bitstream
 

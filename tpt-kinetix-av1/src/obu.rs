@@ -4,7 +4,7 @@
 //! OBU types (SequenceHeader) per the AV1 bitstream specification §5.3.
 
 // ---------------------------------------------------------------------------
-// Minimal bit-reader (independent of tpt-kinetix-h264; same pattern).
+// Minimal bit-reader (independent of out-kinetix-h264; same pattern).
 // ---------------------------------------------------------------------------
 
 pub struct BitReader<'a> {

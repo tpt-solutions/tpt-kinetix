@@ -28,6 +28,10 @@ build:
 build-royalty-free:
     cargo build -p tpt-kinetix-pipeline -p tpt-kinetix-cli
 
+# Fail if a published crate can reach a patent-encumbered `out-*` crate (see PATENTS.md).
+check-publish-safe:
+    python tools/check_no_encumbered.py
+
 # Run the whole test suite. Prefers cargo-nextest when installed.
 test:
     cargo nextest run --workspace --lib --bins --tests || cargo test --workspace
@@ -72,7 +76,7 @@ verify-tables:
     cargo run -p tpt-kinetix-kg -- verify-tables out-kinetix-h264/src/cabac_tables.rs
 
 # The full local pre-commit gate: format check, lint, build, test, spec tables.
-check: fmt-check clippy build test verify-tables
+check: fmt-check check-publish-safe clippy build test verify-tables
     @echo "All local checks passed."
 
 # One-shot contributor bootstrap: install the tools CI expects.

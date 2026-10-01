@@ -28,7 +28,7 @@ cat > src/tables.rs <<'HEADER'
 //! via `tpt-kinetix-kg extract-tables` and re-checked by
 //! `cargo run -p tpt-kinetix-kg -- verify-tables src/tables.rs` (the
 //! `verify-tables:` markers below). Nothing from FFmpeg is committed —
-//! only the extracted raw numbers, as in `tpt-kinetix-h264`.
+//! only the extracted raw numbers, as in `out-kinetix-h264`.
 
 /// Block sizes, spec order: index = `block_level * 3 + block_partition`.
 pub const N_BS_SIZES: usize = 13;

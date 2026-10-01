@@ -14,7 +14,7 @@ A clear, concise description of the bug.
 - [ ] tpt-kinetix-core
 - [ ] tpt-kinetix-demux
 - [ ] tpt-kinetix-mux
-- [ ] out-kinetix-h264
+- [ ] out-kinetix-h264 (unpublished)
 - [ ] tpt-kinetix-av1
 - [ ] tpt-kinetix-kg
 - [ ] tpt-kinetix-pipeline

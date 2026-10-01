@@ -44,9 +44,9 @@ be processed concurrently.
 
 ```sh
 tpt-kinetix-kg codegen h264.kg.json \
-  --crate-name tpt-kinetix-h264 \
+  --crate-name out-kinetix-h264 \
   --inject-rayon \
-  --output-dir tpt-kinetix-h264/
+  --output-dir out-kinetix-h264/
 ```
 
 Writes generated Rust files under `--output-dir`:
@@ -62,9 +62,9 @@ Writes generated Rust files under `--output-dir`:
 
 ```sh
 tpt-kinetix-kg run path/to/codec/h264dec.c \
-  --crate-name tpt-kinetix-h264 \
+  --crate-name out-kinetix-h264 \
   --inject-rayon \
-  --output-dir tpt-kinetix-h264/
+  --output-dir out-kinetix-h264/
 ```
 
 Runs all four phases and writes generated files.
