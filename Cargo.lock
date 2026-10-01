@@ -1532,6 +1532,7 @@ dependencies = [
 name = "tpt-kinetix-bitstream"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "tpt-kinetix-core",
 ]
 
@@ -1568,11 +1569,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "byteorder",
+ "criterion",
  "nom",
  "proptest",
  "serde_json",
  "thiserror",
  "tpt-kinetix-core",
+ "tpt-kinetix-mux",
  "wasm-bindgen",
 ]
 
@@ -1580,10 +1583,12 @@ dependencies = [
 name = "tpt-kinetix-face"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nom",
  "thiserror",
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
+ "tpt-kinetix-test-utils",
 ]
 
 [[package]]
@@ -1604,6 +1609,7 @@ dependencies = [
 name = "tpt-kinetix-lean"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "thiserror",
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
@@ -1614,6 +1620,7 @@ dependencies = [
 name = "tpt-kinetix-lossless"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nom",
  "thiserror",
  "tpt-kinetix-bitstream",
@@ -1624,6 +1631,7 @@ dependencies = [
 name = "tpt-kinetix-mux"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "thiserror",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
@@ -1650,6 +1658,7 @@ dependencies = [
 name = "tpt-kinetix-realtime"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nom",
  "thiserror",
  "tpt-kinetix-bitstream",
@@ -1660,6 +1669,7 @@ dependencies = [
 name = "tpt-kinetix-screen"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nom",
  "thiserror",
  "tpt-kinetix-bitstream",
@@ -1708,6 +1718,7 @@ dependencies = [
 name = "tpt-kinetix-vision"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nom",
  "thiserror",
  "tpt-kinetix-bitstream",
@@ -1719,6 +1730,7 @@ dependencies = [
 name = "tpt-kinetix-volumetric"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "nom",
  "thiserror",
  "tpt-kinetix-bitstream",
@@ -1730,6 +1742,7 @@ dependencies = [
 name = "tpt-kinetix-vp9"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "proptest",
  "thiserror",
  "tpt-kinetix-core",

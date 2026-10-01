@@ -17,3 +17,10 @@ tpt-kinetix-core = { path = "../tpt-kinetix-core" }
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "bitstream_ops"
+harness = false

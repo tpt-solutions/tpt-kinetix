@@ -18,3 +18,8 @@ tpt-kinetix-core = { workspace = true }
 
 [dev-dependencies]
 tpt-kinetix-demux = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "mp4_mux"
+harness = false

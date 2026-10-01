@@ -18,6 +18,11 @@ thiserror = "2"
 
 [dev-dependencies]
 proptest = "1"
+criterion = { workspace = true }
+
+[[bench]]
+name = "vp9_decode"
+harness = false
 
 [lib]
 path = "src/lib.rs"

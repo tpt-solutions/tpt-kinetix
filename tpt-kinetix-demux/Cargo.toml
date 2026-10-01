@@ -29,3 +29,9 @@ wasm = ["dep:wasm-bindgen", "dep:serde_json"]
 
 [dev-dependencies]
 proptest = "1.5"
+criterion = { workspace = true }
+tpt-kinetix-mux = { workspace = true }
+
+[[bench]]
+name = "container_demux"
+harness = false

@@ -19,6 +19,11 @@ thiserror = "2"
 
 [dev-dependencies]
 tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
+criterion = { workspace = true }
+
+[[bench]]
+name = "lean_codec"
+harness = false
 
 [lib]
 path = "src/lib.rs"

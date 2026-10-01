@@ -161,13 +161,28 @@ av1-oracle-tile ENTRY="testsrc":
 fetch-h264-conformance:
     bash tools/fetch-h264-conformance.sh
 
+# Every crate that ships a Criterion bench (Phase 0 of todo-perf.md).
+BENCH_CRATES := "out-kinetix-h264 tpt-kinetix-av1 tpt-kinetix-vp9 tpt-kinetix-bitstream tpt-kinetix-lean tpt-kinetix-lossless tpt-kinetix-realtime tpt-kinetix-screen tpt-kinetix-vision tpt-kinetix-face tpt-kinetix-volumetric tpt-kinetix-demux tpt-kinetix-mux tpt-kinetix-pipeline"
+
 # Run every Criterion bench in the workspace.
-bench:
-    cargo bench -p out-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-pipeline
+bench *FLAGS:
+    cargo bench -p out-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-vp9 -p tpt-kinetix-bitstream -p tpt-kinetix-lean -p tpt-kinetix-lossless -p tpt-kinetix-realtime -p tpt-kinetix-screen -p tpt-kinetix-vision -p tpt-kinetix-face -p tpt-kinetix-volumetric -p tpt-kinetix-demux -p tpt-kinetix-mux -p tpt-kinetix-pipeline {{FLAGS}}
 
 # Run the benches and print a consolidated timing report.
 bench-report:
     cargo run -p tpt-kinetix-test-utils --example bench_report -- --release
+
+# Record machine + toolchain details and commit a baseline JSON snapshot of
+# every bench target, plus regenerate docs/PERFORMANCE.md from it.
+# Use `just bench-baseline <label>` to label the snapshot (default: today's date).
+bench-baseline LABEL="":
+    cargo run --release -p tpt-kinetix-test-utils --example bench_baseline -- --label "{{LABEL}}"
+
+# Compare the current bench run against a committed baseline snapshot and fail
+# on a throughput regression beyond THRESHOLD percent (default 5).
+# Usage: just bench-compare [BASELINE_JSON] [THRESHOLD]
+bench-compare BASELINE="docs/perf/baseline-2026-10-02.json" THRESHOLD="5":
+    cargo run --release -p tpt-kinetix-test-utils --example bench_compare -- --baseline "{{BASELINE}}" --threshold {{THRESHOLD}}
 
 # Fetch the FFmpeg FATE AV1 samples (small) into fixtures/av1-fate/.
 fetch-av1-fate:
