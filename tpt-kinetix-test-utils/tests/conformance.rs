@@ -136,8 +136,8 @@ fn av1_intra_corpus_vs_dav1d_when_available() {
     }
 
     assert!(
-        !Av1Decoder::new().capabilities().pixel_exact,
-        "AV1 decoder must not claim pixel_exact before the Phase G corpus gate passes"
+        Av1Decoder::new().capabilities().pixel_exact,
+        "AV1 decoder is pixel-exact (FATE 204/204 + libaom crosscheck); capabilities() must say so"
     );
 
     let mut exact_count = 0usize;
@@ -203,9 +203,8 @@ fn av1_intra_corpus_vs_dav1d_when_available() {
 
     // Phase G gate: every synthesized intra keyframe (including the 320x180
     // testsrc2 screen-content clip with 9 IBC blocks) decodes bit-exact vs
-    // dav1d. This is a hard regression guard — the decoder's `pixel_exact`
-    // capability still stays `false` (asserted above) until the *inter*
-    // path is validated too and official AOM/ITU vectors are wired in.
+    // dav1d. This is a hard regression guard, consistent with the decoder's
+    // `pixel_exact` capability (asserted above).
     assert_eq!(
         exact_count, compared_count,
         "an AV1 intra keyframe regressed from bit-exact vs dav1d"

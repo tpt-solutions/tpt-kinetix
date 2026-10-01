@@ -378,11 +378,14 @@ impl<'a> TileDecoder<'a> {
             self.b.mode = [m as usize; 4];
             let n = BWH_TAB[bs * 2] as usize;
             let m2 = BWH_TAB[bs * 2 + 1] as usize;
-            for i in 0..n {
-                self.state.above_mode_ctx[col * 2 + i] = m;
+            // A block can extend past the frame edge / SB boundary; clamp to the context arrays.
+            let a_end = (col * 2 + n).min(self.state.above_mode_ctx.len());
+            if let Some(dst) = self.state.above_mode_ctx.get_mut(col * 2..a_end) {
+                dst.fill(m);
             }
-            for i in 0..m2 {
-                self.left.mode[row7 * 2 + i] = m;
+            let l_end = (row7 * 2 + m2).min(self.left.mode.len());
+            if let Some(dst) = self.left.mode.get_mut(row7 * 2..l_end) {
+                dst.fill(m);
             }
         }
         let uv_probs = crate::header::kf_uvmode_probs_for(self.b.mode[3]);

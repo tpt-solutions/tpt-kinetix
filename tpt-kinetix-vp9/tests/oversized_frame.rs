@@ -20,3 +20,20 @@ fn oversized_frame_is_rejected_without_oom() {
     };
     assert!(Vp9Decoder::new().decode(&packet).is_err());
 }
+
+/// fuzz_vp9_frame crash-bc3ec8e1...: must return Err/Ok without panicking.
+#[test]
+fn fuzz_crash_bc3ec8e1_does_not_panic() {
+    let data: Vec<u8> = vec![
+        128, 0, 73, 131, 66, 128, 0, 154, 0, 73, 131, 0, 0, 0, 0, 0, 0, 0, 18, 29, 191, 131, 73,
+        131, 66, 0, 0, 226, 131, 66, 128, 57, 68, 131, 131, 66, 131, 66, 122, 66,
+    ];
+    let packet = Packet {
+        pts: Timestamp::NONE,
+        dts: Timestamp::NONE,
+        data,
+        stream_index: 0,
+        is_key_frame: true,
+    };
+    let _ = Vp9Decoder::new().decode(&packet);
+}
