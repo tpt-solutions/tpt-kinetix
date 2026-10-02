@@ -208,10 +208,54 @@ Order:
 - [x] VP9 — **done 2026-10-02**, see below
 - [x] bitstream / rANS (shared by all original codecs, best leverage) — **done
   2026-10-02**, see below
-- [ ] lean, realtime
+- [~] lean, realtime — lean done 2026-10-02 (encode +28%, decode +18%);
+  realtime still open, and it has the same per-block/per-mode allocation shape
+  (plus an `O(n^4)` transform that still rebuilds its matrix per call)
 - [ ] lossless, screen
 - [ ] vision, face, volumetric
 - [ ] out-kinetix-h264 (optional, unpublished, last)
+
+### lean — Hadamard caching + allocation removal DONE 2026-10-02
+
+Phase 2 said lean is an *encoder* story (encode ~0.49 Melem/s vs multi-Melem/s
+decode). Two causes, both found by reading the hot path rather than by
+speculating about arithmetic:
+
+1. **`hadamard_2d_raw` rebuilt the transform matrix on every call.**
+   `hadamard_matrix(n)` allocated a nested `Vec<Vec<i32>>` (`1 + n` heap
+   allocations) and rebuilt the matrix in `O(n² log n)` — and the function is
+   called once per block per frame in *both* directions, inside an `O(n^4)`
+   loop that then double-indexed `h[j][l]`. The matrices are pure functions of
+   `n` and `n` only ever takes a few power-of-two values, so they are now built
+   once per size behind a `OnceLock` (thread-safe for concurrent decode).
+   Entries and accumulation order are unchanged, so the transform stays
+   bit-exact.
+2. **~5 allocations per block in reconstruction, ~6 more per intra mode trial
+   in encoding.** The encoder trials all 14 modes per block, so that is ~84
+   allocations per block. Both directions now use a single per-frame scratch.
+
+| Case (320x240) | Before | After | Delta |
+|:---|---:|---:|---:|
+| `lean_320x240/encode` | 477 Kelem/s | 610 Kelem/s | **+28%** |
+| `lean_320x240/decode` | 11.7 Melem/s | 13.8 Melem/s | **+18%** |
+
+- **A robustness bug was fixed on the way.** `min_block_size_log2` and
+  `max_block_size_log2` are 4-bit fields with only `min <= max` validated, and
+  `block_sizes` derives the block size from `min_block_size_log2` — so a stream
+  declaring a 32k×32k minimum block made the decoder ask for a multi-gigabyte
+  allocation from a few bytes of input. The parser now rejects
+  `max_block_size_log2 > 6` (v1 defines 8x8..64x64), which is also what makes
+  the fixed-size scratch sound rather than a buffer overflow waiting to happen.
+- Bit-exactness: all 30 lean tests pass, including the `qp == 0` lossless
+  round-trip suite the crate's guarantee rests on; workspace clippy `-D
+  warnings` and `cargo fmt --check` clean; full workspace test suite green.
+- **The same shape is present in `tpt-kinetix-realtime` and
+  `tpt-kinetix-vision`**: both have the per-block `neighbours_*` returning
+  `Vec`s, the same 14-mode encoder search, and their own
+  `hadamard_2d_raw`/`inverse_2d` that still rebuild the matrix per call
+  (`vision/src/transform.rs`, `realtime/src/transform.rs`). That is the next
+  work, and it should now be a mechanical port of this change rather than a
+  fresh investigation.
 
 ### VP9 — debug-switch environment lookups DONE 2026-10-02
 

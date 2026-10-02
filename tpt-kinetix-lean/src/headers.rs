@@ -177,6 +177,15 @@ impl SequenceHeader {
 }
 
 /// Per-frame parameters.
+/// Largest block dimension v1 supports, as `log2`. Blocks run 8x8..64x64
+/// (`log2` 3..=6); the sequence header parser rejects anything larger, which is
+/// what lets the per-block scratch buffers be fixed-size stack arrays instead
+/// of per-block heap allocations.
+pub const MAX_BLOCK_SIZE_LOG2: u8 = 6;
+
+/// Block dimension implied by `MAX_BLOCK_SIZE_LOG2` (64).
+pub const MAX_BLOCK_SIZE: usize = 1 << MAX_BLOCK_SIZE_LOG2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
     pub frame_type: FrameType,

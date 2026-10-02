@@ -29,27 +29,59 @@
 //! exact inverse bijections on integers, which is what the `qp == 0` lossless
 //! path depends on.
 
+use std::sync::OnceLock;
+
 /// The Sylvester Walsh–Hadamard matrix `H_n` (`n` a power of two). Entries are
 /// `{-1, +1}` and `H_n · H_nᵀ = n·I`.
-fn hadamard_matrix(n: usize) -> Vec<Vec<i32>> {
+///
+/// Stored row-major and flat, and **cached per size**. The matrices are pure
+/// functions of `n`, and `n` only ever takes one of a handful of power-of-two
+/// values (the supported block sizes), so there is no reason to rebuild them:
+/// this used to allocate a nested `Vec<Vec<i32>>` — `1 + n` heap allocations
+/// plus `O(n² log n)` construction work — on *every* transform call, i.e. once
+/// per block per frame in both the encode and the decode direction. The entry
+/// values and the order the transform accumulates them in are unchanged, so
+/// the result stays bit-exact.
+fn build_hadamard(n: usize) -> Vec<i32> {
     debug_assert!(n.is_power_of_two(), "transform size must be a power of two");
-    let mut m = vec![vec![1i32; 1]; 1];
+    let mut m = vec![1i32; 1];
     let mut size = 1;
     while size < n {
         let new_size = size * 2;
-        let mut nm = vec![vec![0i32; new_size]; new_size];
+        let mut nm = vec![0i32; new_size * new_size];
         for i in 0..size {
             for j in 0..size {
-                nm[i][j] = m[i][j];
-                nm[i][j + size] = m[i][j];
-                nm[i + size][j] = m[i][j];
-                nm[i + size][j + size] = -m[i][j];
+                let v = m[i * size + j];
+                nm[i * new_size + j] = v;
+                nm[i * new_size + (j + size)] = v;
+                nm[(i + size) * new_size + j] = v;
+                nm[(i + size) * new_size + (j + size)] = -v;
             }
         }
         m = nm;
         size = new_size;
     }
     m
+}
+
+/// Largest transform/block size supported, as a power of two (64).
+const MAX_HADAMARD_LOG2: usize = 6;
+
+/// One cached matrix per size, indexed by `log2(n)`. `OnceLock` keeps this
+/// correct if several frames are decoded concurrently.
+static HADAMARD: [OnceLock<Vec<i32>>; MAX_HADAMARD_LOG2 + 1] =
+    [const { OnceLock::new() }; MAX_HADAMARD_LOG2 + 1];
+
+/// Cached row-major `H_n`, built on first use for this size.
+#[inline]
+fn hadamard_matrix(n: usize) -> &'static [i32] {
+    let log2 = n.trailing_zeros() as usize;
+    assert!(
+        n.is_power_of_two() && log2 <= MAX_HADAMARD_LOG2,
+        "transform size {n} is not a supported power of two (<= {})",
+        1usize << MAX_HADAMARD_LOG2
+    );
+    HADAMARD[log2].get_or_init(|| build_hadamard(n)).as_slice()
 }
 
 /// Accumulate the separable 2-D transform `H·src·H` into `dst` with **no
@@ -65,9 +97,9 @@ fn hadamard_2d_raw(src: &[i32], n: usize, dst: &mut [i32]) {
             for k in 0..n {
                 let mut inner = 0i64;
                 for l in 0..n {
-                    inner += src[k * n + l] as i64 * h[j][l] as i64;
+                    inner += src[k * n + l] as i64 * h[j * n + l] as i64;
                 }
-                s += h[i][k] as i64 * inner;
+                s += h[i * n + k] as i64 * inner;
             }
             debug_assert!(
                 s >= i32::MIN as i64 && s <= i32::MAX as i64,
@@ -87,18 +119,32 @@ pub fn transform_2d(src: &[i32], n: usize, dst: &mut [i32]) {
     hadamard_2d_raw(src, n, dst);
 }
 
+/// Inverse of [`transform_2d`] into caller-supplied scratch.
+///
+/// `scratch` must be at least `n * n` long and is fully overwritten. Split out
+/// so the per-block reconstruction loop can hand in a buffer it already owns
+/// instead of allocating one per block. The accumulation order is identical to
+/// [`inverse_2d`], so the two agree bit for bit.
+pub fn inverse_2d_with_scratch(src: &[i32], n: usize, dst: &mut [i32], scratch: &mut [i32]) {
+    debug_assert_eq!(src.len(), n * n);
+    debug_assert_eq!(dst.len(), n * n);
+    debug_assert!(scratch.len() >= n * n);
+    let scale = (n * n) as i64;
+    let tmp = &mut scratch[..n * n];
+    hadamard_2d_raw(src, n, tmp);
+    for (i, v) in tmp.iter().enumerate() {
+        dst[i] = (*v as i64).div_euclid(scale) as i32;
+    }
+}
+
 /// Inverse of [`transform_2d`]. It computes `H·src·H` (the same unnormalized
 /// 2-D product) and divides by `n²` exactly once. Since `H·(H·x·H)·H = n²·x`,
 /// this recovers `x` exactly for integer `x`.
 pub fn inverse_2d(src: &[i32], n: usize, dst: &mut [i32]) {
     debug_assert_eq!(src.len(), n * n);
     debug_assert_eq!(dst.len(), n * n);
-    let scale = (n * n) as i64;
-    let mut tmp = vec![0i32; n * n];
-    hadamard_2d_raw(src, n, &mut tmp);
-    for (i, v) in tmp.iter().enumerate() {
-        dst[i] = (*v as i64).div_euclid(scale) as i32;
-    }
+    let mut scratch = vec![0i32; n * n];
+    inverse_2d_with_scratch(src, n, dst, &mut scratch);
 }
 
 /// 2-D 4×4 Walsh–Hadamard transform (the chroma-DC transform). Equivalent to
