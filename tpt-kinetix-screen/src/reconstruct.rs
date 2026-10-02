@@ -128,12 +128,29 @@ pub fn encode_frame(
 
     let mut dict = GlyphDictionary::new(seq.dict_cap as usize);
 
+    // One scratch set for the whole frame, reused for every block. The natural
+    // path alone used ~8 allocations per block (extracted block, two neighbour
+    // rows, prediction, residual, transformed, and the inverse transform's
+    // temporaries).
+    let mut scratch = natural::NaturalScratch::new(cb_size);
+    // The extracted block gets its own per-frame buffer rather than living in
+    // the scratch: it is read while the scratch's work buffers are borrowed
+    // mutably, so keeping it separate avoids aliasing them.
+    let mut block_buf = vec![0u8; cb_size * cb_size];
+
     // Classify each block.
     for by in 0..gh {
         for bx in 0..gw {
             let bi = by * gw + bx;
-            let block = extract_luma_block(src, bx * cb_size, by * cb_size, cb_size);
-            let mode = classify_block_luma(&block, cb_size, 4);
+            natural::extract_luma_block_into(
+                src,
+                bx * cb_size,
+                by * cb_size,
+                cb_size,
+                &mut block_buf,
+            );
+            let block = &block_buf[..cb_size * cb_size];
+            let mode = classify_block_luma(block, cb_size, 4);
 
             match mode {
                 BlockMode::Flat => {
@@ -145,7 +162,7 @@ pub fn encode_frame(
                 BlockMode::Glyph => {
                     let fg = PaletteColor::new(255, 128, 128);
                     let bg = PaletteColor::new(0, 128, 128);
-                    if let Some(slot) = glyph::match_glyph(&block, cb_size, &dict, fg, bg, 8) {
+                    if let Some(slot) = glyph::match_glyph(block, cb_size, &dict, fg, bg, 8) {
                         modes.push(1u8);
                         flat_colors.push(0);
                         glyph_blocks[bi] = Some(GlyphBlock {
@@ -157,27 +174,62 @@ pub fn encode_frame(
                         // Dict miss: emit as NATURAL for v1.
                         modes.push(2u8);
                         flat_colors.push(0);
-                        let (above, left) =
-                            natural_neighbors(src, bx * cb_size, by * cb_size, cb_size);
-                        natural_blocks[bi] = Some(natural::encode_natural_block(
-                            &block,
+                        natural::natural_neighbors_into(
+                            src,
+                            bx * cb_size,
+                            by * cb_size,
                             cb_size,
-                            &above,
-                            &left,
+                            &mut scratch.above,
+                            &mut scratch.left,
+                        );
+                        let natural::NaturalScratch {
+                            above,
+                            left,
+                            pred,
+                            work,
+                            tscratch,
+                            ..
+                        } = &mut scratch;
+                        natural_blocks[bi] = Some(natural::encode_natural_block_into(
+                            block,
+                            cb_size,
+                            &above[..cb_size],
+                            &left[..cb_size],
                             frame.base_qp,
+                            pred,
+                            work,
+                            tscratch,
                         ));
                     }
                 }
                 BlockMode::Natural => {
                     modes.push(2u8);
                     flat_colors.push(0);
-                    let (above, left) = natural_neighbors(src, bx * cb_size, by * cb_size, cb_size);
-                    natural_blocks[bi] = Some(natural::encode_natural_block(
-                        &block,
+                    natural::natural_neighbors_into(
+                        src,
+                        bx * cb_size,
+                        by * cb_size,
                         cb_size,
-                        &above,
-                        &left,
+                        &mut scratch.above,
+                        &mut scratch.left,
+                    );
+                    let natural::NaturalScratch {
+                        above,
+                        left,
+                        pred,
+                        work,
+                        tscratch,
+                        ..
+                    } = &mut scratch;
+                    natural_blocks[bi] = Some(natural::encode_natural_block_into(
+                        block,
+                        cb_size,
+                        &above[..cb_size],
+                        &left[..cb_size],
                         frame.base_qp,
+                        pred,
+                        work,
+                        tscratch,
                     ));
                 }
             }
@@ -191,42 +243,6 @@ pub fn encode_frame(
     let natural_stream = encode_natural_stream(&natural_blocks);
 
     RansStreamSet::frame(&[mode_stream, flat_stream, glyph_stream, natural_stream])
-}
-
-fn extract_luma_block(src: &FrameBuffer, x0: usize, y0: usize, size: usize) -> Vec<u8> {
-    let mut block = vec![0u8; size * size];
-    for y in 0..size {
-        for x in 0..size {
-            let sx = x0 + x;
-            let sy = y0 + y;
-            if sx < src.width && sy < src.height {
-                block[y * size + x] = src.luma[sy * src.width + sx];
-            }
-        }
-    }
-    block
-}
-
-fn natural_neighbors(src: &FrameBuffer, x0: usize, y0: usize, size: usize) -> (Vec<i32>, Vec<i32>) {
-    let mut above = vec![128i32; size];
-    let mut left = vec![128i32; size];
-    if y0 > 0 {
-        for (c, above_c) in above.iter_mut().enumerate().take(size) {
-            let x = x0 + c;
-            if x < src.width {
-                *above_c = src.luma[(y0 - 1) * src.width + x] as i32;
-            }
-        }
-    }
-    if x0 > 0 {
-        for (r, left_r) in left.iter_mut().enumerate().take(size) {
-            let y = y0 + r;
-            if y < src.height {
-                *left_r = src.luma[y * src.width + (x0 - 1)] as i32;
-            }
-        }
-    }
-    (above, left)
 }
 
 /// Push a `u32` as four symbols. The rANS coder is a stack (the decoder pops
@@ -342,6 +358,9 @@ pub fn decode_frame_payload(
 
     let dict = GlyphDictionary::new(seq.dict_cap as usize);
 
+    // One scratch set for the whole frame (see `encode_frame`).
+    let mut scratch = natural::NaturalScratch::new(cb_size);
+
     for by in 0..gh {
         for bx in 0..gw {
             let bi = by * gw + bx;
@@ -367,15 +386,37 @@ pub fn decode_frame_payload(
                 _ => {
                     // NATURAL
                     if let Some(n) = natural_blocks.get(bi).and_then(|b| b.clone()) {
-                        let (above, left) = natural_neighbors(&fb, x0, y0, cb_size);
-                        let decoded = natural::decode_natural_block(
+                        natural::natural_neighbors_into(
+                            &fb,
+                            x0,
+                            y0,
+                            cb_size,
+                            &mut scratch.above,
+                            &mut scratch.left,
+                        );
+                        let natural::NaturalScratch {
+                            above,
+                            left,
+                            pred,
+                            work,
+                            residual,
+                            tscratch,
+                            out,
+                            ..
+                        } = &mut scratch;
+                        natural::decode_natural_block_into(
                             &n,
                             cb_size,
-                            &above,
-                            &left,
+                            &above[..cb_size],
+                            &left[..cb_size],
                             frame.base_qp,
-                        )?;
-                        blit_luma_block(&mut fb, x0, y0, cb_size, &decoded);
+                            pred,
+                            work,
+                            residual,
+                            tscratch,
+                            out,
+                        );
+                        blit_luma_block(&mut fb, x0, y0, cb_size, &out[..cb_size * cb_size]);
                     }
                 }
             }

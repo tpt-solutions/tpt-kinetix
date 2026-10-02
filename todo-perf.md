@@ -213,11 +213,38 @@ Order:
   (Hadamard matrix rebuilt per transform call; ~5 allocations per block plus
   ~6 per intra-mode trial in the encoder) and both also had the unvalidated
   4-bit block-size field.
-- [ ] lossless, screen
+- [x] lossless, screen — **done 2026-10-02**, by two different routes.
+  screen: 1080p encode ~+32%, decode ~+32% (see below). lossless: no local
+  hot spot left — its decode went 11.9 -> 35.0 Melem/s from the shared bitstream
+  rANS inverse table, and its own code has no transform and no per-block
+  allocations left to remove
 - [~] vision, face, volumetric — vision done 2026-10-02 (1080p encode +19%,
   decode_pixels +19%; no new validation needed, its parser already bounded the
   block size). face and volumetric still open
 - [ ] out-kinetix-h264 (optional, unpublished, last)
+
+### screen — Hadamard caching + natural-path allocations DONE 2026-10-02
+
+The same matrix-rebuild bug as the lean family, in `screen/src/natural.rs`
+(the natural-image fallback mode). Cached behind a `OnceLock`, and the natural
+path's ~8 per-block allocations moved into one per-frame `NaturalScratch`.
+
+| screen @ 1920x1080 | Matrix cache | + allocation removal | Total |
+|:---|---:|---:|---:|
+| `encode` | +29.7% | +1.6% | **~+32%** |
+| `decode` | +30.6% | +1.1% | **~+32%** |
+
+**Unlike lean/realtime/vision, the matrix rebuild was very nearly the whole
+story here.** On a UI-like source most blocks classify as FLAT or GLYPH, and
+those paths touch neither the transform nor the per-block buffers — so only
+NATURAL blocks benefited from the second step, which is why it is worth only
+~1.5%. Both changes are kept (the allocation win grows on sources with more
+natural content), but it is worth recording so nobody re-derives the same
+lesson on a different codec and over-credits the allocation half.
+
+`lossless` was audited in the same pass and needs nothing: it has no transform
+and no per-block allocations in its hot path. Its gain already came from the
+shared bitstream rANS inverse table (11.9 -> 35.0 Melem/s decode).
 
 ### lean — Hadamard caching + allocation removal DONE 2026-10-02
 

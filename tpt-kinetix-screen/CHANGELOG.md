@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Performance: the natural-mode Walsh–Hadamard matrices are cached instead of
+  rebuilt on every call.** `hadamard_2d_raw` rebuilt the matrix on *every*
+  invocation — a nested `Vec<Vec<i32>>` (`1 + n` heap allocations) plus
+  `O(n² log n)` work — and it runs once per block per frame in both directions.
+  The matrices are now built once per size behind a `OnceLock`. Entries and
+  accumulation order are unchanged, so the transform stays bit-exact.
+- **Performance: the natural path no longer allocates per block.** Extraction,
+  the two neighbour rows, prediction, residual, the transformed block and the
+  inverse transform's temporaries were each fresh `Vec`s per block (~8). They
+  now come from one per-frame `NaturalScratch`, with allocation-free
+  `*_into` variants used by both the encode and decode loops. The public
+  `encode_natural_block` / `decode_natural_block` keep their allocating
+  signatures and are now thin wrappers over the shared code, so they double as
+  the reference for it.
+- The two allocating helpers in `reconstruct.rs` (`extract_luma_block`,
+  `natural_neighbors`) are removed — their `*_into` replacements in
+  `natural.rs` are the only callers' path now.
+
+Measured with `cargo bench -p tpt-kinetix-screen` at 1920x1080 (Criterion
+chains runs, so the steps are separate):
+
+- matrix caching: encode **+29.7%**, decode **+30.6%**
+- plus the allocation removal: a further **+1.6%** encode, **+1.1%** decode
+
+So unlike lean/realtime/vision, where both fixes mattered, here the matrix
+rebuild was very nearly the whole story: on a UI-like source most blocks take
+the FLAT or GLYPH paths, which never touched either the transform or the
+per-block allocations, so only NATURAL blocks benefited from the second step.
+Both changes are kept — the allocation removal is still a real ~1.5%, and it
+matters more on sources with more natural content.
+
+Output is unchanged: all 32 screen tests pass, including the `qp == 0`
+bit-exact natural-block round-trip.
+
 ### Fixed
 
 - Stream counts (mode/flat-run/glyph/natural-block/coefficent counts) are coded
