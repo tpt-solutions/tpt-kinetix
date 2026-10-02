@@ -220,8 +220,37 @@ Order:
   allocations left to remove
 - [~] vision, face, volumetric — vision done 2026-10-02 (1080p encode +19%,
   decode_pixels +19%; no new validation needed, its parser already bounded the
-  block size). face and volumetric still open
+  block size). face and volumetric audited the same day: **no hot spot found**,
+  so this row is done-but-for-the-record rather than work still to do
 - [ ] out-kinetix-h264 (optional, unpublished, last)
+
+### face, volumetric — audited 2026-10-02, no hot spot found
+
+The last of the originals. Checked for every pattern that paid off elsewhere —
+`env::var` in a hot loop, per-call matrix rebuilds, per-block `Vec` allocation,
+per-symbol table lookups — and found **none of them**:
+
+- `tpt-kinetix-face`: no transform, no unguarded `env::var`, and the `vec!`s in
+  `params.rs`/`synthesizer.rs`/`basis.rs` are per-frame, not per-block.
+- `tpt-kinetix-volumetric`: no transform; `raht_forward`/`raht_inverse` are
+  already allocation-free and in-place (`chunks_exact_mut`); its own entropy
+  coder uses `FixedBinaryModel`, whose `find` is a single comparison (a binary
+  model needs no inverse table), and `decode_bits` reserves capacity.
+
+Their current numbers also agree with Phase 2's own assessment, which flagged
+only lean and vision as slow decodes: face encode 10-22 Gelem/s, volumetric
+encode ~18 Melem/s / decode ~82 Melem/s. **This row is closed as audited, not
+optimised** — recording that so it is not re-investigated from scratch. Further
+gains here would need SIMD or a different algorithm, not the code-shape work
+that paid off in the other seven crates.
+
+Useful side-finding from the same measurement run: face and volumetric were
+untouched this session yet still printed **-2% to -7%** against Criterion's
+stored baseline. That puts this machine's **between-session noise floor at
+roughly ±5%**, which is why every change in this phase was A/B'd same-session
+(and the VP9 `decode_static` / `encode_*` "controls" were worth running at
+all). It also retroactively explains the -5..-10% that Criterion reported
+against the committed baseline in the very first session of this phase.
 
 ### screen — Hadamard caching + natural-path allocations DONE 2026-10-02
 

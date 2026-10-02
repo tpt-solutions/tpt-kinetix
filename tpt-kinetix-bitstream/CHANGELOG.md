@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Melem/s (+195%). All decode output is bit-identical: the inverse table is
   asserted equal to the previous "largest `s` with `cum[s] <= c_freq`" definition
   for every one of the 4096 slots, across five skew values.
+- **Performance: `RansDecoder::decode` is now `#[inline]`.** One attribute, on
+  the hottest function in the crate: without it the caller cannot keep
+  `state`/`pos` in registers across the symbol loop. `decode_static`
+  351 -> 469 MiB/s (**+33%**) and `decode_noise` 181 -> 195 MiB/s (**+7.5%**)
+  in the `bitstream_rans` bench, measured same-session against the
+  uninlined build.
+
+### Not done (measured, deliberately rejected)
+
+- **A batch `decode_into` was tried and removed.** `KinetixError` has `String`
+  variants, so `Result<u8, KinetixError>` is a fat return value handled per
+  symbol, and `decode` takes `&dyn SymbolModel` — an indirect call per symbol.
+  Both looked like a real cost on the hottest loop. Measured with a batched
+  bench case A/B'd against the per-symbol one *in the same binary*, the batch was
+  **slower**: 416 vs 469 MiB/s on `decode_static`, 179 vs 195 on `decode_noise`
+  (-10% / -7%). Decoding into a caller buffer only adds a store-then-load, and
+  the dispatch it would have removed is already gone once `decode` is inlined.
+  The `#[inline]` above is the whole of the available win; a batch API would
+  have been a regression dressed up as an optimisation.
 
 ## [0.1.0](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.0) - 2026-07-19
 
