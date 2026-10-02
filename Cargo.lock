@@ -1702,6 +1702,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tpt-kinetix-av1",
+ "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
  "tpt-kinetix-face",

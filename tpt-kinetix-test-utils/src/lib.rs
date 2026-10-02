@@ -15,6 +15,7 @@
 //!   conformance oracle for `tpt-kinetix-volumetric` (DECISION 8)
 
 pub mod audio_diff;
+pub mod bench_parse;
 pub mod corpus;
 pub mod pixel_diff;
 #[cfg(feature = "realtime-bench")]

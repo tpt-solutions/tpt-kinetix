@@ -52,7 +52,7 @@ impl<'a> BoolDecoder<'a> {
             self.range = split as u16;
         }
         self.normalize();
-        if std::env::var_os("TPT_VP9_TRACE").is_some() {
+        if crate::dbg_env::is_set("TPT_VP9_TRACE") {
             eprintln!(
                 "SYMP p={} bit={} b={} range={}",
                 prob,

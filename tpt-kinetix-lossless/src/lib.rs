@@ -215,6 +215,10 @@ impl LosslessEncoder {
             height: planes[0].height as u16,
             plane_checksums: crcs,
             plane_lengths: lengths,
+            plane_dims: planes
+                .iter()
+                .map(|p| (p.width as u16, p.height as u16))
+                .collect(),
             stream_sha256,
         }
         .encode(&mut header);
@@ -318,7 +322,14 @@ impl LosslessDecoder {
             let slice = body.get(pos..pos + len).ok_or_else(|| {
                 KinetixError::Parse("lossless: truncated plane payload".to_string())
             })?;
-            planes.push(decode_plane(slice, seq, spec, fh.width, fh.height, crc)?);
+            // Each plane decodes with its OWN geometry: chroma planes are
+            // smaller than the frame-level width/height (which describe
+            // plane 0), and using those for every plane desyncs the residual
+            // stream and runs it past its end.
+            let (pw, ph) = *fh.plane_dims.get(idx).ok_or_else(|| {
+                KinetixError::Parse("lossless: frame header missing plane dims".to_string())
+            })?;
+            planes.push(decode_plane(slice, seq, spec, pw, ph, crc)?);
             pos += len;
         }
         Ok(planes)
@@ -393,6 +404,53 @@ mod tests {
             })
             .collect();
         roundtrip(16, 24, 24, data);
+    }
+
+    /// Regression: a 4:2:0-style frame has chroma planes at half the luma
+    /// geometry. The decoder used to decode every plane with the frame-level
+    /// width/height (plane 0's dims), over-reading the smaller chroma residual
+    /// streams until the rANS decoder ran off the end. The frame header now
+    /// carries per-plane dims.
+    #[test]
+    fn roundtrip_multiplane_420_uneven_dims() {
+        let seq = SequenceHeader {
+            version: 1,
+            max_width: 64,
+            max_height: 64,
+            transform_id: 0,
+            planes: vec![PlaneSpec { bit_depth: 10 }; 3],
+        };
+        let luma: Vec<u16> = (0..64 * 64)
+            .map(|i| {
+                let x = (i % 64) as u32;
+                let y = (i / 64) as u32;
+                (((x * 3 + y) ^ (y * 5)) % 1024) as u16
+            })
+            .collect();
+        let chroma: Vec<u16> = (0..32 * 32).map(|i| ((i * 37) % 1024) as u16).collect();
+        let planes = vec![
+            Plane {
+                width: 64,
+                height: 64,
+                bit_depth: 10,
+                data: luma,
+            },
+            Plane {
+                width: 32,
+                height: 32,
+                bit_depth: 10,
+                data: chroma.clone(),
+            },
+            Plane {
+                width: 32,
+                height: 32,
+                bit_depth: 10,
+                data: chroma,
+            },
+        ];
+        let bytes = LosslessEncoder::new().encode_frame(&seq, &planes).unwrap();
+        let out = LosslessDecoder::new().decode_frame(&seq, &bytes).unwrap();
+        assert_eq!(out, planes, "4:2:0-style multi-plane round-trip mismatch");
     }
 
     #[test]

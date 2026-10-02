@@ -132,6 +132,19 @@ impl SequenceHeader {
                 "sequence header: min_block_size_log2 ({min_block_size_log2}) > max_block_size_log2 ({max_block_size_log2})"
             )));
         }
+        // Both fields are 4 bits wide, so without this bound a stream can claim
+        // a 32k x 32k minimum block. `block_sizes` derives the reconstruction
+        // block size straight from `min_block_size_log2`, and the per-block
+        // scratch buffers are sized by it, so an oversized value would ask for
+        // a multi-gigabyte allocation from a handful of bytes of input.
+        // v1 defines blocks in the 8x8..64x64 range (log2 3..=6), so anything
+        // larger is not a conforming stream.
+        if max_block_size_log2 > MAX_BLOCK_SIZE_LOG2 {
+            return Err(KinetixError::Parse(format!(
+                "sequence header: max_block_size_log2 ({max_block_size_log2}) > {} (unsupported block size)",
+                MAX_BLOCK_SIZE_LOG2
+            )));
+        }
 
         Ok(Self {
             version,

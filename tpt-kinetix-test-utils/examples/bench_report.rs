@@ -11,6 +11,8 @@
 
 use std::process::Command;
 
+use tpt_kinetix_test_utils::bench_parse::parse_benches;
+
 /// Every crate in the workspace that ships a Criterion bench target.
 const BENCH_CRATES: &[&str] = &[
     "out-kinetix-h264",
@@ -85,60 +87,10 @@ fn main() {
 }
 
 /// Pair Criterion's `Benchmarking <id>` headers (stderr) with its `thrpt:`
-/// result lines (stdout), in emission order.
+/// result lines (stdout), in emission order. Shared with `bench_baseline` and
+/// `bench_compare` via [`tpt_kinetix_test_utils::bench_parse`].
 fn zip_criterion(stderr: &str, stdout: &str) -> Vec<(String, String)> {
-    let mut ids: Vec<String> = Vec::new();
-    for line in stderr.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("Benchmarking ") {
-            let id = rest.split(':').next().unwrap_or("").trim();
-            if !id.is_empty() && !ids.last().is_some_and(|last| last == id) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-
-    let mut throughputs: Vec<String> = Vec::new();
-    for line in stdout.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("thrpt:") {
-            if let Some(mean) = extract_mean(rest) {
-                throughputs.push(mean);
-            }
-        }
-    }
-
-    ids.into_iter().zip(throughputs).collect()
-}
-
-/// Pull the middle (point-estimate) throughput out of a Criterion `[lo mid hi]`
-/// interval, preserving the unit token.
-///
-/// Criterion's line looks like one of:
-///
-/// ```text
-/// thrpt:  [10.418 Melem/s 10.487 Melem/s 10.561 Melem/s]   <- value/unit pairs
-/// thrpt:  [+1.0915% +1.9489% +2.9378%]                     <- change, no units
-/// ```
-///
-/// So the numeric tokens are collected and the *second* one is the point
-/// estimate, and the first non-numeric token is the unit. A line whose tokens
-/// are all percentages carries no throughput and is rejected.
-fn extract_mean(rest: &str) -> Option<String> {
-    let inner = rest.trim().trim_start_matches('[').trim_end_matches(']');
-    let mut numbers: Vec<&str> = Vec::new();
-    let mut unit = String::new();
-    for token in inner.split_whitespace() {
-        let t = token.trim_start_matches('[').trim_end_matches(']');
-        if t.parse::<f64>().is_ok() {
-            numbers.push(t);
-        } else if unit.is_empty() {
-            unit = t.to_string();
-        }
-    }
-    let mid = numbers.get(1)?;
-    if unit.is_empty() {
-        return None;
-    }
-    Some(format!("{mid} {unit}"))
+    parse_benches(stderr, stdout).into_iter().collect()
 }
 
 fn print_table(rows: &[(String, Vec<Row>)]) {

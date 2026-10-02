@@ -710,7 +710,7 @@ impl<'a> TileDecoder<'a> {
                 let off = INTER_MODE_OFF[bs];
                 let c = INTER_MODE_CTX_LUT[self.state.above_mode_ctx[col + off] as usize]
                     [self.left.mode[row7 + off] as usize] as usize;
-                if std::env::var_os("TPT_VP9_TRACE").is_some() {
+                if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
                     eprintln!(
                         "IMCTX r={} c={} ctx={} p={} {} {}",
                         self.row,

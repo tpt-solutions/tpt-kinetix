@@ -229,13 +229,34 @@ fn natural_neighbors(src: &FrameBuffer, x0: usize, y0: usize, size: usize) -> (V
     (above, left)
 }
 
+/// Push a `u32` as four symbols. The rANS coder is a stack (the decoder pops
+/// in reverse push order), so the bytes go in high-to-low to be read
+/// low-byte-first on the other side.
+fn push_u32(enc: &mut RansEncoder, model: &StaticModel, v: u32) {
+    for shift in [24, 16, 8, 0] {
+        enc.encode(model, ((v >> shift) & 0xFF) as u8);
+    }
+}
+
+/// Pop a `u32` pushed by [`push_u32`] (little-endian, low byte read first).
+fn pop_u32(dec: &mut RansDecoder, model: &StaticModel) -> Result<u32, KinetixError> {
+    let mut v = 0u32;
+    for shift in [0, 8, 16, 24] {
+        let b = dec
+            .decode(model)
+            .map_err(|e| KinetixError::Parse(format!("screen: count byte: {e}")))?;
+        v |= u32::from(b) << shift;
+    }
+    Ok(v)
+}
+
 fn encode_mode_stream(modes: &[u8]) -> Vec<u8> {
     let model = StaticModel;
     let mut enc = RansEncoder::new();
     for &m in modes.iter().rev() {
         enc.encode(&model, m);
     }
-    enc.encode(&model, modes.len() as u8);
+    push_u32(&mut enc, &model, modes.len() as u32);
     enc.finish()
 }
 
@@ -247,7 +268,7 @@ fn encode_flat_stream(colors: &[u8], modes: &[u8]) -> Vec<u8> {
         enc.encode(&model, run.run_len);
         enc.encode(&model, run.color_y);
     }
-    enc.encode(&model, runs.len() as u8);
+    push_u32(&mut enc, &model, runs.len() as u32);
     enc.finish()
 }
 
@@ -264,7 +285,7 @@ fn encode_glyph_stream(glyph_blocks: &[Option<GlyphBlock>]) -> Vec<u8> {
             enc.encode(&model, 0); // absent
         }
     }
-    enc.encode(&model, glyph_blocks.len() as u8);
+    push_u32(&mut enc, &model, glyph_blocks.len() as u32);
     enc.finish()
 }
 
@@ -279,14 +300,14 @@ fn encode_natural_stream(natural_blocks: &[Option<NaturalBlock>]) -> Vec<u8> {
                 enc.encode(&model, ((c >> 8) & 0xFF) as u8);
                 enc.encode(&model, (c & 0xFF) as u8);
             }
-            enc.encode(&model, n.coeffs.len() as u8);
+            push_u32(&mut enc, &model, n.coeffs.len() as u32);
             enc.encode(&model, n.intra_mode);
             enc.encode(&model, 1); // present
         } else {
             enc.encode(&model, 0); // absent
         }
     }
-    enc.encode(&model, natural_blocks.len() as u8);
+    push_u32(&mut enc, &model, natural_blocks.len() as u32);
     enc.finish()
 }
 
@@ -368,7 +389,7 @@ pub fn decode_frame_payload(
 fn decode_mode_stream(data: &[u8]) -> Result<Vec<u8>, KinetixError> {
     let model = StaticModel;
     let mut dec = RansDecoder::new(data)?;
-    let count = dec.decode(&model)? as usize;
+    let count = pop_u32(&mut dec, &model)? as usize;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         out.push(dec.decode(&model)?);
@@ -379,7 +400,7 @@ fn decode_mode_stream(data: &[u8]) -> Result<Vec<u8>, KinetixError> {
 fn decode_flat_stream(data: &[u8], modes: &[u8]) -> Result<(Vec<u8>, Vec<FlatRun>), KinetixError> {
     let model = StaticModel;
     let mut dec = RansDecoder::new(data)?;
-    let run_count = dec.decode(&model)? as usize;
+    let run_count = pop_u32(&mut dec, &model)? as usize;
     let mut runs = Vec::with_capacity(run_count);
     for _ in 0..run_count {
         let color_y = dec.decode(&model)?;
@@ -393,7 +414,7 @@ fn decode_flat_stream(data: &[u8], modes: &[u8]) -> Result<(Vec<u8>, Vec<FlatRun
 fn decode_glyph_stream(data: &[u8], total: usize) -> Result<Vec<Option<GlyphBlock>>, KinetixError> {
     let model = StaticModel;
     let mut dec = RansDecoder::new(data)?;
-    let count = dec.decode(&model)? as usize;
+    let count = pop_u32(&mut dec, &model)? as usize;
     let mut blocks = Vec::with_capacity(count);
     for _ in 0..count {
         let present = dec.decode(&model)?;
@@ -422,13 +443,13 @@ fn decode_natural_stream(
 ) -> Result<Vec<Option<NaturalBlock>>, KinetixError> {
     let model = StaticModel;
     let mut dec = RansDecoder::new(data)?;
-    let count = dec.decode(&model)? as usize;
+    let count = pop_u32(&mut dec, &model)? as usize;
     let mut blocks = Vec::with_capacity(count);
     for _ in 0..count {
         let present = dec.decode(&model)?;
         if present == 1 {
             let intra_mode = dec.decode(&model)?;
-            let coeff_count = dec.decode(&model)? as usize;
+            let coeff_count = pop_u32(&mut dec, &model)? as usize;
             let mut coeffs = Vec::with_capacity(coeff_count);
             for _ in 0..coeff_count {
                 let b0 = dec.decode(&model)? as u32;
@@ -640,5 +661,60 @@ mod tests {
         assert_eq!(got, GOLDEN);
     }
 
-    const GOLDEN: [u64; 2] = [0xac3c4c201f90b810, 0x1337d32471fa5525];
+    /// Changed 2026-10-02: stream counts are coded as 4 rANS symbols (u32 LE)
+    /// instead of one byte, which wrapped at 256+ blocks/coefficients and
+    /// corrupted every frame larger than 255 coding blocks (see
+    /// `large_grid_round_trips_at_qp0`).
+    const GOLDEN: [u64; 2] = [0xa8c387dda16ab119, 0xde6681ded1af0a84];
+
+    /// Regression: 4x4 coding blocks on a 64x64 frame give a 16x16 = 256-block
+    /// grid, which overflowed the old byte-wide mode count (256 mod 256 = 0) and
+    /// left almost every block decoding as flat black. FLAT blocks quantise to
+    /// the block mean (classify tolerance 4) and NATURAL blocks are exact at
+    /// qp 0 up to prediction drift, so the whole frame must stay close to the
+    /// source; under the overflow most pixels decode to 0.
+    #[test]
+    fn large_grid_round_trips_at_qp0() {
+        let mut seq = test_seq();
+        seq.base_block_size_log2 = 2; // 4x4 blocks
+        let mut frame = test_frame();
+        frame.width = 64;
+        frame.height = 64;
+
+        // UI-like content: light background, dark separators every 8 px, a
+        // two-tone "text" band — enough to exercise FLAT and NATURAL blocks.
+        let mut luma = vec![240u8; 64 * 64];
+        for y in 0..64usize {
+            for x in 0..64usize {
+                if y % 8 == 0 || x % 8 == 0 {
+                    luma[y * 64 + x] = 128;
+                } else if (8..24).contains(&y) && x % 4 < 3 {
+                    luma[y * 64 + x] = 16;
+                }
+            }
+        }
+        let src =
+            FrameBuffer::from_yuv420(64, 64, luma, vec![128u8; 32 * 32], vec![128u8; 32 * 32])
+                .unwrap();
+        let payload = encode_frame(&seq, &frame, &src, None).unwrap();
+        let dec = decode_frame_payload(&seq, &frame, None, &payload).unwrap();
+
+        let src_mean: f64 = src.luma.iter().map(|v| u32::from(*v)).sum::<u32>() as f64 / 4096.0;
+        let dec_mean: f64 = dec.luma.iter().map(|v| u32::from(*v)).sum::<u32>() as f64 / 4096.0;
+        assert!(
+            (src_mean - dec_mean).abs() < 8.0,
+            "decoded frame mean {dec_mean:.1} vs source {src_mean:.1} — large-scale corruption"
+        );
+        let max_diff = src
+            .luma
+            .iter()
+            .zip(dec.luma.iter())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_diff <= 32,
+            "max per-pixel diff {max_diff} — block(s) decoded from the wrong mode"
+        );
+    }
 }

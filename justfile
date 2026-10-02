@@ -184,6 +184,17 @@ bench-baseline LABEL="":
 bench-compare BASELINE="docs/perf/baseline-2026-10-02.json" THRESHOLD="5":
     cargo run --release -p tpt-kinetix-test-utils --example bench_compare -- --baseline "{{BASELINE}}" --threshold {{THRESHOLD}}
 
+# Kinetix vs ffmpeg comparison (todo-perf.md Phase 1): verifies Kinetix's
+# decoded planes byte-exact against the reference decoder BEFORE timing, then
+# compares decode speed (ffmpeg -threads 1 and default), AV1 encode (vs libaom),
+# the original codecs vs their closest standard references, and the CLI
+# end-to-end transcode. Writes docs/perf/ffmpeg-compare-<label>.json and the
+# marked section of docs/PERFORMANCE.md. Optional flags: --decode --encode-av1
+# --originals --e2e (single sections, for iteration), --quick, --label <l>.
+# Requires ffmpeg with libdav1d/libvpx/libaom/libx264 on PATH.
+bench-ffmpeg *FLAGS:
+    cargo run --release -p tpt-kinetix-test-utils --example ffmpeg_compare -- {{FLAGS}}
+
 # Fetch the FFmpeg FATE AV1 samples (small) into fixtures/av1-fate/.
 fetch-av1-fate:
     bash tools/fetch-av1-fate.sh

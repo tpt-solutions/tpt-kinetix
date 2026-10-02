@@ -33,6 +33,7 @@
 pub mod bitreader;
 pub mod booldec;
 pub mod coef;
+pub mod dbg_env;
 pub mod decoder;
 pub mod frame;
 pub mod frame_mode;

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Stream counts (mode/flat-run/glyph/natural-block/coefficent counts) are coded
+  as four rANS symbols (u32 LE) instead of a single byte-sized symbol. The
+  byte-wide counts wrapped at 256, corrupting every frame wider than 255 coding
+  blocks (e.g. 320x240 with 16x16 blocks has 300) and every 16x16 natural block
+  with a full 256-coefficient payload (count wrapped to 0). The bitstream
+  format changes; the golden vector in `reconstruct.rs` was updated deliberately.
+
 ## [0.1.0](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.0) - 2026-07-19
 
 ### Added

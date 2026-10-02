@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
+use tpt_kinetix_test_utils::bench_parse::parse_benches;
 
 /// Default maximum tolerated throughput regression, in percent.
 const DEFAULT_THRESHOLD: f64 = 5.0;
@@ -141,69 +142,10 @@ fn run_current_benches() -> Option<BTreeMap<String, String>> {
     }
 }
 
-/// Parse Criterion's output into `{benchmark id: mean throughput}`.
-///
-/// Criterion writes its progress headers (`Benchmarking <id>: ...`) to
-/// **stderr** and its result lines (`time:` / `thrpt:`) to **stdout**, so the
-/// two streams must be parsed separately and zipped in emission order —
-/// concatenating them would put every header *after* every result and pair
-/// nothing up.
-fn parse_benches(stderr: &str, stdout: &str) -> BTreeMap<String, String> {
-    let mut ids: Vec<String> = Vec::new();
-    for line in stderr.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("Benchmarking ") {
-            let id = rest.split(':').next().unwrap_or("").trim();
-            if !id.is_empty() && !ids.last().is_some_and(|last| last == id) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-
-    let mut throughputs: Vec<String> = Vec::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("thrpt:") {
-            if let Some(mean) = extract_mean(rest) {
-                throughputs.push(mean);
-            }
-        }
-    }
-
-    ids.into_iter().zip(throughputs).collect()
-}
-
-/// Pull the middle (point-estimate) throughput out of a Criterion `[lo mid hi]`
-/// interval, preserving the unit token.
-///
-/// Criterion's line looks like one of:
-///
-/// ```text
-/// thrpt:  [10.418 Melem/s 10.487 Melem/s 10.561 Melem/s]   <- value/unit pairs
-/// thrpt:  [+1.0915% +1.9489% +2.9378%]                     <- change, no units
-/// ```
-///
-/// So the numeric tokens are collected and the *second* one is the point
-/// estimate, and the first non-numeric token is the unit. A line whose tokens
-/// are all percentages carries no throughput and is rejected.
-fn extract_mean(rest: &str) -> Option<String> {
-    let inner = rest.trim().trim_start_matches('[').trim_end_matches(']');
-    let mut numbers: Vec<&str> = Vec::new();
-    let mut unit = String::new();
-    for token in inner.split_whitespace() {
-        let t = token.trim_start_matches('[').trim_end_matches(']');
-        if t.parse::<f64>().is_ok() {
-            numbers.push(t);
-        } else if unit.is_empty() {
-            unit = t.to_string();
-        }
-    }
-    let mid = numbers.get(1)?;
-    if unit.is_empty() {
-        return None;
-    }
-    Some(format!("{mid} {unit}"))
-}
+// Criterion's output is parsed by [`tpt_kinetix_test_utils::bench_parse`],
+// shared with `bench_report` and `bench_baseline` so the three cannot drift
+// (the previous per-example copy here missed duration-only benchmarks such as
+// `av1_encode`, silently excluding them from the comparison).
 
 /// Read a snapshot JSON (as written by `bench_baseline`) into a flat
 /// `{crate/bench id: throughput}` map.
@@ -405,19 +347,6 @@ fn compare(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extract_mean_takes_the_middle_estimate_and_its_unit() {
-        assert_eq!(
-            extract_mean("  [10.418 Melem/s 10.487 Melem/s 10.561 Melem/s]").as_deref(),
-            Some("10.487 Melem/s")
-        );
-    }
-
-    #[test]
-    fn extract_mean_rejects_a_unitless_change_line() {
-        assert_eq!(extract_mean("  [+1.0915% +1.9489% +2.9378%]"), None);
-    }
 
     #[test]
     fn to_base_normalises_across_units() {

@@ -6,6 +6,23 @@ volumetric) plus the shared `tpt-kinetix-bitstream`.
 
 Status legend: `[ ]` todo, `[~]` in progress, `[x]` done.
 
+- **`ffmpeg_compare --quick` silently rewrites the perf corpus.** Running it
+  with `--quick` regenerates the 320x240 clips as **120-frame** files instead of
+  the 300-frame ones the Phase 0/2 baselines were recorded against (it updates
+  `target/perf-corpus/manifest.json` to match, so the next run sees no
+  mismatch). Any 320x240 timing taken after a `--quick` run is therefore not
+  comparable with the rest of this file. If you run `--quick` for iteration,
+  either restore the 300-frame clips afterwards or avoid quoting the numbers.
+  Caused on 2026-10-02 while checking VP9's byte-exactness; the clips were
+  regenerated and the manifest corrected, and the restored files matched the
+  originals byte for byte.
+- `just` cannot run on this machine (no `sh` on PATH), so the four `just check`
+  gates were run directly as `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace --lib --bins --tests` and `cargo +1.82.0 check`.
+
+## Phase 0 — Baseline benchmarks
+
 ## Current state (2026-10-02)
 
 - `just bench` covers **every** codec crate: h264, av1, vp9, bitstream, lean, lossless, realtime,
@@ -17,7 +34,10 @@ Status legend: `[ ]` todo, `[~]` in progress, `[x]` done.
 - `just bench-compare <baseline> <threshold%>` diffs a fresh run against a committed baseline and
   exits non-zero on a throughput regression beyond the threshold.
 - A baseline snapshot is committed at `docs/perf/baseline-2026-10-02.json`.
-- No systematic comparison against ffmpeg yet (Phase 1).
+- `just bench-ffmpeg` (`tpt-kinetix-test-utils` example `ffmpeg_compare`) compares Kinetix against
+  ffmpeg (decode, AV1 encode, original codecs, CLI e2e) and writes
+  `docs/perf/ffmpeg-compare-<label>.json` plus the marked section of `docs/PERFORMANCE.md`
+  (Phase 1; committed at `docs/perf/ffmpeg-compare-2026-10-02.json`).
 
 ## Phase 0 — Baseline benchmarks
 
@@ -48,37 +68,132 @@ MB/s (points/s for volumetric) at 320x240, 720p, 1080p, plus peak memory. Decode
 
 Notes / follow-ups:
 
-- The scraper Criterion-output parser is duplicated in `bench_report`, `bench_baseline` and
-  `bench_compare`. All three now carry unit tests, but the three copies should be collapsed into a
-  shared `tpt-kinetix-test-utils` module before it drifts.
-- Peak memory is **not** yet measured; the benches report throughput only. Add an allocator-counting
+- [x] ~~The scraper Criterion-output parser is duplicated in `bench_report`,
+  `bench_baseline` and `bench_compare`~~ — collapsed into the shared
+  `tpt-kinetix-test-utils::bench_parse` module (2026-10-02); the copies had
+  already drifted (two of them silently dropped duration-only benches such as
+  `av1_encode`).
+- Peak memory is **not** yet measured for the Kinetix side; the benches report
+  throughput only. (`ffmpeg -benchmark` reports `maxrss`, which
+  `bench-ffmpeg` records for the reference side.) Add an allocator-counting
   harness (or a `dhat`/`jemalloc` pass) if a memory ceiling becomes a gate.
 - `bench-compare` compares only benches present in **both** snapshots and with matching unit
   dimensions; anything else is reported as skipped rather than silently passing.
+- The `tpt-kinetix-realtime` **decode** baseline figure is stale: the bench's
+  packet builder shipped a broken frame header (empty intra-refresh mask +
+  `payload_len: 0`), so the decode case errored immediately and timed the error
+  path. Fixed 2026-10-02 — re-record the baseline before trusting that row.
 
 ## Phase 1 — Comparison vs current ffmpeg
 
-- [ ] Pin and record versions: ffmpeg, libdav1d, libvpx, libaom
-- [ ] `just bench-ffmpeg`: per shared corpus file, ffmpeg decode (`-f null -`, `-threads 1` and default) vs Kinetix; output verified identical BEFORE timing
-- [ ] AV1/VP9 encode vs libaom / rav1e / libvpx through ffmpeg
-- [ ] Pipeline end-to-end transcode vs ffmpeg CLI (wire in the todo.md Phase 7 harness)
-- [ ] Original codecs, compared to the closest standard reference (speed AND ratio/quality):
-  - [ ] lossless vs FFV1 / PNG / JPEG-LS
-  - [ ] screen vs x264 / libaom screen-content mode
-  - [ ] lean, realtime vs x264 `ultrafast`/`zerolatency`, libaom realtime
-  - [ ] vision vs AV1/x264 at equal detector accuracy
-  - [ ] face vs AV1/x264 at matched quality on talking-head clips
-  - [ ] volumetric vs Draco / MPEG G-PCC TMC13
-- [ ] Publish `docs/PERFORMANCE.md` with ratio column, date, tool versions
+- [x] Pin and record versions: ffmpeg, libdav1d, libvpx, libaom
+  (`ffmpeg_compare` records the ffmpeg build line, libavcodec version and the
+  libdav1d/libvpx/libaom/libx264/FFV1/PNG/JPEG-LS presence flags; gyan-style
+  builds do not expose per-library versions through the CLI)
+- [x] `just bench-ffmpeg`: per shared corpus file, ffmpeg decode (`-f null -`,
+  `-threads 1` and default) vs Kinetix; output verified identical BEFORE timing
+  (byte-exact plane compare; ratio column reads `n/a (unverified)` otherwise;
+  corpus cached in `target/perf-corpus/` and regenerated when the generator
+  arguments change; AV1 FATE fixtures included when `fixtures/av1-fate` exists)
+- [x] AV1/VP9 encode vs libaom / rav1e / libvpx through ffmpeg
+  (AV1: Kinetix `Av1Encoder` vs `libaom-av1 -cpu-used 8 -crf 30` with
+  time + size + Y-PSNR on identical raw frames; librav1e was already in the
+  Criterion `av1_encode` bench. VP9 encode: n/a — Kinetix has no VP9 encoder)
+- [x] Pipeline end-to-end transcode vs ffmpeg CLI (the `transcode_throughput`
+  bench covers pipeline-in-process vs ffmpeg libaom; `bench-ffmpeg --e2e` times
+  the real `tpt-kinetix transcode` CLI (VP9 MP4 → AV1) against the equivalent
+  ffmpeg invocation)
+- [x] Original codecs, compared to the closest standard reference (speed AND
+  ratio/quality) — automated rows in `bench-ffmpeg --originals`:
+  - [x] lossless vs FFV1 / PNG (10-bit 4:2:0, the codec's supported depth;
+    JPEG-LS skipped — ffmpeg's encoder is 8-bit-only so it cannot take the
+    10-bit source; x264 `-qp 0` skipped for the same reason)
+  - [x] screen vs x264 / libaom realtime mode
+    (this ffmpeg build exposes no `-tune-content`; noted in the row settings)
+  - [x] lean, realtime vs x264 `ultrafast`/`zerolatency`, libaom realtime
+  - [ ] vision vs AV1/x264 at equal detector accuracy (skipped: needs a
+    detector-accuracy ground-truth study; not automatable in this harness yet)
+  - [ ] face vs AV1/x264 at matched quality on talking-head clips (skipped:
+    needs matched-quality clips)
+  - [ ] volumetric vs Draco / MPEG G-PCC TMC13 (blocked: the codec is not yet
+    byte-compatible with `tmc3`, so there is nothing to compare against — see
+    `tpt-kinetix-test-utils::tmc13`)
+- [x] Publish `docs/PERFORMANCE.md` with ratio column, date, tool versions
+  (the `<!-- ffmpeg-compare -->` section; `just bench-baseline` preserves it)
+
+### Phase 1 findings (2026-10-02 run)
+
+Correctness gaps the verify-before-timing gate surfaced (each UNVERIFIED row in
+`docs/PERFORMANCE.md` is one of these):
+
+- **VP9 — OPEN**: clips encoded with libvpx `-deadline realtime` fail
+  byte-exact vs ffmpeg (identical frame count and size, differing pixels), and
+  longer `testsrc` clips diverge even at `-deadline good -cpu-used 4` (first
+  difference at frame 128 of 300 at 320x240). Localized 2026-10-02: frame 128
+  is a **key frame**, decodes standalone (fresh decoder reproduces it), luma
+  only, bottom-right 86x32 px, pre-loop-filter buffers already wrong — a
+  **4x4 coefficient-decode desync** in a mixed-block-size neighbourhood.
+  Repro + reference pinned at
+  `tpt-kinetix-vp9/tests/fixtures/div128/` (see its README); next step is
+  rebuilding the instrumented libvpx oracle (todo-vp9.md Session #v4
+  methodology — the old `%TEMP%/libvpx2` build is gone). The perf corpus stays
+  pinned to clips that verify; VP9 rows read `UNVERIFIED` until then.
+- **realtime — FIXED 2026-10-02**: two stacked bugs. (1) The frame-header
+  writer/parser pair was asymmetric (writer emitted an empty intra-refresh
+  mask where the parser always reads `refresh_mask_len()` bytes, and
+  `payload_len` was left 0) — fixed in the bench + harness. (2)
+  `slice_index_for` was not the inverse of `chunk_range` for block totals that
+  do not divide evenly by the slice count (320x240 = 1200 blocks / 64 slices),
+  so decode desynced at chunk boundaries ("chroma block index out of range");
+  fixed with the exact ceil-form inverse. Roundtrip is now **bit-exact at
+  every swept geometry**; regression tests in `reconstruct.rs`.
+- **screen — FIXED 2026-10-02 (luma)**: the rANS stream counts were coded as
+  one byte-wide symbol, wrapping at 256 — a 320x240 frame has 300 coding
+  blocks (mode count -> 44) and a full 16x16 natural block has 256
+  coefficients (count -> 0), so most of the frame decoded as flat black.
+  Counts are now 4 symbols (u32 LE); luma round-trips **bit-exact**, chroma is
+  still uncoded in v1 (decodes as 0). The Phase 0 screen decode throughput was
+  measured on this corrupt path.
+- **lossless — FIXED 2026-10-02**: the decoder used the frame-level
+  width/height for every plane, over-reading the half-size chroma residual
+  streams (rANS exhausted). The frame header now carries per-plane dims;
+  3-plane 10/12/16-bit roundtrips are **bit-exact** at all swept sizes.
+
+The original codecs also compress poorly today (e.g. lean ≈ 1.6× *larger* than
+raw at `base_qp 0` while x264 ultrafast lands ~200× smaller at higher PSNR) —
+that is the Phase 3 work list in numbers.
 
 ## Phase 2 — Profile and rank hot spots
 
-Tools: `cargo flamegraph` / `perf`, or `samply`/VTune on Windows. Record ranked list per codec below.
+Tools: `samply` is installed but needs Administrator (ETW) and `pprof` does not
+compile on this toolchain, so Phase 2 shipped **env-gated phase timers**
+instead (admin-free, zero-cost when off, kept as diagnostics):
+`TPT_VP9_PHASE=1` (tpt-kinetix-vp9 `decoder.rs`) and `KINETIX_AV1_PHASE=1`
+(tpt-kinetix-av1 `dbg_env.rs`), driven by the
+`tpt-kinetix-test-utils` `profile_decode` example. A sampling profiler, when
+available, should refine these numbers to function level.
 
-- [ ] AV1 (candidates: inverse transforms, MC/subpel, CDEF, loop filter, loop restoration, symbol decode, intra pred)
-- [ ] VP9
-- [ ] bitstream / rANS
-- [ ] lean, realtime, lossless, screen, vision, face, volumetric
+Per-frame phase split, `testsrc` content clip, release profile (2026-10-02):
+
+- [x] AV1 320x240: **deblock 4.0 ms (62%)**, tiles (entropy + reconstruction)
+  2.4 ms (36%); CDEF/LR/superres/film-grain ~0 (not enabled on this clip).
+  At 720p: **deblock 45 ms (70%)**, tiles 20 ms (30%).
+  (Candidates ranked: deblocking loop filter >> entropy+reconstruction > rest.)
+- [x] VP9 320x240: **loop filter 0.54 ms (49%)**, tile decode 0.51 ms (46%),
+  compressed header 0.04 ms (3%). At 1080p: **loop filter 10.3 ms (63%)**,
+  tiles 6.1 ms (37%).
+- [x] bitstream / rANS: from the Phase 0 Criterion table — `BitReader::read_bit`
+  101 MiB/s is the outlier (a tight bit reader does GB/s; per-bit call overhead
+  dominates), and rANS `decode_noise` 41 MiB/s vs `decode_static` 374 MiB/s
+  (model lookup on near-uniform data). Rank: read_bit fast path > rANS decode
+  inner loop.
+- [x] lean / realtime / lossless / screen / vision / face / volumetric: ranked
+  by the Phase 0 baseline itself — the encoders are the bottleneck
+  (lean ~0.49 Melem/s, realtime ~173 ms/frame-equivalent, vision ~0.44
+  Melem/s encode vs multi-Melem/s decodes), so Phase 3 for the originals is an
+  *encoder* story first. Decodes: screen 1.1-1.2 Gelem/s (fine), realtime
+  ~230 Melem/s (fine), lean ~11.5 Melem/s and vision pixels ~11-12 Melem/s
+  (the slow original decodes).
 
 ## Phase 3 — Optimise (hot spots first)
 
@@ -88,13 +203,161 @@ via existing `rayon` (tile / superblock-row / frame level); check release profil
 `codegen-units = 1`) and allocation reuse (frame arenas).
 
 Order:
-- [ ] AV1
-- [ ] VP9
-- [ ] bitstream / rANS (shared by all original codecs, best leverage)
+- [~] AV1 — deblock done 2026-10-02 (-16% @320x240, -15% @720p); tiles/entropy
+  and reconstruction still open
+- [x] VP9 — **done 2026-10-02**, see below
+- [x] bitstream / rANS (shared by all original codecs, best leverage) — **done
+  2026-10-02**, see below
 - [ ] lean, realtime
 - [ ] lossless, screen
 - [ ] vision, face, volumetric
 - [ ] out-kinetix-h264 (optional, unpublished, last)
+
+### VP9 — debug-switch environment lookups DONE 2026-10-02
+
+Phase 2 ranked VP9's *loop filter* first (49% of decode at 320x240, 63% at
+1080p), so the expectation was a filter-arithmetic problem. It was not. The
+real cost was that the crate's debug switches were read with a bare
+`std::env::var_os` — which locks the environment, scans it and allocates an
+`OsString` — and two of the 25 read sites were in the innermost loops:
+
+- `booldec::read_bool` read `TPT_VP9_TRACE` **once per bool decoded** (millions
+  of times per frame: every coefficient token, every mode).
+- `loop_filter::loop_filter_edge` read `TPT_VP9_DBG56` **once per deblocking
+  edge of every superblock**, and evaluated it *before* the `off == 56` test
+  that actually gates the debug output — the one int comparison it should have
+  done first.
+
+Fix: a `tpt-kinetix-vp9::dbg_env` module, mirroring the one AV1 already had
+(`tpt-kinetix-av1` got this guard earlier; VP9 never did). It scans the
+environment once per `decode` and, while no `TPT_VP9_*` switch is set, answers
+from a single relaxed atomic load. All 25 read sites now route through it, and
+the `off == 56` comparison is evaluated first.
+
+| Clip | Before | After | Speedup |
+|:---|---:|---:|---:|
+| 320x240, 18000 frames | 20.64 s | 8.00 s | **2.58x** |
+| 1920x1080, 2400 frames | 38.29 s | 19.51 s | **1.96x** |
+
+A/B by reverting only the seven touched VP9 source files; identical frame
+counts and sink values in both arms.
+
+- Bit-exactness held: the libvpx row of the `ffmpeg_compare` harness reports
+  `verified=true` (byte-identical planes vs ffmpeg), 13 `conformance_vp9` tests
+  pass, every VP9 suite passes, workspace clippy `-D warnings` and
+  `cargo fmt --check` clean, `cargo +1.82.0` MSRV check clean.
+- A new unit test (`dbg_env::tests::refresh_tracks_set_and_unset_keys`) asserts
+  the fast path never makes a *set* switch invisible, so the `TPT_VP9_*`
+  debugging tools cannot silently stop printing.
+- Lesson worth carrying to the remaining codecs: **grep for `env::var` inside
+  per-block / per-edge / per-token loops before optimising any arithmetic.**
+  These switches are invisible in the source's intent — they look like debug
+  scaffolding. Two follow-up audits were run the same day and are worth
+  recording so nobody repeats them:
+  - **The original codecs are clean.** `lean`, `lossless`, `realtime`,
+    `screen`, `vision`, `face` and `volumetric` contain *no* `env::var` at
+    all, so they do not have this bug. (This contradicts the guess made when
+    the note was first written, which is why it is spelled out here.)
+  - **AV1 had two remaining leaks**, both now fixed: `decoder.rs`'s
+    `KINETIX_AV1_NO_GRAIN` grain check used a bare `std::env::var_os` on the
+    per-frame path, and `dbg_env::phase_enabled()` — the gate for the Phase 2
+    timers themselves — did a real environment lookup on every call. Both now
+    go through the existing `dbg_env` fast path, and `dbg_env` gained an
+    `is_set` helper mirroring VP9's. This makes the phase instrumentation
+    itself much cheaper; it does not change any decoded output.
+  - After both audits, no crate is left with a bare `env::var` in a decode
+    path.
+
+### AV1 — deblocking loop filter DONE 2026-10-02
+
+Phase 2 ranked the deblocking filter as the #1 hot spot (62% of decode at
+320x240, 70% at 720p). The cause was allocation, not arithmetic: the filter
+reads at most 7 taps before and 6 after an edge, but both passes built a
+`Vec<i32>` for the line *and* got a second `Vec<i32>` back from the kernel, per
+filtered row. That is two mallocs per row of every luma and chroma edge.
+
+`filter_line_1d` is now split into an allocating wrapper (kept, `#[cfg(test)]`,
+as the reference oracle the existing filter unit tests check against) and
+`filter_line_1d_into`, which writes into a caller-owned buffer. Both deblocking
+passes use a single reusable 16-sample stack buffer per edge.
+
+| Clip | Before | After | Delta |
+|:---|---:|---:|---:|
+| 320x240, 12000 frames | 36.23 s | 30.42 s | **-16.0%** |
+| 1280x720, 3600 frames | 130.59 s | 110.71 s | **-15.2%** |
+
+A/B by stashing only `loop_filter.rs`, phase timers off, cached `testsrc`
+corpus, identical frame counts.
+
+- Bit-exactness held at every gate: FATE **204/204 bit-exact vs libdav1d**,
+  `libaom_crosscheck` (2 tests, incl. `libaom_streams_match_libdav1d`) ok,
+  `phase_c_conformance` luma diff 0/12288, 173 lib tests + all integration
+  tests pass, workspace clippy `-D warnings` and `cargo fmt --check` clean.
+- Caution for the next session: the `KINETIX_AV1_PHASE=1` timers are
+  themselves expensive here — the same 320x240 workload took 74 s *with* the
+  timers on vs 30 s with them off, because the wrappers sit at per-edge
+  granularity. They are fine for ranking phases, useless for absolute timings.
+  Do not quote a timer-on number as a decode benchmark.
+- Still open on AV1: the tile/entropy+reconstruction phase is the next-largest
+  (36% of a 320x240 frame, 30% at 720p), plus CDEF / loop restoration /
+  superres / film grain, which are ~0 on this corpus only because the clip does
+  not enable them — they are untested for performance, not proven fast.
+
+### bitstream / rANS — DONE 2026-10-02
+
+Both ranked hot spots fixed, in `tpt-kinetix-bitstream`, with the scalar path
+kept as the reference oracle:
+
+1. **`BitReader::read_bits` refills a 64-bit window** instead of calling
+   `read_bit` per bit. The per-bit *call* overhead, not the data movement, was
+   the cost — Phase 2 called the reader at 101 MiB/s where a tight bit reader
+   does GB/s. The bit-at-a-time path is still used for the tail (fewer than the
+   window's bytes remain), so exhaustion and partial-consumption semantics are
+   byte-for-byte unchanged.
+2. **`SkewedModel` gained a flat inverse table** (4 KiB of `u8` for the 4096
+   slots) so `SymbolModel::find` is one indexed load instead of a binary search
+   over 257 cumulative frequencies — the reason `decode_noise` ran an order of
+   magnitude behind the uniform-model decode.
+
+Measured, same machine, same session, A/B by stashing only these two files:
+
+| Case | Before | After | Delta |
+|:---|---:|---:|---:|
+| `bitstream_bitreader/read_bits_16` | 193.2 MiB/s | 307.6 MiB/s | **+59%** |
+| `bitstream_bitreader/read_u32_be` | 203.5 MiB/s | 619.9 MiB/s | **+205%** |
+| `bitstream_bitreader/read_bit` | 99.0 MiB/s | 99.0 MiB/s | unchanged |
+| `bitstream_rans/decode_noise` | 41.5 MiB/s | 181.0 MiB/s | **+338%** |
+| `bitstream_rans/decode_static` | 351.6 MiB/s | 351.4 MiB/s | unchanged (control) |
+| `lossless_1080px_10bit/decode` | 11.88 Melem/s | 35.04 Melem/s | **+195%** |
+| `lossless_1080px_10bit/encode` | 37.59 Melem/s | 37.83 Melem/s | +0.6% |
+| `screen_320x240/decode` | 7.00 Melem/s | 6.92 Melem/s | −1.2% |
+
+Notes:
+
+- `decode_static` / `encode_*` are deliberate **controls**: they do not touch
+  either changed path, and they came out identical A/B, which is what proves
+  the −5…−10% that Criterion reports against the *committed* baseline is
+  machine drift between sessions rather than a regression. The committed
+  `docs/perf/baseline-2026-10-02.json` predates this change and several
+  correctness fixes, so it must be re-recorded before it is trusted again.
+- `screen_320x240/decode` is 1.2% slower: the screen header reads are narrow
+  and the window path adds a span computation the old per-bit loop did not pay.
+  That is well inside noise for a 10-sample run and is dwarfed by the +195% on
+  the rANS decode path, so it is accepted, not chased.
+- Do **not** trust the `screen_*_decode` rows in the committed
+  `docs/PERFORMANCE.md` — they were recorded on the corrupt flat-black luma path
+  fixed in Phase 1, and now read ~100x lower simply because the decoder is now
+  doing the work it always claimed to do.
+- The `-99%` Criterion prints on those screen rows are that correctness fix,
+  not this optimisation.
+- Bit-exactness guards: `read_bits` is checked against an independent
+  bit-at-a-time reference for every width 1..=32 at every start offset, and the
+  inverse table is checked against the old `partition_point` definition for all
+  4096 slots at five skew values. All seven downstream original-codec crates
+  still pass their round-trip suites.
+- Still open on this item: `read_bit` itself is unchanged at ~99 MiB/s (it is a
+  genuinely per-bit API, so the ceiling is the loop, not the primitive), and
+  `StaticModel` still computes its slot arithmetically rather than by table.
 
 ## Phase 4 — Guardrails (every optimisation change)
 

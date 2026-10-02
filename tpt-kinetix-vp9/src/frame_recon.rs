@@ -174,7 +174,7 @@ impl<'a> TileDecoder<'a> {
         let step = 1usize << (tx * 2);
         let tx4 = if self.lossless { 4 } else { tx };
         let skip = self.b.skip;
-        let trace = std::env::var_os("TPT_VP9_TRACE").is_some();
+        let trace = crate::dbg_env::var_os("TPT_VP9_TRACE").is_some();
 
         let mut n = 0usize;
         let mut y = 0usize;

@@ -61,7 +61,10 @@ fn loop_filter_edge(
     h: i32,
     wd: usize,
 ) {
-    let dbg56 = std::env::var_os("TPT_VP9_DBG56").is_some() && off == 56;
+    // Cheap integer test first: this runs for every deblocking edge of every
+    // superblock, so the debug switch must never be the thing that is
+    // evaluated most often.
+    let dbg56 = off == 56 && crate::dbg_env::is_set("TPT_VP9_DBG56");
     if dbg56 {
         eprintln!(
             "EDGE56 wd={} e={} i={} h={} data[48..64]={:?}",
@@ -478,7 +481,7 @@ pub fn setup_mask(f: &mut SbFilter, max_rows: usize, max_cols: usize) {
 /// with `with_uv`. `shift_y` is the unit index of the block's top-left corner.
 fn build_masks(f: &mut SbFilter, unit: usize, shift_y: usize, shift_uv: usize, with_uv: bool) {
     let u = f.unit[unit];
-    if std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         eprintln!(
             "BM unit={} u.bs={} shift_y={} lvl={} tx={}",
             unit, u.bs, shift_y, u.lvl, u.tx
@@ -630,10 +633,10 @@ fn apply(
     } else {
         ("H", 1, stride)
     };
-    if std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         eprintln!("LFP k={} wd={} off={} pitch={}", k, wd, off, stride);
     }
-    if std::env::var_os("TPT_VP9_OPS").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_OPS").is_some() {
         // dump the kernel's touched window (8(+8) steps along `strtea`,
         // [-depth, depth-1] along `strideb`) before/after, matching the
         // oracle's KI/KO dumps byte-for-byte for op-level comparison
@@ -850,7 +853,7 @@ pub fn loopfilter_sb(
 ) {
     let mi_rows = frame.mi_rows;
     let mi_cols = frame.mi_cols;
-    if std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         let nz = sf.unit.iter().filter(|u| u.lvl != 0).count();
         let valid = sf.unit.iter().filter(|u| u.bs != 255).count();
         eprintln!(
@@ -858,7 +861,7 @@ pub fn loopfilter_sb(
             sb_row, sb_col, nz, valid
         );
     }
-    if std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         for (i, u) in sf.unit.iter().enumerate() {
             eprintln!(
                 "UNIT r={} c={} {} r{} c{} bs={} tx={} lvl={}",
@@ -880,7 +883,7 @@ pub fn loopfilter_sb(
         (mi_cols - sb_col * 8).min(8),
     );
     adjust_mask(&mut lfm, sb_row * 8, sb_col * 8, mi_rows, mi_cols);
-    if std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         eprintln!(
             "LFM2 r{} c{} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x}",
             sb_row,
@@ -921,7 +924,7 @@ pub fn loopfilter_sb(
                 luts,
                 &lfl,
             );
-            if std::env::var_os("TPT_VP9_TRACE").is_some() {
+            if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
                 eprintln!(
                     "LFM2 r{} c{} {:016x} {:016x} {:016x} {:016x} {:016x} {:016x}",
                     sb_row,
@@ -956,7 +959,7 @@ pub fn loopfilter_sb(
                 ((m16 & 0xff) as u32, (m8 & 0xff) as u32, (m4 & 0xff) as u32)
             };
             let m4ir = (m4i & 0xff) as u32;
-            if std::env::var_os("TPT_VP9_TRACE").is_some() {
+            if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
                 eprintln!(
                     "HMASK2 r={} m16={:x} m8={:x} m4={:x} m4i={:x}",
                     r, m16r, m8r, m4r, m4ir

@@ -524,7 +524,7 @@ impl FilterType {
 /// at the top sample of the 8-tap column (`stride` between taps).
 #[inline]
 fn filter8(p: &[u8], off: usize, stride: usize, f: &[i16]) -> u8 {
-    if off + 7 * stride >= p.len() && std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if off + 7 * stride >= p.len() && crate::dbg_env::is_set("TPT_VP9_TRACE") {
         eprintln!(
             "F8OOB len={} off={} stride={} need={}",
             p.len(),
@@ -631,7 +631,7 @@ pub fn mc_block(
     let need_right = sx0 + (bw as i32) + 7 > src_w as i32;
     let need_bottom = sy0 + (bh as i32) + 7 > src_h as i32;
 
-    if std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         eprintln!(
             "MCB px={} py={} bw={} bh={} mv=({},{}) x={} y={} mx={} my={} fx={} fy={} filt={} src_w={} src_h={}",
             px, py, bw, bh, mv.x, mv.y, x, y, mx, my, fx, fy, filter.0, src_w, src_h
@@ -782,7 +782,7 @@ pub fn mc_block_scaled(
     cur_h4: usize,
 ) {
     // scale_mv(n, dim) = ((int64_t)n * scale[dim]) >> 14
-    if std::env::var_os("TPT_VP9_TRACE").is_some() {
+    if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         eprintln!(
             "MCSCALED px={} py={} bw={} bh={} src_w={} src_h={} srclen={} scale={:?}",
             px,

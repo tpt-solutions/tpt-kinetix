@@ -821,6 +821,13 @@ fn level_params(lvl: i32, sharpness: u8) -> LevelParams {
     }
 }
 
+/// Widest tap window the deblocking filter needs around an edge: 7 taps before
+/// and 6 after (§7.14.6), rounded out to 8 on each side so the window is always
+/// long enough that clamping to the window edge is identical to clamping to the
+/// plane edge. The deblocking passes filter through a fixed-size stack buffer
+/// of this length, so it must be >= the `edge + 8` window the callers build.
+const DEBLOCK_TAPS_WINDOW: usize = 16;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Per-line filter kernel (used by both vertical and horizontal edges)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -830,6 +837,12 @@ fn level_params(lvl: i32, sharpness: u8) -> LevelParams {
 ///
 /// Returns a new line with the filtered positions written; unaffected samples
 /// are copied unchanged.
+///
+/// Convenience wrapper that allocates. The deblocking hot path calls
+/// [`filter_line_1d_into`] with a reusable stack buffer instead, so this
+/// allocating form exists only for the unit tests, where it serves as the
+/// reference oracle for the shared-buffer path.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn filter_line_1d(
     line: &[i32],
@@ -842,8 +855,48 @@ fn filter_line_1d(
     bit_depth: u32,
 ) -> Vec<i32> {
     let mut out = line.to_vec();
+    filter_line_1d_into(
+        line,
+        &mut out,
+        edge,
+        limit,
+        blimit,
+        thresh,
+        filter_size,
+        is_luma,
+        bit_depth,
+    );
+    out
+}
+
+/// Allocation-free core of [`filter_line_1d`].
+///
+/// `out` must have the same length as `line`; it is fully overwritten (the
+/// unfiltered samples are copied straight through from `line`, and only the
+/// taps the filter actually touches are then rewritten). `line` and `out` must
+/// not alias: the wide filter reads every tap of `line` before the results are
+/// written, so a distinct output buffer is what makes the in-place result
+/// match the spec's simultaneous read/write semantics.
+#[allow(clippy::too_many_arguments)]
+fn filter_line_1d_into(
+    line: &[i32],
+    out: &mut [i32],
+    edge: usize,
+    limit: i32,
+    blimit: i32,
+    thresh: i32,
+    filter_size: usize,
+    is_luma: bool,
+    bit_depth: u32,
+) {
+    debug_assert_eq!(
+        line.len(),
+        out.len(),
+        "filter_line_1d_into: length mismatch"
+    );
+    out.copy_from_slice(line);
     if edge == 0 || edge >= line.len() {
-        return out;
+        return;
     }
     // §7.14.6.2: the level-derived thresholds and the flat threshold scale
     // with the bit depth (dav1d shifts E/I/H by `bitdepth_min_8`).
@@ -908,7 +961,7 @@ fn filter_line_1d(
         && (filter_len < 6 || ((p2 - p1).abs() <= limit && (q2 - q1).abs() <= limit))
         && (filter_len < 8 || ((p3 - p2).abs() <= limit && (q3 - q2).abs() <= limit));
     if !filter_mask {
-        return out;
+        return;
     }
 
     // Flat mask (§7.14.6.2, only meaningful for `filterSize >= 8`): whether
@@ -990,7 +1043,7 @@ fn filter_line_1d(
                 out[edge - 2] = op1;
             }
         }
-        return out;
+        return;
     }
 
     // Wide filter (§7.14.6.4). `n` (taps per side): 6 when `log2Size == 4`;
@@ -1021,7 +1074,6 @@ fn filter_line_1d(
         let idx = (edge as isize + i).clamp(0, out_len as isize - 1) as usize;
         out[idx] = clip3(f, 0, pix_max);
     }
-    out
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1259,11 +1311,23 @@ fn deblock_plane(
                 // bit-identical to filtering the whole row.
                 let lo = edge.saturating_sub(8);
                 let hi = (edge + 8).min(width);
+                // Reusable line scratch, declared once per edge and reused for
+                // every row of it. The window is at most 16 samples, so this
+                // stays on the stack: the deblocking filter used to heap-allocate
+                // two `Vec<i32>` per filtered row, which for a 1080p frame is
+                // hundreds of thousands of allocations on the hottest phase.
+                let mut line = [0i32; DEBLOCK_TAPS_WINDOW];
+                let mut out = [0i32; DEBLOCK_TAPS_WINDOW];
+                let win = hi - lo;
+                let edge_off = edge - lo;
                 for y in y0..y0 + bh {
-                    let line: Vec<i32> = (lo..hi).map(|x| plane[y * stride + x] as i32).collect();
-                    let filtered = filter_line_1d(
-                        &line,
-                        edge - lo,
+                    for (k, x) in (lo..hi).enumerate() {
+                        line[k] = plane[y * stride + x] as i32;
+                    }
+                    filter_line_1d_into(
+                        &line[..win],
+                        &mut out[..win],
+                        edge_off,
                         lp.limit,
                         lp.blimit,
                         lp.thresh,
@@ -1271,8 +1335,8 @@ fn deblock_plane(
                         plane_index == 0,
                         fh.bit_depth as u32,
                     );
-                    for x in lo..hi {
-                        plane[y * stride + x] = filtered[x - lo] as Px;
+                    for (k, x) in (lo..hi).enumerate() {
+                        plane[y * stride + x] = out[k] as Px;
                     }
                 }
                 if let Some(pre) = lf_pre {
@@ -1442,14 +1506,22 @@ fn deblock_plane(
                         );
                     }
                 }
-                // Same 8-sample window as the vertical pass (see above).
+                // Same 8-sample window as the vertical pass (see above), with
+                // the same reusable stack scratch.
                 let lo = edge.saturating_sub(8);
                 let hi = (edge + 8).min(height);
+                let mut line = [0i32; DEBLOCK_TAPS_WINDOW];
+                let mut out = [0i32; DEBLOCK_TAPS_WINDOW];
+                let win = hi - lo;
+                let edge_off = edge - lo;
                 for x in x0..x0 + bw {
-                    let line: Vec<i32> = (lo..hi).map(|y| plane[y * stride + x] as i32).collect();
-                    let filtered = filter_line_1d(
-                        &line,
-                        edge - lo,
+                    for (k, y) in (lo..hi).enumerate() {
+                        line[k] = plane[y * stride + x] as i32;
+                    }
+                    filter_line_1d_into(
+                        &line[..win],
+                        &mut out[..win],
+                        edge_off,
                         lp.limit,
                         lp.blimit,
                         lp.thresh,
@@ -1457,8 +1529,8 @@ fn deblock_plane(
                         plane_index == 0,
                         fh.bit_depth as u32,
                     );
-                    for y in lo..hi {
-                        plane[y * stride + x] = filtered[y - lo] as Px;
+                    for (k, y) in (lo..hi).enumerate() {
+                        plane[y * stride + x] = out[k] as Px;
                     }
                 }
                 if let Some(pre) = lf_pre_h {
@@ -2224,14 +2296,18 @@ fn apply_loop_restoration_plane(
 
                 match unit {
                     LrUnitData::Wiener { h: hf, v: vf } => {
-                        wiener_filter_plane(
-                            plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *hf, *vf, pix_max,
-                        );
+                        crate::dbg_env::av1_timed(&|p| &p.lr_ns, || {
+                            wiener_filter_plane(
+                                plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *hf, *vf, pix_max,
+                            )
+                        });
                     }
                     LrUnitData::Sgrproj { set, xqd } => {
-                        sgrproj_filter_plane(
-                            plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *set, *xqd, pix_max,
-                        );
+                        crate::dbg_env::av1_timed(&|p| &p.lr_ns, || {
+                            sgrproj_filter_plane(
+                                plane, &seg_src, w, h, ux0, seg_y, uw, seg_h, *set, *xqd, pix_max,
+                            )
+                        });
                     }
                 }
                 seg_y = seg_end;
@@ -2338,33 +2414,35 @@ pub fn apply_post_filters(
     }
     let lf_h4 = (fh.height as usize + 3) >> 2;
     if !skip_deblock {
-        deblock_plane(
-            y_plane,
-            width,
-            width,
-            height,
-            4,
-            0,
-            &meta.luma_tx_w4,
-            &meta.luma_tx_h4,
-            &meta.luma_skip,
-            &meta.luma_edge_left4,
-            &meta.luma_edge_top4,
-            &meta.delta_lf4,
-            &meta.lf_ref4,
-            &meta.lf_mode4,
-            meta.w4,
-            0,
-            meta.w4,
-            lf_h4,
-            // dav1d's `f->w4 = (width[0] + 3) >> 2` — the *coded* width,
-            // which for a superres frame is the downscaled one.
-            (fh.width as usize).div_ceil(4),
-            fh,
-            &[],
-            0,
-            0,
-        );
+        crate::dbg_env::av1_timed(&|p| &p.deblock_ns, || {
+            deblock_plane(
+                y_plane,
+                width,
+                width,
+                height,
+                4,
+                0,
+                &meta.luma_tx_w4,
+                &meta.luma_tx_h4,
+                &meta.luma_skip,
+                &meta.luma_edge_left4,
+                &meta.luma_edge_top4,
+                &meta.delta_lf4,
+                &meta.lf_ref4,
+                &meta.lf_mode4,
+                meta.w4,
+                0,
+                meta.w4,
+                lf_h4,
+                // dav1d's `f->w4 = (width[0] + 3) >> 2` — the *coded* width,
+                // which for a superres frame is the downscaled one.
+                (fh.width as usize).div_ceil(4),
+                fh,
+                &[],
+                0,
+                0,
+            )
+        });
     }
     let sub_x = subsampling_x as usize;
     if crate::dbg_env::var("KINETIX_AV1_DUMP_POSTDEBLOCK").is_ok() {
@@ -2389,31 +2467,33 @@ pub fn apply_post_filters(
     let chroma_lf_cols = (((fh.width as usize).div_ceil(4) + sub_x) >> sub_x).min(meta.cw4);
     let chroma_lf_rows = (((fh.height as usize).div_ceil(4) + sub_y) >> sub_y).min(meta.ch4);
     if !skip_deblock {
-        deblock_plane(
-            u_plane,
-            uv_w,
-            uv_w,
-            uv_h,
-            4,
-            1,
-            &meta.u_tx_w,
-            &meta.u_tx_h,
-            &meta.u_skip,
-            &meta.chroma_edge_left,
-            &meta.chroma_edge_top,
-            &meta.delta_lf,
-            &meta.lf_ref4,
-            &meta.lf_mode4,
-            meta.w4,
-            1,
-            meta.cw4,
-            chroma_lf_rows,
-            chroma_lf_cols,
-            fh,
-            &meta.lf_level_u4,
-            meta.cw4,
-            sub_y,
-        );
+        crate::dbg_env::av1_timed(&|p| &p.deblock_ns, || {
+            deblock_plane(
+                u_plane,
+                uv_w,
+                uv_w,
+                uv_h,
+                4,
+                1,
+                &meta.u_tx_w,
+                &meta.u_tx_h,
+                &meta.u_skip,
+                &meta.chroma_edge_left,
+                &meta.chroma_edge_top,
+                &meta.delta_lf,
+                &meta.lf_ref4,
+                &meta.lf_mode4,
+                meta.w4,
+                1,
+                meta.cw4,
+                chroma_lf_rows,
+                chroma_lf_cols,
+                fh,
+                &meta.lf_level_u4,
+                meta.cw4,
+                sub_y,
+            )
+        });
     }
     let dbg_cpxy = crate::dbg_env::var("KINETIX_AV1_DBG_CPXY")
         .ok()
@@ -2433,31 +2513,33 @@ pub fn apply_post_filters(
     };
     dump_cpxy("pre-deblock-V", v_plane, uv_w);
     if !skip_deblock {
-        deblock_plane(
-            v_plane,
-            uv_w,
-            uv_w,
-            uv_h,
-            4,
-            2,
-            &meta.v_tx_w,
-            &meta.v_tx_h,
-            &meta.v_skip,
-            &meta.chroma_edge_left,
-            &meta.chroma_edge_top,
-            &meta.delta_lf,
-            &meta.lf_ref4,
-            &meta.lf_mode4,
-            meta.w4,
-            1,
-            meta.cw4,
-            chroma_lf_rows,
-            chroma_lf_cols,
-            fh,
-            &meta.lf_level_v4,
-            meta.cw4,
-            sub_y,
-        );
+        crate::dbg_env::av1_timed(&|p| &p.deblock_ns, || {
+            deblock_plane(
+                v_plane,
+                uv_w,
+                uv_w,
+                uv_h,
+                4,
+                2,
+                &meta.v_tx_w,
+                &meta.v_tx_h,
+                &meta.v_skip,
+                &meta.chroma_edge_left,
+                &meta.chroma_edge_top,
+                &meta.delta_lf,
+                &meta.lf_ref4,
+                &meta.lf_mode4,
+                meta.w4,
+                1,
+                meta.cw4,
+                chroma_lf_rows,
+                chroma_lf_cols,
+                fh,
+                &meta.lf_level_v4,
+                meta.cw4,
+                sub_y,
+            )
+        });
     }
     dump_cpxy("post-deblock-V", v_plane, uv_w);
 
@@ -2533,22 +2615,24 @@ pub fn apply_post_filters(
                     // output covers the padding rows too. Clipping to the
                     // visible height left those units unfiltered/clamped,
                     // diverging from dav1d at the frame bottom.
-                    cdef_plane_luma(
-                        y_plane,
-                        &src_y,
-                        width,
-                        height,
-                        pri,
-                        sec,
-                        damping,
-                        uy,
-                        ux,
-                        uh,
-                        uw,
-                        &meta.luma_skip,
-                        meta.w8,
-                        bit_depth,
-                    );
+                    crate::dbg_env::av1_timed(&|p| &p.cdef_ns, || {
+                        cdef_plane_luma(
+                            y_plane,
+                            &src_y,
+                            width,
+                            height,
+                            pri,
+                            sec,
+                            damping,
+                            uy,
+                            ux,
+                            uh,
+                            uw,
+                            &meta.luma_skip,
+                            meta.w8,
+                            bit_depth,
+                        )
+                    });
                     ux += 64;
                 }
                 uy += 64;
@@ -2574,30 +2658,32 @@ pub fn apply_post_filters(
                     let uv_damping = fh.cdef_damping as i32 - 1;
                     let uh = uv_step_y.min(uv_h - uy);
                     let uw = uv_step_x.min(uv_w - ux);
-                    cdef_plane_chroma(
-                        u_plane,
-                        &src_u,
-                        uv_w,
-                        cdef_write_uv_h,
-                        &src_y,
-                        width,
-                        cdef_luma_dir_h,
-                        sub_x,
-                        sub_y,
-                        uv_pri,
-                        uv_sec,
-                        uv_damping,
-                        uy,
-                        ux,
-                        uh,
-                        uw,
-                        &meta.luma_skip,
-                        meta.w8,
-                        fh.order_hint,
-                        fh.show_frame,
-                        'U',
-                        bit_depth,
-                    );
+                    crate::dbg_env::av1_timed(&|p| &p.cdef_ns, || {
+                        cdef_plane_chroma(
+                            u_plane,
+                            &src_u,
+                            uv_w,
+                            cdef_write_uv_h,
+                            &src_y,
+                            width,
+                            cdef_luma_dir_h,
+                            sub_x,
+                            sub_y,
+                            uv_pri,
+                            uv_sec,
+                            uv_damping,
+                            uy,
+                            ux,
+                            uh,
+                            uw,
+                            &meta.luma_skip,
+                            meta.w8,
+                            fh.order_hint,
+                            fh.show_frame,
+                            'U',
+                            bit_depth,
+                        )
+                    });
                     ux += uv_step_x;
                 }
                 uy += uv_step_y;
@@ -2621,30 +2707,32 @@ pub fn apply_post_filters(
                     let uv_damping = fh.cdef_damping as i32 - 1;
                     let uh = uv_step_y.min(uv_h - uy);
                     let uw = uv_step_x.min(uv_w - ux);
-                    cdef_plane_chroma(
-                        v_plane,
-                        &src_v,
-                        uv_w,
-                        cdef_write_uv_h,
-                        &src_y,
-                        width,
-                        cdef_luma_dir_h,
-                        sub_x,
-                        sub_y,
-                        uv_pri,
-                        uv_sec,
-                        uv_damping,
-                        uy,
-                        ux,
-                        uh,
-                        uw,
-                        &meta.luma_skip,
-                        meta.w8,
-                        fh.order_hint,
-                        fh.show_frame,
-                        'V',
-                        bit_depth,
-                    );
+                    crate::dbg_env::av1_timed(&|p| &p.cdef_ns, || {
+                        cdef_plane_chroma(
+                            v_plane,
+                            &src_v,
+                            uv_w,
+                            cdef_write_uv_h,
+                            &src_y,
+                            width,
+                            cdef_luma_dir_h,
+                            sub_x,
+                            sub_y,
+                            uv_pri,
+                            uv_sec,
+                            uv_damping,
+                            uy,
+                            ux,
+                            uh,
+                            uw,
+                            &meta.luma_skip,
+                            meta.w8,
+                            fh.order_hint,
+                            fh.show_frame,
+                            'V',
+                            bit_depth,
+                        )
+                    });
                     ux += uv_step_x;
                 }
                 uy += uv_step_y;
@@ -2893,18 +2981,20 @@ fn upscale_grid_plane(
     let dx = crate::superres::scale_step(vis_w.max(1), dst_w.max(1));
     let mx0 = crate::superres::upscale_x0(vis_w.max(1), dst_w.max(1), dx);
     let mut dst = vec![0 as Px; dst_stride * total_rows];
-    crate::superres::upscale_plane(
-        &mut dst,
-        dst_stride,
-        src,
-        src_stride,
-        src_stride,
-        dst_w,
-        vis_rows.min(total_rows),
-        dx,
-        mx0,
-        pix_max,
-    );
+    crate::dbg_env::av1_timed(&|p| &p.superres_ns, || {
+        crate::superres::upscale_plane(
+            &mut dst,
+            dst_stride,
+            src,
+            src_stride,
+            src_stride,
+            dst_w,
+            vis_rows.min(total_rows),
+            dx,
+            mx0,
+            pix_max,
+        )
+    });
     let vis_w = dst_w.min(dst_stride);
     for row in 0..total_rows {
         let drow = &mut dst[row * dst_stride..(row + 1) * dst_stride];
@@ -3375,32 +3465,36 @@ mod tests {
         // A non-identity (real smoothing) horizontal kernel.
         let half = [1, 2, 3];
         let identity_v = [0, 0, 0];
-        wiener_filter_plane(
-            &mut plane_a,
-            &src_a,
-            pw,
-            ph,
-            0,
-            0,
-            4,
-            ph,
-            half,
-            identity_v,
-            255,
-        );
-        wiener_filter_plane(
-            &mut plane_b,
-            &src_b,
-            pw,
-            ph,
-            0,
-            0,
-            4,
-            ph,
-            half,
-            identity_v,
-            255,
-        );
+        crate::dbg_env::av1_timed(&|p| &p.lr_ns, || {
+            wiener_filter_plane(
+                &mut plane_a,
+                &src_a,
+                pw,
+                ph,
+                0,
+                0,
+                4,
+                ph,
+                half,
+                identity_v,
+                255,
+            )
+        });
+        crate::dbg_env::av1_timed(&|p| &p.lr_ns, || {
+            wiener_filter_plane(
+                &mut plane_b,
+                &src_b,
+                pw,
+                ph,
+                0,
+                0,
+                4,
+                ph,
+                half,
+                identity_v,
+                255,
+            )
+        });
         assert_ne!(
             plane_a[3], plane_b[3],
             "the rightmost column of the unit must be affected by the real \
@@ -3435,7 +3529,9 @@ mod tests {
             })
             .collect();
         let mut plane = src.clone();
-        sgrproj_filter_plane(&mut plane, &src, pw, ph, 0, 0, pw, ph, 10, [0, 2], 255);
+        crate::dbg_env::av1_timed(&|p| &p.lr_ns, || {
+            sgrproj_filter_plane(&mut plane, &src, pw, ph, 0, 0, pw, ph, 10, [0, 2], 255)
+        });
         assert_ne!(
             plane, src,
             "a real xqd=[0,2] SgrProj unit (set 10) must actually change \
@@ -3645,7 +3741,9 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8, &[false], 1, 8);
+        crate::dbg_env::av1_timed(&|p| &p.cdef_ns, || {
+            cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8, &[false], 1, 8)
+        });
         assert_eq!(plane, orig, "zero-strength CDEF is a no-op");
     }
 
@@ -3698,7 +3796,9 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8, &[false], 1, 8);
+        crate::dbg_env::av1_timed(&|p| &p.cdef_ns, || {
+            cdef_plane_luma(&mut plane, &src, 8, 8, 12, 0, 5, 0, 0, 8, 8, &[false], 1, 8)
+        });
         // With a correctly-capped `var_str`, CDEF must not blend the two
         // halves into a single intermediate value that erases the edge —
         // the two sides should stay clearly separated at every row.
@@ -3726,22 +3826,24 @@ mod tests {
             *v = ((i * 53) % 256) as u16;
         }
         let src = plane.clone();
-        cdef_plane_luma(
-            &mut plane,
-            &src,
-            16,
-            16,
-            15,
-            0,
-            7,
-            0,
-            0,
-            8,
-            8,
-            &[false; 4],
-            2,
-            8,
-        );
+        crate::dbg_env::av1_timed(&|p| &p.cdef_ns, || {
+            cdef_plane_luma(
+                &mut plane,
+                &src,
+                16,
+                16,
+                15,
+                0,
+                7,
+                0,
+                0,
+                8,
+                8,
+                &[false; 4],
+                2,
+                8,
+            )
+        });
         for y in 8..16 {
             for x in 0..16 {
                 assert_eq!(
@@ -3773,7 +3875,9 @@ mod tests {
         }
         let orig = plane.clone();
         let src = plane.clone();
-        cdef_plane_luma(&mut plane, &src, 8, 8, 12, 2, 4, 0, 0, 8, 8, &[true], 1, 8);
+        crate::dbg_env::av1_timed(&|p| &p.cdef_ns, || {
+            cdef_plane_luma(&mut plane, &src, 8, 8, 12, 2, 4, 0, 0, 8, 8, &[true], 1, 8)
+        });
         assert_eq!(
             plane, orig,
             "a fully-skipped 8x8 block must be left untouched by CDEF"

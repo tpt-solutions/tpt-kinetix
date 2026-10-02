@@ -529,7 +529,7 @@ impl<'a> TileDecoder<'a> {
         };
 
         if bl == BL_8X8 {
-            if std::env::var_os("TPT_VP9_TRACE").is_some() {
+            if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
                 eprintln!(
                     "PART r={} c={} ctx={} p={} {} {}",
                     row, col, c, p[0], p[1], p[2]
@@ -651,7 +651,7 @@ impl<'a> TileDecoder<'a> {
             self.inter_recon()?;
         }
 
-        if std::env::var_os("TPT_VP9_TRACE").is_some() {
+        if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
             eprintln!(
                 "BLK2 r={} c={} bs={} intra={} skip={} mode={} ref={} mv={},{} tx={} filt={}",
                 self.row,

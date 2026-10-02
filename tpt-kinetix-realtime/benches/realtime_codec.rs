@@ -53,7 +53,10 @@ fn frame_header(w: u32, h: u32) -> FrameHeader {
         force_idr: true,
         foveation_center_x: w as u16 / 2,
         foveation_center_y: h as u16 / 2,
-        intra_refresh_mask: Vec::new(),
+        // The parser always reads refresh_mask_len() (grid rows / 8) mask
+        // bytes, so the writer must emit a zero-filled mask of that length
+        // (0 bits = no intra refresh), not an empty vector.
+        intra_refresh_mask: vec![0; usize::from(GRID_ROWS).div_ceil(8)],
         payload_len: 0,
     }
 }
@@ -81,6 +84,14 @@ fn make_packet(frame: &FrameHeader, slices: &[Vec<u8>], seq: &SequenceHeader) ->
         rows: seq.slice_grid_rows,
     };
     let framed = grid.frame(slices).expect("frame the slice set");
+    // The wire format carries the payload length in the frame header and the
+    // decoder slices the packet by it. With the placeholder 0 the decoder
+    // rejects the packet outright — which this bench's decode case silently
+    // measured until the ffmpeg-compare harness surfaced it (2026-10-02).
+    let frame = FrameHeader {
+        payload_len: framed.len() as u32,
+        ..frame.clone()
+    };
     let header = frame.to_bytes();
     let mut data = Vec::with_capacity(header.len() + framed.len());
     data.extend_from_slice(&header);

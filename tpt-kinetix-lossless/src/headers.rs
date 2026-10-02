@@ -46,6 +46,10 @@ pub struct FrameHeader {
     /// decoder slice each plane's bitstream out of the concatenated frame body
     /// (each payload is byte-aligned) and decode it from its own reader.
     pub plane_lengths: Vec<u32>,
+    /// Per-plane `(width, height)`. Planes are independent (a 4:2:0 frame has
+    /// half-size chroma planes), so the frame-level `width`/`height` — which
+    /// describe plane 0 — cannot be reused for the rest.
+    pub plane_dims: Vec<(u16, u16)>,
     /// SHA-256 digest of the frame body (all plane payloads concatenated),
     /// for end-to-end integrity verification.
     pub stream_sha256: [u8; 32],
@@ -95,12 +99,19 @@ impl FrameHeader {
         w.write_bits(u32::from(self.width), 16);
         w.write_bits(u32::from(self.height), 16);
         w.write_bits(u32::from(self.plane_checksums.len() as u8), 8);
-        for (crc, len) in self.plane_checksums.iter().zip(&self.plane_lengths) {
+        for ((crc, len), (pw, ph)) in self
+            .plane_checksums
+            .iter()
+            .zip(&self.plane_lengths)
+            .zip(&self.plane_dims)
+        {
             w.write_bits(u32::from(crc.len() as u8), 8);
             for &b in crc {
                 w.write_bits(u32::from(b), 8);
             }
             w.write_bits(*len, 32);
+            w.write_bits(u32::from(*pw), 16);
+            w.write_bits(u32::from(*ph), 16);
         }
         for &b in &self.stream_sha256 {
             w.write_bits(u32::from(b), 8);
@@ -113,6 +124,7 @@ impl FrameHeader {
         let count = read_bits_u8(r, 8)?;
         let mut plane_checksums = Vec::with_capacity(count as usize);
         let mut plane_lengths = Vec::with_capacity(count as usize);
+        let mut plane_dims = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let len = read_bits_u8(r, 8)?;
             let mut crc = Vec::with_capacity(len as usize);
@@ -120,8 +132,11 @@ impl FrameHeader {
                 crc.push(read_bits_u8(r, 8)?);
             }
             let plen = r.read_bits(32)?;
+            let pw = read_bits_u16(r, 16)?;
+            let ph = read_bits_u16(r, 16)?;
             plane_checksums.push(crc);
             plane_lengths.push(plen);
+            plane_dims.push((pw, ph));
         }
         let mut stream_sha256 = [0u8; 32];
         for b in &mut stream_sha256 {
@@ -132,6 +147,7 @@ impl FrameHeader {
             height,
             plane_checksums,
             plane_lengths,
+            plane_dims,
             stream_sha256,
         })
     }

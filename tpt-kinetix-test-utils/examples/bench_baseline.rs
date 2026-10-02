@@ -19,6 +19,8 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
+use tpt_kinetix_test_utils::bench_parse::parse_benches;
+
 /// Every crate in the workspace that ships a Criterion bench target.
 const BENCH_CRATES: &[&str] = &[
     "out-kinetix-h264",
@@ -107,102 +109,19 @@ fn main() {
     write_file(&json_path, &render_json(&label, &results));
     eprintln!("Wrote {json_path}");
 
-    write_file("docs/PERFORMANCE.md", &render_markdown(&label, &results));
+    // Preserve the `<!-- ffmpeg-compare -->` section that
+    // `just bench-ffmpeg` maintains (todo-perf.md Phase 1); regenerating the
+    // Phase 0 table must not wipe the Phase 1 comparison.
+    let previous = std::fs::read_to_string("docs/PERFORMANCE.md").ok();
+    write_file(
+        "docs/PERFORMANCE.md",
+        &render_markdown(&label, &results, previous.as_deref()),
+    );
     eprintln!("Wrote docs/PERFORMANCE.md");
 }
 
-/// Parse Criterion's output into `{benchmark id: mean throughput}`.
-///
-/// Criterion writes its progress headers (`Benchmarking <id>: ...`) to
-/// **stderr** and its result lines (`time:` / `thrpt:`) to **stdout**, so the
-/// two streams must be parsed separately and zipped in emission order —
-/// concatenating them would put every header *after* every result and pair
-/// nothing up.
-///
-/// A benchmark only emits a `thrpt:` line when its group declared a
-/// `Throughput`. Those that did not (e.g. `av1_encode`) still emit a `time:`
-/// line, so those are recorded as a duration instead — otherwise the flagship
-/// AV1 numbers would be silently absent from the baseline.
-fn parse_benches(stderr: &str, stdout: &str) -> BTreeMap<String, String> {
-    let ids = bench_ids(stderr);
-    let throughputs = result_values(stdout, "thrpt:");
-    let times = result_values(stdout, "time:");
-
-    let mut out = BTreeMap::new();
-    for (i, id) in ids.iter().enumerate() {
-        if let Some(t) = throughputs.get(i) {
-            out.insert(id.clone(), t.clone());
-        } else if let Some(t) = times.get(i) {
-            out.insert(id.clone(), t.clone());
-        }
-    }
-    out
-}
-
-/// The benchmark ids Criterion started, in emission order (stderr). Repeated
-/// `Benchmarking <id>: Warming up / Collecting / Analyzing` continuations of the
-/// same id are collapsed.
-fn bench_ids(stderr: &str) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
-    for line in stderr.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("Benchmarking ") {
-            let id = rest.split(':').next().unwrap_or("").trim();
-            if !id.is_empty() && !ids.last().is_some_and(|last| last == id) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-    ids
-}
-
-/// The middle estimate of every line containing a `<prefix>` result marker, in
-/// emission order. The marker is matched anywhere in the line because Criterion
-/// prints `thrpt:` indented but `<id>     time:` with the id in front of it.
-fn result_values(stdout: &str, prefix: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in stdout.lines() {
-        let Some(idx) = line.find(prefix) else {
-            continue;
-        };
-        if let Some(mean) = extract_mean(&line[idx + prefix.len()..]) {
-            out.push(mean);
-        }
-    }
-    out
-}
-
-/// Pull the middle (point-estimate) throughput out of a `[lo mid hi]`
-/// interval, preserving the unit token.
-///
-/// Criterion's line looks like one of:
-///
-/// ```text
-/// thrpt:  [10.418 Melem/s 10.487 Melem/s 10.561 Melem/s]   <- value/unit pairs
-/// thrpt:  [+1.0915% +1.9489% +2.9378%]                     <- change, no units
-/// ```
-///
-/// So the numeric tokens are collected and the *second* one is the point
-/// estimate, and the first non-numeric token is the unit. A line whose tokens
-/// are all percentages carries no throughput and is rejected.
-fn extract_mean(rest: &str) -> Option<String> {
-    let inner = rest.trim().trim_start_matches('[').trim_end_matches(']');
-    let mut numbers: Vec<&str> = Vec::new();
-    let mut unit = String::new();
-    for token in inner.split_whitespace() {
-        let t = token.trim_start_matches('[').trim_end_matches(']');
-        if t.parse::<f64>().is_ok() {
-            numbers.push(t);
-        } else if unit.is_empty() {
-            unit = t.to_string();
-        }
-    }
-    // Need lo + mid at minimum; unit-less (percentage) lines are skipped.
-    let mid = numbers.get(1)?;
-    if unit.is_empty() {
-        return None;
-    }
-    Some(format!("{mid} {unit}"))
-}
+// Criterion's output is parsed by [`tpt_kinetix_test_utils::bench_parse`],
+// shared with `bench_report` and `bench_compare` so the three cannot drift.
 
 fn render_json(label: &str, results: &BTreeMap<String, BTreeMap<String, String>>) -> String {
     let mut s = String::new();
@@ -241,7 +160,36 @@ fn render_json(label: &str, results: &BTreeMap<String, BTreeMap<String, String>>
     s
 }
 
-fn render_markdown(label: &str, results: &BTreeMap<String, BTreeMap<String, String>>) -> String {
+/// The marked section `ffmpeg_compare` maintains in PERFORMANCE.md, carried
+/// over verbatim when this tool regenerates the Phase 0 baseline table.
+pub(crate) const FFMPEG_SECTION_MARKERS: (&str, &str) = (
+    "<!-- ffmpeg-compare:start -->",
+    "<!-- ffmpeg-compare:end -->",
+);
+
+/// Extract the text between (and including) the ffmpeg-compare markers, if the
+/// previous PERFORMANCE.md contains a complete pair.
+pub(crate) fn ffmpeg_section(previous: Option<&str>) -> String {
+    let Some(text) = previous else {
+        return String::new();
+    };
+    let Some(start) = text.find(FFMPEG_SECTION_MARKERS.0) else {
+        return String::new();
+    };
+    let Some(end) = text[start..].find(FFMPEG_SECTION_MARKERS.1) else {
+        return String::new();
+    };
+    let end = start + end + FFMPEG_SECTION_MARKERS.1.len();
+    let mut section = text[start..end].to_string();
+    section.push('\n');
+    section
+}
+
+fn render_markdown(
+    label: &str,
+    results: &BTreeMap<String, BTreeMap<String, String>>,
+    previous: Option<&str>,
+) -> String {
     let mut s = String::new();
     s.push_str("# TPT Kinetix — performance baseline\n\n");
     s.push_str(&format!(
@@ -289,6 +237,7 @@ fn render_markdown(label: &str, results: &BTreeMap<String, BTreeMap<String, Stri
          - `Melem/s` on the volumetric bench counts 6 values per point (3 position \
          components plus 3 colour samples).\n",
     );
+    s.push_str(&ffmpeg_section(previous));
     s
 }
 
@@ -392,81 +341,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_mean_takes_the_middle_estimate_and_its_unit() {
-        assert_eq!(
-            extract_mean("  [10.418 Melem/s 10.487 Melem/s 10.561 Melem/s]").as_deref(),
-            Some("10.487 Melem/s")
-        );
-    }
-
-    #[test]
-    fn extract_mean_handles_byte_units() {
-        assert_eq!(
-            extract_mean("  [97.884 MiB/s 98.529 MiB/s 99.088 MiB/s]").as_deref(),
-            Some("98.529 MiB/s")
-        );
-    }
-
-    #[test]
-    fn extract_mean_rejects_a_unitless_change_line() {
-        // Criterion's per-benchmark change line carries percentages, not a
-        // throughput; scraping it would poison the baseline.
-        assert_eq!(extract_mean("  [+1.0915% +1.9489% +2.9378%]"), None);
-    }
-
-    #[test]
-    fn parse_benches_zips_ids_from_stderr_with_throughput_from_stdout() {
-        // Criterion writes `Benchmarking <id>` to stderr and `thrpt:` to stdout,
-        // so a single-stream parse pairs nothing up.
-        let stderr = "\
-Benchmarking lean_320x240/encode: Warming up for 3.0000 s
-Benchmarking lean_320x240/encode: Collecting 10 samples
-Benchmarking lean_320x240/encode: Analyzing
-Benchmarking lean_320x240/decode: Warming up for 3.0000 s
-Benchmarking lean_320x240/decode: Analyzing
-";
-        let stdout = "\
-lean_320x240/encode     time:   [164.08 ms 164.65 ms 165.65 ms]
-                        thrpt:  [463.63 Kelem/s 466.46 Kelem/s 468.06 Kelem/s]
-lean_320x240/decode     time:   [21.4 ms 21.5 ms 21.6 ms]
-                        thrpt:  [14.8 Melem/s 14.9 Melem/s 15.0 Melem/s]
-";
-        let parsed = parse_benches(stderr, stdout);
-        assert_eq!(
-            parsed.get("lean_320x240/encode").map(String::as_str),
-            Some("466.46 Kelem/s")
-        );
-        assert_eq!(
-            parsed.get("lean_320x240/decode").map(String::as_str),
-            Some("14.9 Melem/s")
-        );
-        assert_eq!(parsed.len(), 2);
-    }
-
-    #[test]
-    fn parse_benches_falls_back_to_duration_when_no_throughput_is_declared() {
-        // `av1_encode` declares no `Throughput`, so Criterion prints only a
-        // `time:` line for it; it must still appear in the baseline.
-        let stderr = "\
-Benchmarking av1_encode/kinetix: Warming up for 3.0000 s
-Benchmarking av1_encode/kinetix: Analyzing
-";
-        let stdout = "\
-av1_encode/kinetix     time:   [1.2345 ms 1.3000 ms 1.4110 ms]
-";
-        let parsed = parse_benches(stderr, stdout);
-        assert_eq!(
-            parsed.get("av1_encode/kinetix").map(String::as_str),
-            Some("1.3000 ms")
-        );
-    }
-
-    #[test]
     fn today_is_a_well_formed_iso_date() {
         let d = today();
         assert_eq!(d.len(), 10, "{d} should be YYYY-MM-DD");
         assert_eq!(d.as_bytes()[4], b'-');
         assert_eq!(d.as_bytes()[7], b'-');
         assert!(d[..4].chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn markdown_preserves_a_marked_ffmpeg_compare_section() {
+        let mut results = BTreeMap::new();
+        results.insert(
+            "tpt-kinetix-lean".to_string(),
+            BTreeMap::from([("lean/decode".to_string(), "1.0 Melem/s".to_string())]),
+        );
+        let previous =
+            "preamble\n<!-- ffmpeg-compare:start -->\nkept\n<!-- ffmpeg-compare:end -->\n";
+        let rendered = render_markdown("t", &results, Some(previous));
+        assert!(rendered.contains("kept"), "marked section must survive");
+        assert!(rendered.starts_with("# TPT Kinetix — performance baseline"));
+        assert!(
+            !rendered.contains("preamble"),
+            "old preamble must be dropped"
+        );
+    }
+
+    #[test]
+    fn markdown_without_markers_renders_without_a_section() {
+        let rendered = render_markdown("t", &BTreeMap::new(), None);
+        assert!(!rendered.contains("ffmpeg-compare:start"));
     }
 }

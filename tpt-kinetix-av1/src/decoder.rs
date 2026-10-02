@@ -336,6 +336,7 @@ impl Av1Decoder {
     /// strict-mode `NotPixelExact` for unsupported frame types.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
         crate::dbg_env::refresh();
+        crate::dbg_env::av1_phase_frame_tick();
         let obus = parse_obu_sequence(&packet.data);
 
         self.tile_data.clear();
@@ -802,7 +803,7 @@ fn apply_grain_to_frame(
         usize::from(seq.color_config.subsampling_x),
         usize::from(seq.color_config.subsampling_y),
     );
-    if !p.apply_grain || w == 0 || h == 0 || std::env::var_os("KINETIX_AV1_NO_GRAIN").is_some() {
+    if !p.apply_grain || w == 0 || h == 0 || crate::dbg_env::is_set("KINETIX_AV1_NO_GRAIN") {
         return;
     }
     let bytes = if bit_depth == 8 { 1 } else { 2 };
@@ -822,18 +823,20 @@ fn apply_grain_to_frame(
     let (yb, rest) = frame.data.split_at(w * h * bytes);
     let (ub, vb) = rest.split_at(cw * ch * bytes);
     let (mut y, mut u, mut v) = (decode(yb), decode(ub), decode(vb));
-    crate::film_grain::apply_film_grain(
-        p,
-        u32::from(bit_depth),
-        ssx,
-        ssy,
-        seq.color_config.matrix_coefficients == 0,
-        w,
-        h,
-        &mut y,
-        &mut u,
-        &mut v,
-    );
+    crate::dbg_env::av1_timed(&|p| &p.grain_ns, || {
+        crate::film_grain::apply_film_grain(
+            p,
+            u32::from(bit_depth),
+            ssx,
+            ssy,
+            seq.color_config.matrix_coefficients == 0,
+            w,
+            h,
+            &mut y,
+            &mut u,
+            &mut v,
+        )
+    });
     let mut out = Vec::with_capacity(frame.data.len());
     for plane in [&y, &u, &v] {
         if bytes == 1 {

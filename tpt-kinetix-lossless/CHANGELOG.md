@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The frame header now stores per-plane `(width, height)`. The decoder
+  previously decoded every plane with the frame-level geometry (plane 0's
+  dims), so any frame whose planes are not all the same size — every 4:2:0
+  YUV frame, i.e. the primary use case — over-read the smaller chroma
+  residual streams and failed with "rANS stream exhausted during
+  renormalization". The bitstream format changes (16 bits per plane added to
+  the frame header); existing v1 payloads with uneven plane sizes could never
+  have decoded correctly.
+
 ## [0.1.0](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.0) - 2026-07-19
 
 ### Added

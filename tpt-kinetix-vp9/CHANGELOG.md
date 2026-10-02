@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Performance: the `TPT_VP9_*` debug switches no longer cost a full
+  environment lookup in the decoder's inner loops.** All 25 debug-variable
+  reads in the crate now go through a new `dbg_env` module, which scans the
+  environment once per `decode` call and, while no `TPT_VP9_*` switch is set,
+  answers from a single relaxed atomic load instead of locking the environment,
+  scanning it and allocating an `OsString`.
+
+  This was the single largest win in Phase 3. Two of the switches were in the
+  innermost loops:
+  - `booldec::read_bool` consulted `TPT_VP9_TRACE` **once per bool decoded** —
+    millions of times per frame, for every coefficient token and every mode.
+  - `loop_filter::loop_filter_edge` consulted `TPT_VP9_DBG56` **once per
+    deblocking edge of every superblock**, and evaluated it *before* the cheap
+    `off == 56` test that gates the actual debug output. The cheap integer
+    comparison is now tested first.
+
+  Measured on the cached `testsrc` corpus (decode only, A/B by reverting only
+  these source changes, identical frame counts):
+  - 320x240: 20.64s -> 8.00s for 18000 frames (**2.58x**)
+  - 1920x1080: 38.29s -> 19.51s for 2400 frames (**1.96x**)
+
+- The guard mirrors `tpt-kinetix-av1`'s existing `dbg_env`, which had already
+  been written for the same reason — AV1 had it, VP9 did not.
+
+Decoded output is **unchanged**: the libvpx row of the `ffmpeg_compare` harness
+still reports `verified=true` (byte-identical planes vs ffmpeg), and all 13
+`conformance_vp9` tests plus the rest of the crate's suites pass. A new unit
+test asserts the fast path never makes a *set* switch invisible, so the
+`TPT_VP9_*` debugging tools keep working.
+
 ## [0.1.0](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.0) - 2026-07-19
 
 ### Added

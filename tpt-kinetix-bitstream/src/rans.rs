@@ -158,6 +158,15 @@ pub struct SkewedModel {
     /// Cumulative frequency table of length 257; `cum[s+1] - cum[s]` is the
     /// frequency of symbol `s`, and `cum[256] == PROB_SCALE`.
     cum: Vec<u32>,
+    /// Direct inverse table of length `PROB_SCALE`: `inv[c]` is the symbol
+    /// owning slot `c`, i.e. the largest `s` with `cum[s] <= c`.
+    ///
+    /// `find` is on the rANS decode inner loop, and a binary search over 257
+    /// cumulative frequencies costs ~8 unpredictable branches per symbol — the
+    /// reason `decode_noise` ran an order of magnitude slower than the
+    /// uniform-model decode. `PROB_SCALE` is only 4096, so the whole inverse
+    /// fits in 4 KiB of `u8` and the lookup becomes one indexed load.
+    inv: Vec<u8>,
 }
 
 impl SkewedModel {
@@ -220,7 +229,24 @@ impl SkewedModel {
             cum[s + 1] = cum[s] + freqs[s];
         }
         cum[256] = PROB_SCALE;
-        Self { cum }
+
+        // Expand the cumulative table into a flat inverse table so decode does
+        // not binary-search per symbol. `inv[c] = s` for every
+        // `c` in `[cum[s], cum[s + 1])`, which is exactly "the largest s with
+        // cum[s] <= c" — the contract `find` has always had.
+        // Expand the cumulative table into a flat inverse table so decode does
+        // not binary-search per symbol. `inv[c] = s` for every
+        // `c` in `[cum[s], cum[s + 1])`, which is exactly "the largest s with
+        // cum[s] <= c" — the contract `find` has always had.
+        let mut inv = vec![0u8; PROB_SCALE as usize];
+        for (s, (&start, &end)) in cum[..256].iter().zip(cum[1..].iter()).enumerate() {
+            let cell = s as u8;
+            for slot in inv.iter_mut().take(end as usize).skip(start as usize) {
+                *slot = cell;
+            }
+        }
+
+        Self { cum, inv }
     }
 
     /// Number of symbols in the alphabet (256).
@@ -244,14 +270,13 @@ impl SymbolModel for SkewedModel {
     }
 
     fn find(&self, cum_freq: u32) -> (u8, SymbolInfo) {
-        // Largest symbol `s` with `cum[s] <= cum_freq`. `partition_point` gives
-        // the first index whose value exceeds `cum_freq`; back off by one.
-        let s = self
-            .cum
-            .partition_point(|&c| c <= cum_freq)
-            .saturating_sub(1)
-            .min(255);
-        (s as u8, self.info(s as u8))
+        // One indexed load instead of a binary search over the cumulative
+        // table (see the `inv` field docs). `cum_freq` is masked to
+        // `PROB_SCALE` by the caller, but clamp defensively so a
+        // direct caller cannot index out of bounds.
+        let slot = (cum_freq as usize).min(PROB_SCALE as usize - 1);
+        let s = self.inv[slot];
+        (s, self.info(s))
     }
 }
 
@@ -404,6 +429,31 @@ mod tests {
             // Every symbol keeps a strictly positive frequency.
             for s in 0..256u32 {
                 assert!(m.cum[s as usize + 1] > m.cum[s as usize]);
+            }
+        }
+    }
+
+    /// The flat inverse table must agree with the original "largest symbol `s`
+    /// with `cum[s] <= cum_freq`" definition for **every** slot — the
+    /// bit-exactness guard for the `find` optimisation, since a wrong symbol
+    /// here would silently corrupt every decoded stream.
+    #[test]
+    fn skewed_model_inverse_table_matches_cumulative_search() {
+        for skew in [0.0f64, 0.5, 1.0, 2.0, 4.0] {
+            let m = SkewedModel::new(skew);
+            for c in 0..PROB_SCALE {
+                let reference = m
+                    .cum
+                    .partition_point(|&v| v <= c)
+                    .saturating_sub(1)
+                    .min(255);
+                let (symbol, info) = m.find(c);
+                assert_eq!(symbol as usize, reference, "skew={skew} cum_freq={c}");
+                // The slot must lie in the symbol's own range, and the reported
+                // (start, freq) must bracket `c`.
+                assert!(info.start <= c && c < info.start + info.freq);
+                assert_eq!(info.start, m.cum[reference]);
+                assert_eq!(info.freq, m.cum[reference + 1] - m.cum[reference]);
             }
         }
     }

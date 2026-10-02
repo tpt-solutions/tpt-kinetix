@@ -2,7 +2,9 @@
 //! splitting), reference frame management, frame-context probability
 //! adaptation and the [`tpt_kinetix_core`] decode API.
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use tpt_kinetix_core::{
     capabilities::DecoderCapabilities, error::KinetixError, frame::VideoFrame, packet::Packet,
@@ -90,6 +92,11 @@ impl Vp9Decoder {
                 "vp9: decoder is not validated pixel-exact yet; see capabilities()".to_string(),
             ));
         }
+        // One environment scan per packet: it flips `dbg_env`'s fast path on or
+        // off for every `TPT_VP9_*` lookup made while decoding this packet (see
+        // `crate::dbg_env`). Re-read per packet, not once per decoder, so
+        // toggling a switch between frames still takes effect.
+        crate::dbg_env::refresh();
         let mut last_out = None;
         for chunk in split_superframes(&packet.data) {
             if let Some(frame) = self.decode_frame_chunk(&chunk)? {
@@ -154,6 +161,15 @@ impl Vp9Decoder {
 
         // probability context selection / reset
         let c = h.frame_context_idx;
+        PHASES.with(|p| {
+            if crate::dbg_env::var_os("TPT_VP9_PHASE").is_some() {
+                let f = p.frames.get() + 1;
+                p.frames.set(f);
+                if f % 300 == 0 {
+                    p.print_and_reset();
+                }
+            }
+        });
         if keyframe || h.error_resilient || (h.intra_only && h.reset_frame_context == 3) {
             for ctx in &mut self.frame_ctxs {
                 *ctx = FrameCtx::default_ctx();
@@ -170,7 +186,9 @@ impl Vp9Decoder {
         let ch_end = h.compressed_header_offset + h.compressed_header_size;
         let ch = &data[h.compressed_header_offset..ch_end];
         let mut bc = BoolDecoder::new(ch)?;
-        parse_compressed_header(&mut bc, &mut h, &mut probs, &self.frame_ctxs[c])?;
+        timed(&|p| &p.compressed_header_ns, || {
+            parse_compressed_header(&mut bc, &mut h, &mut probs, &self.frame_ctxs[c])
+        })?;
 
         let seg = derive_segment_features(&h);
 
@@ -299,28 +317,30 @@ impl Vp9Decoder {
                     );
                     tile.tile_row_start = row_start;
                     tile.tile_row_end = row_end;
-                    tile.decode_tile(&mut tbc)?;
+                    timed(&|p| &p.tile_ns, || tile.decode_tile(&mut tbc))?;
                 }
             }
         }
 
         // probability adaptation
         if h.refresh_frame_context && !h.frame_parallel_decoding_mode {
-            adapt_probs(
-                &mut self.frame_ctxs[c],
-                &counts,
-                &probs,
-                keyframe || h.intra_only,
-                self.prev_was_keyframe,
-                &h,
-            );
+            timed(&|p| &p.adapt_ns, || {
+                adapt_probs(
+                    &mut self.frame_ctxs[c],
+                    &counts,
+                    &probs,
+                    keyframe || h.intra_only,
+                    self.prev_was_keyframe,
+                    &h,
+                );
+            });
         }
 
         // loop filter
-        if std::env::var_os("TPT_VP9_TRACE").is_some() {
+        if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
             eprintln!("FRAMEMARK");
         }
-        if let Some(spec) = std::env::var_os("TPT_VP9_BUF") {
+        if let Some(spec) = crate::dbg_env::var_os("TPT_VP9_BUF") {
             // debug: dump raw strided buffer rows, e.g. TPT_VP9_BUF=60:84:56:104
             // (y0:y1:x0:x1, exclusive row end), before the loop filter
             let s = spec.to_string_lossy().to_string();
@@ -335,16 +355,18 @@ impl Vp9Decoder {
                 }
             }
         }
-        if h.loop_filter.level != 0 && std::env::var_os("TPT_VP9_NO_LF").is_none() {
+        if h.loop_filter.level != 0 && crate::dbg_env::var_os("TPT_VP9_NO_LF").is_none() {
             let luts = FilterLut::new(h.loop_filter.sharpness);
-            for sb_row in 0..state.frame.sb64_rows() {
-                for sb_col in 0..state.frame.sb64_cols {
-                    let sf = state.lflvl[sb_row * state.frame.sb64_cols + sb_col].clone();
-                    loopfilter_sb(&mut state.frame, &sf, &luts, sb_row, sb_col);
+            timed(&|p| &p.lf_ns, || {
+                for sb_row in 0..state.frame.sb64_rows() {
+                    for sb_col in 0..state.frame.sb64_cols {
+                        let sf = state.lflvl[sb_row * state.frame.sb64_cols + sb_col].clone();
+                        loopfilter_sb(&mut state.frame, &sf, &luts, sb_row, sb_col);
+                    }
                 }
-            }
+            });
         }
-        if let Some(spec) = std::env::var_os("TPT_VP9_BUF_POST") {
+        if let Some(spec) = crate::dbg_env::var_os("TPT_VP9_BUF_POST") {
             // same dump syntax, after the loop filter
             let s = spec.to_string_lossy().to_string();
             let v: Vec<usize> = s.split(':').filter_map(|t| t.parse().ok()).collect();
@@ -452,6 +474,68 @@ fn split_superframes(data: &[u8]) -> Vec<Vec<u8>> {
         out
     } else {
         vec![data.to_vec()]
+    }
+}
+
+/// Env-gated phase timing (`TPT_VP9_PHASE=1`), the admin-free stand-in for a
+/// sampling profiler (todo-perf.md Phase 2). Accumulates wall time per decode
+/// phase in thread-local counters — VP9 decode is single-threaded — and prints
+/// a per-frame summary to stderr.
+#[derive(Default)]
+pub struct PhaseTimers {
+    pub header_ns: Cell<u64>,
+    pub compressed_header_ns: Cell<u64>,
+    pub tile_ns: Cell<u64>,
+    pub adapt_ns: Cell<u64>,
+    pub lf_ns: Cell<u64>,
+    pub frames: Cell<u64>,
+}
+
+impl PhaseTimers {
+    fn print_and_reset(&self) {
+        let f = self.frames.get().max(1) as f64;
+        let us = |ns: u64| ns as f64 / 1000.0 / f;
+        eprintln!(
+            "vp9 phases (per-frame avg over {}): header {:.0}us compressed-header {:.0}us tiles {:.0}us adapt {:.0}us loop-filter {:.0}us",
+            self.frames.get(),
+            us(self.header_ns.get()),
+            us(self.compressed_header_ns.get()),
+            us(self.tile_ns.get()),
+            us(self.adapt_ns.get()),
+            us(self.lf_ns.get()),
+        );
+        self.header_ns.set(0);
+        self.compressed_header_ns.set(0);
+        self.tile_ns.set(0);
+        self.adapt_ns.set(0);
+        self.lf_ns.set(0);
+        self.frames.set(0);
+    }
+}
+
+thread_local! {
+    static PHASES: PhaseTimers = PhaseTimers::default();
+}
+
+/// Run `f`, accumulating its wall time into the named phase counter.
+#[inline]
+fn timed<R>(ns: &dyn Fn(&PhaseTimers) -> &Cell<u64>, f: impl FnOnce() -> R) -> R {
+    let enabled = crate::dbg_env::var_os("TPT_VP9_PHASE").is_some();
+    if !enabled {
+        return f();
+    }
+    let t = Instant::now();
+    let out = f();
+    let dt = t.elapsed().as_nanos() as u64;
+    PHASES.with(|p| ns(p).set(ns(p).get().wrapping_add(dt)));
+    out
+}
+
+/// Print (and reset) the accumulated phase timings. Called by the decoder at
+/// end of stream / on demand.
+pub fn report_phases() {
+    if crate::dbg_env::var_os("TPT_VP9_PHASE").is_some() {
+        PHASES.with(|p| p.print_and_reset());
     }
 }
 

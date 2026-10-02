@@ -318,8 +318,15 @@ fn chunk_range(total: usize, n_slices: usize, slice: usize) -> std::ops::Range<u
 }
 
 /// Which slice owns global block index `bi` (inverse of [`chunk_range`]).
+///
+/// The plain `bi * n_slices / total` floor formula is NOT the inverse of
+/// `chunk_range` whenever `total % n_slices != 0`: boundaries computed as
+/// `s * total / n_slices` (floor) leave gaps the floor formula assigns to the
+/// wrong slice, which desynced every decode at resolutions like 320x240
+/// (1200 blocks / 64 slices). `ceil((bi+1) * n / total) - 1` is the exact
+/// inverse.
 fn slice_index_for(total: usize, n_slices: usize, bi: usize) -> usize {
-    (bi * n_slices) / total
+    ((bi + 1) * n_slices).div_ceil(total) - 1
 }
 
 /// Reconstruct one frame from per-slice, rANS-decoded block syntax.
@@ -373,7 +380,11 @@ pub fn reconstruct_frame(
             let slice = slice_index_for(chroma_total, n_slices, bi);
             let local = bi - chunk_range(chroma_total, n_slices, slice).start;
             let luma_in_slice = chunk_range(luma_total, n_slices, slice).len();
-            let idx = luma_in_slice + plane_idx * luma_in_slice + local;
+            let chroma_in_slice = chunk_range(chroma_total, n_slices, slice).len();
+            // Slice layout is [luma chunk][Cb chunk][Cr chunk]; only for
+            // 4:2:0 with an 8px luma block do the chunk sizes coincide, so
+            // the Cr offset must use the chroma chunk length, not luma's.
+            let idx = luma_in_slice + plane_idx * chroma_in_slice + local;
             let block = slices[slice]
                 .get(idx)
                 .ok_or_else(|| KinetixError::Parse("chroma block index out of range".into()))?;
@@ -1058,6 +1069,97 @@ mod tests {
         assert_eq!(decoded.luma, luma, "luma must round-trip at qp=0");
         assert_eq!(decoded.cb, cb);
         assert_eq!(decoded.cr, cr);
+    }
+
+    /// Regression: with a block total that does not divide evenly across the
+    /// slice grid (320x240 -> 1200 blocks / 64 slices), `slice_index_for`'s
+    /// floor formula disagreed with `chunk_range` at chunk boundaries and the
+    /// decoder read blocks from the wrong slice ("chroma block index out of
+    /// range"). The exact-inverse ceil form fixed it; this pins 320x240 (and
+    /// the uneven 160x120) bit-exactly at qp 0.
+    #[test]
+    fn uneven_slice_chunks_round_trip_at_qp0() {
+        for (w, h) in [(320u32, 240u32), (160, 120)] {
+            let mut s = seq();
+            s.slice_grid_cols = 8;
+            s.slice_grid_rows = 8;
+            s.num_rans_streams = 64;
+            let f = FrameHeader {
+                frame_type: FrameType::Key,
+                width: w as u16,
+                height: h as u16,
+                base_qp: 0,
+                ref_frame_count: 0,
+                deadline_ms: 16,
+                force_idr: true,
+                foveation_center_x: (w / 2) as u16,
+                foveation_center_y: (h / 2) as u16,
+                // The parser always reads refresh_mask_len() mask bytes.
+                intra_refresh_mask: vec![0; s.refresh_mask_len()],
+                payload_len: 0,
+            };
+            let n = (w * h) as usize;
+            let luma: Vec<u8> = (0..n)
+                .map(|i| {
+                    let x = (i % w as usize) as u32;
+                    let y = (i / w as usize) as u32;
+                    ((x * 7 % 256) as u8) ^ ((y * 13 % 256) as u8)
+                })
+                .collect();
+            let cw = (w as usize / 2) * (h as usize / 2);
+            let cb: Vec<u8> = (0..cw).map(|i| (i * 11 % 256) as u8).collect();
+            let cr: Vec<u8> = (0..cw).map(|i| (i * 29 % 256) as u8).collect();
+            let src = FrameBuffer::from_yuv420(w, h, luma.clone(), cb.clone(), cr.clone()).unwrap();
+            let slices = encode_frame_slices(&s, &f, &src, None).unwrap();
+            let decoded = decode_frame_payload(&s, &f, None, &slices).unwrap();
+            assert_eq!(decoded.luma, luma, "{w}x{h}: luma must round-trip at qp=0");
+            assert_eq!(decoded.cb, cb, "{w}x{h}: chroma must round-trip at qp=0");
+            assert_eq!(decoded.cr, cr);
+        }
+    }
+
+    /// Regression: frames whose block grid is smaller than the slice grid
+    /// (48x48 -> 36 blocks < 64 slices) used to index empty slices and panic.
+    /// Most slices legitimately carry zero blocks; the exact-inverse
+    /// [`slice_index_for`] routes each block to its owning slice.
+    #[test]
+    fn sub_slice_grid_frame_round_trips() {
+        let mut s = seq();
+        s.slice_grid_cols = 8;
+        s.slice_grid_rows = 8;
+        s.num_rans_streams = 64;
+        let f = FrameHeader {
+            frame_type: FrameType::Key,
+            width: 48,
+            height: 48,
+            base_qp: 0,
+            ref_frame_count: 0,
+            deadline_ms: 16,
+            force_idr: true,
+            foveation_center_x: 24,
+            foveation_center_y: 24,
+            intra_refresh_mask: vec![0; s.refresh_mask_len()],
+            payload_len: 0,
+        };
+        let luma: Vec<u8> = (0..48 * 48)
+            .map(|i| ((i % 48) * 5 + (i / 48) * 3) as u8)
+            .collect();
+        let src = FrameBuffer::from_yuv420(
+            48,
+            48,
+            luma.clone(),
+            vec![128u8; 24 * 24],
+            vec![128u8; 24 * 24],
+        )
+        .unwrap();
+        let slices = encode_frame_slices(&s, &f, &src, None).unwrap();
+        assert_eq!(
+            slices.len(),
+            64,
+            "one payload per slice, including empty ones"
+        );
+        let decoded = decode_frame_payload(&s, &f, None, &slices).unwrap();
+        assert_eq!(decoded.luma, luma, "luma must round-trip at qp=0");
     }
 
     #[test]
