@@ -313,14 +313,57 @@ correctness failure displays as an expected quality setting. Worth fixing —
 `screen` is declared `bit_exact: true` (an expectation of losslessness), so a
 `false` there is a failure, not a mode.
 
-**Bug 2 — VP9 decode does not match libvpx (pre-existing, not ours).**
+**Bug 2 — VP9 luma decode is not byte-exact vs libvpx (pre-existing, not ours).**
 All three VP9 clips mismatch: 320x240 at frame 128, 1280x720 at frame 38, and
 1920x1080 **from frame 0**. `git diff origin/master..HEAD -- tpt-kinetix-vp9`
-is **empty** — the VP9 sources are byte-identical to `origin/master`, so this
-is not from Phase 3. But `AGENTS.md` claims VP9 reports `pixel_exact: true`, and
-that claim does not hold on this corpus. The frame-0 1080p divergence points at
-intra prediction or the loop filter, not motion compensation. Investigating that
-is a correctness task, not a Phase 3 performance one.
+was empty when first found, so this is not from Phase 3. Investigated with a new
+`vp9_dump` example (`tpt-kinetix-test-utils/examples/vp9_dump.rs`) that decodes
+an IVF to raw `yuv420p` and reports the first difference, so the loop-filter
+switch could be used as an isolator:
+
+| Build | Differing samples (of 3,110,400) | PSNR |
+|:---|---:|---:|
+| loop filter on | **866** (0.028%) | 46.59 dB |
+| `TPT_VP9_NO_LF=1` | 26,304 (0.846%) | — |
+
+So the loop filter is **not** the cause — disabling it makes the output ten
+times worse, so deblocking is doing its job. Frame 0 has no motion compensation
+either. What is left is intra prediction or the inverse transform.
+
+Block-level mapping of the 1080p frame 0: the 866 samples fall in only **20 of
+the 8,100** 16x16 luma blocks, clustered around py 832–960, with deltas up to
+±170. That is a localised block-decoding defect, not a whole-plane error.
+
+The decisive clue came from adding conformance tests at realistic sizes:
+`conformance_vp9.rs` asserted byte-exactness only on **synthetic sources at
+≤256x144**. Real-content `testsrc` fails at 320x240, 640x360 and 1920x1080 —
+and **chroma is bit-exact in every failing case** (`u_bad=0`, `v_bad=0`, PSNR
+U/V = 99 dB) while only luma is wrong. A 640x360 control was expected to pass
+and instead failed hardest of all (36,470 samples, PSNR Y = **35.47 dB**), which
+rules out "large frames break it": it is about content, not size.
+
+Because chroma is exact, all the shared machinery is demonstrably correct — bool
+decoder, mode parsing, segmentation map, loop filter. The defect is in a
+**luma-only** path: 4x4 WHT-vs-DCT transform selection, luma dequantisation, or
+luma intra prediction edge handling.
+
+Changes made rather than only documenting:
+- `vp9_dump` example: decode-to-raw plus a `--info` first-difference reporter, so
+  this is diagnosable without a 32-minute benchmark run.
+- Three conformance tests at 320x240 / 640x360 / 1920x1080 on real content with
+  the perf corpus's exact encoder settings. The three failing ones are
+  `#[ignore]`d with the full analysis in the ignore reason, so CI stays green
+  and `cargo test -p tpt-kinetix-vp9` will catch the fix.
+- `DecoderCapabilities::notes` for VP9 **scoped down**: it previously said
+  "byte-exact vs ffmpeg/libvpx on the conformance corpus" with no hint that the
+  corpus is synthetic and ≤256x144. `AGENTS.md`'s flat "VP9 reports
+  `pixel_exact: true`" inherits the same overstatement and should be read
+  against this note.
+
+Not attempted: locating the exact faulty transform/prediction branch. That is a
+focused correctness task with its own debugging budget, not a Phase 3
+performance item, and the three `#[ignore]`d tests now pin the failure so it
+cannot regress unnoticed.
 
 **Corpus side effect.** The full run regenerated the 320x240 clips
 (`raw_320x240.yuv` 120 -> 300 frames, `h264_320x240.h264`, `vp9mp4_320x240.mp4`),

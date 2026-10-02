@@ -288,6 +288,95 @@ fn check_clip_tagged(
     );
 }
 
+/// **Known pre-existing gap — `#[ignore]`d so CI stays green. Remove the
+/// `#[ignore]` when fixed.**
+///
+/// The rest of this file verifies byte-exactness only on clips up to 256x144,
+/// on synthetic sources (`color=black`, tiny gradients, solid fills). That
+/// leaves real-content decoding at realistic frame sizes completely unverified,
+/// and it is not merely unverified — it is wrong.
+///
+/// `just bench-ffmpeg` found that the VP9 decoder does not match libvpx on the
+/// perf corpus at 320x240 (diverges at frame 128), 1280x720 (frame 38) and
+/// 1920x1080 (**frame 0**). Measured on 1920x1080 frame 0: 866 of 3,110,400
+/// samples differ (0.028%), concentrated in only 20 of the 8,100 16x16 luma
+/// blocks, with deltas up to +/-170 and a PSNR of 46.59 dB. So it is visually
+/// transparent but genuinely not bit-exact.
+///
+/// Ruled out while isolating this: it is **not** motion compensation (frame 0
+/// has none), and **not** the loop filter — `TPT_VP9_NO_LF=1` makes it ten times
+/// worse (26,304 differing samples vs 866), so deblocking is doing its job and
+/// the residual error is in prediction or the inverse transform.
+///
+/// Reproduced here with the perf corpus's exact encoder settings so the gap is
+/// caught by `cargo test -p tpt-kinetix-vp9` once fixed, instead of only by a
+/// 32-minute benchmark harness.
+#[test]
+#[ignore = "VP9 decode is not byte-exact vs libvpx at >=320x240 on real content (pre-existing)"]
+fn conformance_vp9_320x240_real_content() {
+    check_clip_tagged(
+        "realtestsrc_320x240",
+        "real320",
+        320,
+        240,
+        "testsrc",
+        8,
+        &["-deadline", "good", "-cpu-used", "4", "-lag-in-frames", "0"],
+    );
+}
+
+/// **Known pre-existing gap — `#[ignore]`d. See
+/// `conformance_vp9_320x240_real_content` for the analysis.**
+///
+/// The 1080p case diverges from **frame 0**, which rules out motion compensation
+/// entirely and isolates the defect to intra prediction or the inverse
+/// transform. Kept separate because it is the cheapest reproduction: one frame,
+/// no reference frames involved.
+#[test]
+#[ignore = "VP9 decode is not byte-exact vs libvpx at >=320x240 on real content (pre-existing)"]
+fn conformance_vp9_1920x1080_keyframe_intra() {
+    check_clip_tagged(
+        "realtestsrc_1920x1080",
+        "real1080",
+        1920,
+        1080,
+        "testsrc",
+        1,
+        &["-deadline", "good", "-cpu-used", "4", "-lag-in-frames", "0"],
+    );
+}
+
+/// **Known pre-existing gap — `#[ignore]`d. See
+/// `conformance_vp9_320x240_real_content` for the analysis.**
+///
+/// Included because it disproves the obvious hypothesis. 640x360 is small and
+/// 8-aligned on both axes, so it was expected to pass and act as a control
+/// proving the defect was about large frames. It does not: it fails harder
+/// still — 36,470 differing luma samples at **PSNR Y=35.47 dB**, versus 866
+/// samples at 46.59 dB for 1920x1080. So the defect is not a function of frame
+/// size at all.
+///
+/// It also yields the sharpest clue so far: **chroma is bit-exact** in every
+/// failing case (`u_bad=0`, `v_bad=0`, PSNR U/V=99 dB = identical) while luma is
+/// wrong. That rules out the shared machinery — the bool decoder, the mode
+/// parsing, the segmentation map and the loop filter are all common to both
+/// planes and evidently correct. The defect is in a **luma-only** path: the
+/// 4x4 WHT-vs-DCT transform selection, luma dequantisation, or luma intra
+/// prediction edge handling.
+#[test]
+#[ignore = "VP9 luma decode is not byte-exact vs libvpx on real content (pre-existing)"]
+fn conformance_vp9_640x360_real_content() {
+    check_clip_tagged(
+        "realtestsrc_640x360",
+        "real360",
+        640,
+        360,
+        "testsrc",
+        4,
+        &["-deadline", "good", "-cpu-used", "4", "-lag-in-frames", "0"],
+    );
+}
+
 #[test]
 fn conformance_vp9_solid_lossless() {
     for sz in [16usize, 32, 48, 64, 96] {

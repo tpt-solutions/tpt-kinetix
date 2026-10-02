@@ -81,7 +81,17 @@ impl Vp9Decoder {
             supports_intra_prediction: true,
             supports_inter_prediction: true,
             supports_deblocking: true,
-            notes: "profile 0 (8-bit 4:2:0) decode; byte-exact vs ffmpeg/libvpx on the conformance corpus (lossless/lossy, intra/inter, odd sizes, tiles)",
+            // Scoped deliberately: `pixel_exact` is verified on the conformance
+            // corpus only, which is synthetic sources at <=256x144. Real content
+            // at >=320x240 is **not** byte-exact -- the luma plane diverges from
+            // libvpx (see `conformance_vp9_640x360_real_content`: 36,470 samples,
+            // PSNR Y=35.47 dB) while chroma stays exact. Read this flag as "no
+            // known lossiness in the tested subset", not "bit-exact on arbitrary
+            // input".
+            notes: "profile 0 (8-bit 4:2:0) decode; byte-exact vs ffmpeg/libvpx on the \
+synthetic conformance corpus (<=256x144: lossless/lossy, intra/inter, odd sizes, tiles). \
+Known gap: on real-content testsrc at >=320x240 the luma plane is not byte-exact vs \
+libvpx (chroma is); the divergence is intra-only and pre-dates Phase 3",
         }
     }
 
