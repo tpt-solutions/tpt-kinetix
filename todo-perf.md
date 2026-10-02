@@ -258,6 +258,76 @@ roughly ±5%**, which is why every change in this phase was A/B'd same-session
 all). It also retroactively explains the -5..-10% that Criterion reported
 against the committed baseline in the very first session of this phase.
 
+### Phase 3 closing — ffmpeg comparison, and two correctness bugs found DONE 2026-10-03
+
+`just bench-ffmpeg 2026-10-03` (full, ~32 min) refreshed the Kinetix-vs-ffmpeg
+comparison that `docs/PERFORMANCE.md` had been carrying since 2026-10-02 — i.e.
+since *before* the `8291e0b` bug fixes, so those ratios described the broken
+decoders too. New file `docs/perf/ffmpeg-compare-2026-10-03.json`.
+
+Note the tool did the right thing under pressure: for every VP9 clip it reports
+`verified: false` and leaves `ratio_kinetix_over_ffmpeg_1thread` **empty** rather
+than publishing a speed number for output that does not match the reference.
+Verify-before-time is doing its job.
+
+**Where Kinetix stands against ffmpeg (verified rows only):**
+
+| Clip | Kinetix | ffmpeg `-threads 1` | ffmpeg default |
+|:---|---:|---:|---:|
+| av1/fate (median) | 22–33 MPix/s | 159–425 MPix/s | 258–1080 MPix/s |
+| vp9 320x240 | 159.6 | 914.3 | 1184.6 |
+| vp9 1280x720 | 240.8 | 2032.9 | 5386.0 |
+
+Kinetix is roughly **6–9x slower than single-threaded libdav1d/libvpx** on these
+clips. That is the honest headline: Phase 3 made a real dent in a large gap, it
+did not close it. Against the original codecs' nearest standard references the
+gap is far wider still (e.g. lossless vs FFV1: 3.36 s enc / 3.52 s dec against
+0.220 s / 0.105 s) — those codecs are not competing with libvpx, they are a
+research target.
+
+**Bug 1 — screen decode corrupts partial edge blocks (pre-existing).**
+`ffmpeg_compare` reports `screen: bit-exact=false` while *expecting*
+`bit-exact=true`. `tpt-kinetix-screen` had **no integration tests at all**, so
+`5358e2c` changed 367 lines with no correctness net. Added
+`tpt-kinetix-screen/tests/roundtrip.rs`, which reproduces it and localises it
+exactly:
+
+| Geometry | aligned to the 16px block? | result |
+|:---|:---|:---|
+| 320x240, 1280x720 | both axes | **bit-exact** |
+| 1920x1080 | height 67.5 blocks | fails at `(0, 1072)` |
+| 67x53 | width 4.19 blocks | fails at `(64, 0)` |
+
+Both failures are the first *partial* block, reconstructed as zeros. Confirmed
+**pre-existing**: `git checkout 5358e2c^ -- tpt-kinetix-screen/src` reproduces
+identical mismatches at identical positions. Every benchmark and comparison clip
+in the repo uses block-aligned dimensions, which is why it went unnoticed.
+
+The failing cases are `#[ignore]`d (with the diagnosis in the `ignore` reason) so
+CI stays green and the bug stays documented and ready to flip when fixed; the
+aligned cases run as real regression guards.
+
+Note also a **reporting** bug found alongside it: `ffmpeg_compare.rs:2452`
+renders a failed screen bit-exact as `"lossy"` rather than `MISMATCH`, so a
+correctness failure displays as an expected quality setting. Worth fixing —
+`screen` is declared `bit_exact: true` (an expectation of losslessness), so a
+`false` there is a failure, not a mode.
+
+**Bug 2 — VP9 decode does not match libvpx (pre-existing, not ours).**
+All three VP9 clips mismatch: 320x240 at frame 128, 1280x720 at frame 38, and
+1920x1080 **from frame 0**. `git diff origin/master..HEAD -- tpt-kinetix-vp9`
+is **empty** — the VP9 sources are byte-identical to `origin/master`, so this
+is not from Phase 3. But `AGENTS.md` claims VP9 reports `pixel_exact: true`, and
+that claim does not hold on this corpus. The frame-0 1080p divergence points at
+intra prediction or the loop filter, not motion compensation. Investigating that
+is a correctness task, not a Phase 3 performance one.
+
+**Corpus side effect.** The full run regenerated the 320x240 clips
+(`raw_320x240.yuv` 120 -> 300 frames, `h264_320x240.h264`, `vp9mp4_320x240.mp4`),
+normalising a previously mixed quick/full state. `target/perf-corpus/` is
+gitignored so nothing is committed, but note the committed manifest had been in
+a half-`--quick` state — worth being aware of when comparing against older runs.
+
 ### Phase 3 closing — baseline re-recorded, and why the old one is void DONE 2026-10-03
 
 Phase 3's last item was re-recording `docs/perf/baseline-2026-10-02.json`. Doing

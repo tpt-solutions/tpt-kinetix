@@ -1,0 +1,463 @@
+{
+  "date": "2026-10-02",
+  "decode": [
+    {
+      "clip": "testsrc 320x240 (libaom)",
+      "codec": "av1",
+      "decode_passes": 20,
+      "ffmpeg_1thread_maxrss_kb": 35016,
+      "ffmpeg_1thread_mpxs": 842.41,
+      "ffmpeg_1thread_s": 0.547,
+      "ffmpeg_default_mpxs": 842.41,
+      "ffmpeg_default_s": 0.547,
+      "file": "target/perf-corpus/av1_320x240.ivf",
+      "kinetix_frames": 300,
+      "kinetix_mpxs": 28.14,
+      "kinetix_s": 16.375,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.03,
+      "verified": true
+    },
+    {
+      "clip": "testsrc 320x240 (libvpx)",
+      "codec": "vp9",
+      "decode_passes": 20,
+      "ffmpeg_1thread_maxrss_kb": 33736,
+      "ffmpeg_1thread_mpxs": 914.29,
+      "ffmpeg_1thread_s": 0.504,
+      "ffmpeg_default_mpxs": 1184.58,
+      "ffmpeg_default_s": 0.389,
+      "file": "target/perf-corpus/vp9_320x240.ivf",
+      "kinetix_frames": 300,
+      "kinetix_mpxs": 159.56,
+      "kinetix_s": 2.888,
+      "ratio_kinetix_over_ffmpeg_1thread": null,
+      "verified": false
+    },
+    {
+      "clip": "testsrc 320x240 (libx264)",
+      "codec": "h264",
+      "decode_passes": 20,
+      "ffmpeg_1thread_maxrss_kb": 35940,
+      "ffmpeg_1thread_mpxs": 1467.52,
+      "ffmpeg_1thread_s": 0.314,
+      "ffmpeg_default_mpxs": 2742.86,
+      "ffmpeg_default_s": 0.168,
+      "file": "target/perf-corpus/h264_320x240.h264",
+      "kinetix_frames": 300,
+      "kinetix_mpxs": 32.21,
+      "kinetix_s": 14.305,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.02,
+      "verified": true
+    },
+    {
+      "clip": "testsrc 1280x720 (libaom)",
+      "codec": "av1",
+      "decode_passes": 5,
+      "ffmpeg_1thread_maxrss_kb": 49196,
+      "ffmpeg_1thread_mpxs": 1370.98,
+      "ffmpeg_1thread_s": 0.605,
+      "ffmpeg_default_mpxs": 3559.83,
+      "ffmpeg_default_s": 0.233,
+      "file": "target/perf-corpus/av1_1280x720.ivf",
+      "kinetix_frames": 180,
+      "kinetix_mpxs": 28.56,
+      "kinetix_s": 29.042,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.02,
+      "verified": true
+    },
+    {
+      "clip": "testsrc 1280x720 (libvpx)",
+      "codec": "vp9",
+      "decode_passes": 5,
+      "ffmpeg_1thread_maxrss_kb": 40480,
+      "ffmpeg_1thread_mpxs": 2032.94,
+      "ffmpeg_1thread_s": 0.408,
+      "ffmpeg_default_mpxs": 5385.97,
+      "ffmpeg_default_s": 0.154,
+      "file": "target/perf-corpus/vp9_1280x720.ivf",
+      "kinetix_frames": 180,
+      "kinetix_mpxs": 240.78,
+      "kinetix_s": 3.445,
+      "ratio_kinetix_over_ffmpeg_1thread": null,
+      "verified": false
+    },
+    {
+      "clip": "testsrc 1280x720 (libx264)",
+      "codec": "h264",
+      "decode_passes": 5,
+      "ffmpeg_1thread_maxrss_kb": 45984,
+      "ffmpeg_1thread_mpxs": 1965.5,
+      "ffmpeg_1thread_s": 0.422,
+      "ffmpeg_default_mpxs": 4065.88,
+      "ffmpeg_default_s": 0.204,
+      "file": "target/perf-corpus/h264_1280x720.h264",
+      "kinetix_frames": 180,
+      "kinetix_mpxs": 23.56,
+      "kinetix_s": 35.199,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.01,
+      "verified": true
+    },
+    {
+      "clip": "testsrc 1920x1080 (libaom)",
+      "codec": "av1",
+      "decode_passes": 3,
+      "ffmpeg_1thread_maxrss_kb": 68804,
+      "ffmpeg_1thread_mpxs": 1568.27,
+      "ffmpeg_1thread_s": 0.476,
+      "ffmpeg_default_mpxs": 3732.48,
+      "ffmpeg_default_s": 0.2,
+      "file": "target/perf-corpus/av1_1920x1080.ivf",
+      "kinetix_frames": 120,
+      "kinetix_mpxs": 33.3,
+      "kinetix_s": 22.415,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.02,
+      "verified": true
+    },
+    {
+      "clip": "testsrc 1920x1080 (libvpx)",
+      "codec": "vp9",
+      "decode_passes": 3,
+      "ffmpeg_1thread_maxrss_kb": 49896,
+      "ffmpeg_1thread_mpxs": 2120.73,
+      "ffmpeg_1thread_s": 0.352,
+      "ffmpeg_default_mpxs": 5010.04,
+      "ffmpeg_default_s": 0.149,
+      "file": "target/perf-corpus/vp9_1920x1080.ivf",
+      "kinetix_frames": 120,
+      "kinetix_mpxs": 224.89,
+      "kinetix_s": 3.319,
+      "ratio_kinetix_over_ffmpeg_1thread": null,
+      "verified": false
+    },
+    {
+      "clip": "testsrc 1920x1080 (libx264)",
+      "codec": "h264",
+      "decode_passes": 3,
+      "ffmpeg_1thread_maxrss_kb": 59836,
+      "ffmpeg_1thread_mpxs": 1919.01,
+      "ffmpeg_1thread_s": 0.389,
+      "ffmpeg_default_mpxs": 3770.18,
+      "ffmpeg_default_s": 0.198,
+      "file": "target/perf-corpus/h264_1920x1080.h264",
+      "kinetix_frames": 120,
+      "kinetix_mpxs": 22.19,
+      "kinetix_s": 33.644,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.01,
+      "verified": true
+    },
+    {
+      "clip": "fate/decode_model",
+      "codec": "av1",
+      "decode_passes": 10,
+      "ffmpeg_1thread_maxrss_kb": 33860,
+      "ffmpeg_1thread_mpxs": 164.57,
+      "ffmpeg_1thread_s": 0.035,
+      "ffmpeg_default_mpxs": 240.0,
+      "ffmpeg_default_s": 0.024,
+      "file": "fixtures/av1-fate/decode_model.ivf",
+      "kinetix_frames": 24,
+      "kinetix_mpxs": 13.67,
+      "kinetix_s": 0.421,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.08,
+      "verified": true
+    },
+    {
+      "clip": "fate/film_grain",
+      "codec": "av1",
+      "decode_passes": 10,
+      "ffmpeg_1thread_maxrss_kb": 35832,
+      "ffmpeg_1thread_mpxs": 698.18,
+      "ffmpeg_1thread_s": 0.022,
+      "ffmpeg_default_mpxs": 960.0,
+      "ffmpeg_default_s": 0.016,
+      "file": "fixtures/av1-fate/film_grain.ivf",
+      "kinetix_frames": 10,
+      "kinetix_mpxs": 37.31,
+      "kinetix_s": 0.412,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.05,
+      "verified": true
+    },
+    {
+      "clip": "fate/frames_refs_short_signaling",
+      "codec": "av1",
+      "decode_passes": 10,
+      "ffmpeg_1thread_maxrss_kb": 37400,
+      "ffmpeg_1thread_mpxs": 299.22,
+      "ffmpeg_1thread_s": 0.385,
+      "ffmpeg_default_mpxs": 685.71,
+      "ffmpeg_default_s": 0.168,
+      "file": "fixtures/av1-fate/frames_refs_short_signaling.ivf",
+      "kinetix_frames": 50,
+      "kinetix_mpxs": 17.96,
+      "kinetix_s": 6.416,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.06,
+      "verified": true
+    },
+    {
+      "clip": "fate/non_uniform_tiling",
+      "codec": "av1",
+      "decode_passes": 10,
+      "ffmpeg_1thread_maxrss_kb": 36756,
+      "ffmpeg_1thread_mpxs": 424.92,
+      "ffmpeg_1thread_s": 0.122,
+      "ffmpeg_default_mpxs": 1080.0,
+      "ffmpeg_default_s": 0.048,
+      "file": "fixtures/av1-fate/non_uniform_tiling.ivf",
+      "kinetix_frames": 24,
+      "kinetix_mpxs": 32.99,
+      "kinetix_s": 1.571,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.08,
+      "verified": true
+    },
+    {
+      "clip": "fate/seq_hdr_op_param_info",
+      "codec": "av1",
+      "decode_passes": 10,
+      "ffmpeg_1thread_maxrss_kb": 34552,
+      "ffmpeg_1thread_mpxs": 158.79,
+      "ffmpeg_1thread_s": 0.227,
+      "ffmpeg_default_mpxs": 257.46,
+      "ffmpeg_default_s": 0.14,
+      "file": "fixtures/av1-fate/seq_hdr_op_param_info.ivf",
+      "kinetix_frames": 64,
+      "kinetix_mpxs": 12.92,
+      "kinetix_s": 2.789,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.08,
+      "verified": true
+    },
+    {
+      "clip": "fate/switch_frame",
+      "codec": "av1",
+      "decode_passes": 10,
+      "ffmpeg_1thread_maxrss_kb": 43940,
+      "ffmpeg_1thread_mpxs": 187.29,
+      "ffmpeg_1thread_s": 0.666,
+      "ffmpeg_default_mpxs": 351.36,
+      "ffmpeg_default_s": 0.355,
+      "file": "fixtures/av1-fate/switch_frame.ivf",
+      "kinetix_frames": 32,
+      "kinetix_mpxs": 22.33,
+      "kinetix_s": 5.586,
+      "ratio_kinetix_over_ffmpeg_1thread": 0.12,
+      "verified": true
+    }
+  ],
+  "e2e": [
+    {
+      "ffmpeg_out_bytes": 40341,
+      "ffmpeg_s": 2.338,
+      "input": "vp9 320x240 mp4",
+      "kinetix_cli_s": 25.199,
+      "kinetix_out_bytes": 39225,
+      "note": "kinetix CLI time includes process start-up; ffmpeg time is -benchmark rtime (excludes start-up)"
+    },
+    {
+      "ffmpeg_out_bytes": 56594,
+      "ffmpeg_s": 3.084,
+      "input": "vp9 1280x720 mp4",
+      "kinetix_cli_s": 87.543,
+      "kinetix_out_bytes": 44370,
+      "note": "kinetix CLI time includes process start-up; ffmpeg time is -benchmark rtime (excludes start-up)"
+    }
+  ],
+  "elapsed_s": 1898.303,
+  "encode_av1": [
+    {
+      "clip": "testsrc 320x240 x120",
+      "kinetix": {
+        "bytes": 12776,
+        "enc_s": 8.369,
+        "settings": "CQP q=100 speed=6 keyint=240",
+        "y_psnr": 50.77
+      },
+      "libaom": {
+        "bytes": 31439,
+        "enc_s": 1.555,
+        "maxrss_kb": 97132,
+        "settings": "CRF 30 cpu-used=8 row-mt=1",
+        "y_psnr": 57.83
+      }
+    },
+    {
+      "clip": "testsrc 1280x720 x90",
+      "kinetix": {
+        "bytes": 20487,
+        "enc_s": 42.138,
+        "settings": "CQP q=100 speed=6 keyint=240",
+        "y_psnr": 57.96
+      },
+      "libaom": {
+        "bytes": 48603,
+        "enc_s": 2.835,
+        "maxrss_kb": 307756,
+        "settings": "CRF 30 cpu-used=8 row-mt=1",
+        "y_psnr": 62.04
+      }
+    }
+  ],
+  "env": {
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+    "cpu": "Intel64 Family 6 Model 191 Stepping 2, GenuineIntel",
+    "decoders": {
+      "ffv1": true,
+      "h264": true,
+      "jpegls": true,
+      "libdav1d": true,
+      "png": true,
+      "vp9": true
+    },
+    "encoders": {
+      "ffv1": true,
+      "jpegls": true,
+      "libaom-av1": true,
+      "librav1e": true,
+      "libvpx-vp9": true,
+      "libx264": true,
+      "png": true
+    },
+    "ffmpeg": "ffmpeg version 2023-12-28-git-c1340f3439-full_build-www.gyan.dev Copyright (c) 2000-2023 the FFmpeg developers",
+    "libavcodec": "libavcodec     60. 36.100 / 60. 36.100",
+    "logical_cores": 20,
+    "os": "Microsoft Windows [Version 10.0.26200.9457]",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "label": "2026-10-03",
+  "originals": [
+    {
+      "bit_exact": true,
+      "bytes": 338915858,
+      "codec": "lean",
+      "dec_s": 5.638,
+      "decoded_frames": 90,
+      "enc_s": 129.077,
+      "encoder": "kinetix (all-intra)",
+      "settings": "all-intra key frames, codec defaults",
+      "source_frames": 90,
+      "y_psnr": null
+    },
+    {
+      "bytes": 363150,
+      "codec": "lean",
+      "dec_s": 0.024,
+      "enc_s": 0.079,
+      "encoder": "x264 ultrafast+zerolatency",
+      "settings": "CRF 18 ultrafast zerolatency",
+      "y_psnr": 52.02
+    },
+    {
+      "bytes": 98074,
+      "codec": "lean",
+      "dec_s": 0.052,
+      "enc_s": 0.523,
+      "encoder": "libaom realtime",
+      "settings": "CRF 20 usage=realtime cpu-used=8",
+      "y_psnr": 49.15
+    },
+    {
+      "bit_exact": true,
+      "bytes": 338962298,
+      "codec": "realtime",
+      "dec_s": 6.075,
+      "decoded_frames": 90,
+      "enc_s": 137.937,
+      "encoder": "kinetix (all-intra)",
+      "settings": "all-intra key frames, codec defaults",
+      "source_frames": 90,
+      "y_psnr": null
+    },
+    {
+      "bytes": 363150,
+      "codec": "realtime",
+      "dec_s": 0.026,
+      "enc_s": 0.107,
+      "encoder": "x264 ultrafast+zerolatency",
+      "settings": "CRF 18 ultrafast zerolatency",
+      "y_psnr": 52.02
+    },
+    {
+      "bytes": 98074,
+      "codec": "realtime",
+      "dec_s": 0.052,
+      "enc_s": 0.613,
+      "encoder": "libaom realtime",
+      "settings": "CRF 20 usage=realtime cpu-used=8",
+      "y_psnr": 49.15
+    },
+    {
+      "bit_exact": false,
+      "bytes": 254295268,
+      "codec": "screen",
+      "dec_s": 10.28,
+      "decoded_frames": 90,
+      "enc_s": 10.969,
+      "encoder": "kinetix (all-intra)",
+      "settings": "all-intra key frames, codec defaults (v1 codes luma only; chroma decodes as 0)",
+      "source_frames": 90,
+      "y_psnr": 100.0
+    },
+    {
+      "bytes": 4584991,
+      "codec": "screen",
+      "dec_s": 0.029,
+      "enc_s": 0.118,
+      "encoder": "x264 ultrafast",
+      "settings": "CRF 18 ultrafast",
+      "y_psnr": 51.51
+    },
+    {
+      "bytes": 1417919,
+      "codec": "screen",
+      "dec_s": 0.22,
+      "enc_s": 0.931,
+      "encoder": "libaom realtime",
+      "settings": "CRF 20 usage=realtime cpu-used=8 (this ffmpeg build has no -tune-content)",
+      "y_psnr": 51.68
+    },
+    {
+      "bit_exact": true,
+      "bytes": 45611467,
+      "codec": "lossless",
+      "dec_s": 3.524,
+      "decoded_frames": 90,
+      "enc_s": 3.357,
+      "encoder": "kinetix (all-intra)",
+      "settings": "all-intra key frames, codec defaults",
+      "source_frames": 90,
+      "y_psnr": null
+    },
+    {
+      "bytes": 4493310,
+      "codec": "lossless",
+      "dec_s": 0.105,
+      "enc_s": 0.22,
+      "encoder": "FFV1",
+      "settings": "level 3, 10-bit, all-intra (-g 1)",
+      "y_psnr": null
+    },
+    {
+      "bytes": 9202550,
+      "codec": "lossless",
+      "dec_s": 0.063,
+      "enc_s": 0.32,
+      "encoder": "PNG",
+      "settings": "image2 sequence (ffmpeg converts via RGB; size indicative only)",
+      "y_psnr": null
+    }
+  ],
+  "phase": "todo-perf.md Phase 1 (Kinetix vs ffmpeg)",
+  "quick": false,
+  "skipped": [
+    {
+      "item": "vision vs AV1/x264 at equal detector accuracy",
+      "reason": "needs a detector-accuracy ground-truth study; not automatable in this harness yet"
+    },
+    {
+      "item": "face vs AV1/x264 at matched quality",
+      "reason": "needs matched-quality talking-head clips; not automatable in this harness yet"
+    },
+    {
+      "item": "volumetric vs Draco / TMC13",
+      "reason": "tpt-kinetix-volumetric is not yet byte-compatible with tmc3 (see tpt-kinetix-test-utils::tmc13); a cross-decode comparison needs that alignment first"
+    }
+  ]
+}
