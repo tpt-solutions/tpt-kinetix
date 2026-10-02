@@ -104,6 +104,15 @@ fn directional_params(mode: IntraMode) -> (i32, bool, bool) {
     }
 }
 
+/// Scratch length for [`predict_directional`]'s extended top/left arrays.
+///
+/// `need` is `size - 1 + (151 * size) / 64 + 2`, maximised at the largest
+/// supported block (`size == 64`): `63 + 151 + 2 == 216`. 256 leaves headroom
+/// and keeps both arrays on the stack. The bound is asserted at run time, so
+/// raising the block-size ceiling without raising this would fail loudly rather
+/// than silently truncate.
+const DIRECTIONAL_SCRATCH: usize = 256;
+
 fn predict_directional(
     out: &mut [i32],
     size: usize,
@@ -116,8 +125,15 @@ fn predict_directional(
     let (slope, vertical, mirror) = directional_params(mode);
     let scale = 64i32;
     let need = (n - 1 + (151 * n) / scale + 2) as usize;
-    let mut top = vec![0i32; need];
-    let mut lft = vec![0i32; need];
+    assert!(
+        need <= DIRECTIONAL_SCRATCH,
+        "predict_directional: need {need} exceeds scratch {DIRECTIONAL_SCRATCH}"
+    );
+    // Stack scratch, reused across the r/c loops. This used to be two `vec!`
+    // allocations *per intra block*.
+    let mut top = [0i32; DIRECTIONAL_SCRATCH];
+    let mut lft = [0i32; DIRECTIONAL_SCRATCH];
+    let (top, lft) = (&mut top[..need], &mut lft[..need]);
     for j in 0..need {
         top[j] = if j < size { above[j] } else { above[size - 1] };
         lft[j] = if j < size { left[j] } else { left[size - 1] };

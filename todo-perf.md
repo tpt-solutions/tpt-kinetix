@@ -214,7 +214,9 @@ Order:
   ~6 per intra-mode trial in the encoder) and both also had the unvalidated
   4-bit block-size field.
 - [ ] lossless, screen
-- [ ] vision, face, volumetric
+- [~] vision, face, volumetric — vision done 2026-10-02 (1080p encode +19%,
+  decode_pixels +19%; no new validation needed, its parser already bounded the
+  block size). face and volumetric still open
 - [ ] out-kinetix-h264 (optional, unpublished, last)
 
 ### lean — Hadamard caching + allocation removal DONE 2026-10-02
@@ -256,10 +258,13 @@ speculating about arithmetic:
   cumulative (transform caching alone accounted for +36.9% / +26.7%, the
   allocation removal for a further +7.2% / +7.1%). It had the identical
   unvalidated 4-bit `block_size_log2` field, now bounded the same way.
-  **`tpt-kinetix-vision` is the remaining port** and has not been done: it has
-  the same per-block `neighbours_*` returning `Vec`s, the same 14-mode encoder
-  search, and its own `transform.rs` that still rebuilds the matrix per call
-  (`vision/src/transform.rs`).
+  **`tpt-kinetix-vision` port — DONE**: 1080p encode **+19.0%**,
+  `decode_pixels` **+18.7%**. Its parser already bounded `block_size_log2` to
+  3..=6, so unlike lean and realtime it needed no new validation — only the
+  named `MAX_BLOCK_SIZE` constant the scratch asserts against. `decode_tensor`
+  printed -5.8% in the same run, but that path is a pure block parser (it calls
+  neither the transform nor the scratch), so it is machine noise, not a
+  regression. **face and volumetric are the remaining originals.**
 
 ### VP9 — debug-switch environment lookups DONE 2026-10-02
 

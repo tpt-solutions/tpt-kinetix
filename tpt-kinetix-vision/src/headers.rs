@@ -44,6 +44,15 @@ impl FrameType {
     }
 }
 
+/// Largest block dimension v1 supports, as `log2`. Blocks run 8x8..64x64
+/// (`log2` 3..=6); [`SequenceHeader::parse`] already rejects anything outside
+/// that range, which is what lets the per-block scratch buffers be fixed-size
+/// arrays instead of per-block heap allocations.
+pub const MAX_BLOCK_SIZE_LOG2: u8 = 6;
+
+/// Block dimension implied by `MAX_BLOCK_SIZE_LOG2` (64).
+pub const MAX_BLOCK_SIZE: usize = 1 << MAX_BLOCK_SIZE_LOG2;
+
 /// Stream-level parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceHeader {
