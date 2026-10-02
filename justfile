@@ -181,7 +181,7 @@ bench-baseline LABEL="":
 # Compare the current bench run against a committed baseline snapshot and fail
 # on a throughput regression beyond THRESHOLD percent (default 5).
 # Usage: just bench-compare [BASELINE_JSON] [THRESHOLD]
-bench-compare BASELINE="docs/perf/baseline-2026-10-02.json" THRESHOLD="5":
+bench-compare BASELINE="docs/perf/baseline-2026-10-03.json" THRESHOLD="5":
     cargo run --release -p tpt-kinetix-test-utils --example bench_compare -- --baseline "{{BASELINE}}" --threshold {{THRESHOLD}}
 
 # Kinetix vs ffmpeg comparison (todo-perf.md Phase 1): verifies Kinetix's

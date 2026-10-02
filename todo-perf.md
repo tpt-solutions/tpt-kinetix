@@ -33,7 +33,10 @@ Status legend: `[ ]` todo, `[~]` in progress, `[x]` done.
   `docs/perf/baseline-<label>.json` + regenerates `docs/PERFORMANCE.md`.
 - `just bench-compare <baseline> <threshold%>` diffs a fresh run against a committed baseline and
   exits non-zero on a throughput regression beyond the threshold.
-- A baseline snapshot is committed at `docs/perf/baseline-2026-10-02.json`.
+- A baseline snapshot is committed at `docs/perf/baseline-2026-10-03.json`
+  (re-recorded 2026-10-03; supersedes `baseline-2026-10-02.json`, which is **not
+  comparable** to it — see the "Notes on this snapshot" section of
+  `docs/PERFORMANCE.md` and the Phase 3 closing section below).
 - `just bench-ffmpeg` (`tpt-kinetix-test-utils` example `ffmpeg_compare`) compares Kinetix against
   ffmpeg (decode, AV1 encode, original codecs, CLI e2e) and writes
   `docs/perf/ffmpeg-compare-<label>.json` plus the marked section of `docs/PERFORMANCE.md`
@@ -254,6 +257,68 @@ roughly ±5%**, which is why every change in this phase was A/B'd same-session
 (and the VP9 `decode_static` / `encode_*` "controls" were worth running at
 all). It also retroactively explains the -5..-10% that Criterion reported
 against the committed baseline in the very first session of this phase.
+
+### Phase 3 closing — baseline re-recorded, and why the old one is void DONE 2026-10-03
+
+Phase 3's last item was re-recording `docs/perf/baseline-2026-10-02.json`. Doing
+so surfaced the most important methodological result of the phase, so it gets
+its own section.
+
+**The re-record.** `just bench-baseline 2026-10-03` over all 14 bench crates
+(83 benchmarks, ~20 min). New file `docs/perf/baseline-2026-10-03.json`,
+regenerated `docs/PERFORMANCE.md`, `just bench-compare` default repointed.
+Nothing else touched: `target/perf-corpus/manifest.json` is unchanged, which
+matters because `ffmpeg_compare --quick` has silently rewritten that corpus
+before.
+
+**The old baseline is void, not merely stale.** Diffing the two files suggested
+absurd results — `screen_320x240/decode` 1.1071 Gelem/s -> 8.0094 Melem/s
+(**-99.3%**), `realtime_320x240/decode` -100.0%. A 134x "regression" on code
+whose tests pass and which measured 32% *faster* in the A/B that motivated the
+change. Chasing it:
+
+- `screen_codec.rs` is untouched since `1a8623c`, so the bench definition did
+  not change — the difference is in the library underneath.
+- `1a8623c` committed the baseline at **06:49** on 2026-10-02.
+- `8291e0b` ("fix codec bugs it surfaced") landed at **15:19** the same day and
+  changed `src/` in **av1, bitstream, lean, lossless, realtime, screen, vp9**
+  — and was never followed by a re-record.
+
+So the 10-02 numbers for those crates measure a decoder that was bailing out
+early, not decoding. This was already suspected during the phase (the
+`screen_*_decode` rows were flagged as the Phase 1 flat-black luma fix rather
+than a regression); what is new is the **scope** and the mechanism.
+
+**The trap: the same confound inflates the positive deltas too.** This is the
+part worth remembering. `bitstream_rans/decode_noise` reads as **+361%** against
+the old baseline, and `vp9_decode_320x240` as **+242%**. The same-session A/Bs
+for those crates measured 181 -> 195 MiB/s and ~2.58x respectively. Anyone
+quoting the cross-file diff would have overstated this phase by an order of
+magnitude while every number looked real.
+
+**Quantified with a control group.** The five crates this phase never touched
+(face, volumetric, demux, mux, pipeline) show a mean of **-3.3%** and a range of
+**-24.6%..+29%** across 31 benchmarks with *zero* code change. The optimised
+crates show a median of **+19.4%**. So the phase did produce a real improvement
+— but the per-benchmark deltas carry roughly ±25-30% of cross-session error on
+top of it, which is the concrete argument for having A/B'd same-session
+throughout. It also supersedes the "±5% noise floor" figure recorded above from
+face/volumetric alone: that number was a same-session estimate and the
+cross-session spread is far wider. (The AV1 residual-scratch rejection above
+still stands — it was a *same-session* A/B at 1.6%, and same-session A/B is the
+tighter of the two methods.)
+
+**Durability.** `docs/PERFORMANCE.md` is fully regenerated from the bench run,
+so a hand-written caveat would have been erased by the next
+`just bench-baseline` — precisely when someone is about to trust a bad delta.
+`bench_baseline` now carries a `<!-- perf-notes:start/end -->` section over
+verbatim, mirroring the existing `ffmpeg-compare` markers, with four tests
+covering preservation, ordering relative to the ffmpeg table, and rejection of
+an unterminated pair. The caveat is in that section.
+
+**What is trustworthy:** the per-change figures in this file and in the commit
+messages, all measured same-session against alternating builds. The new
+baseline is the reference point going forward.
 
 ### screen — Hadamard caching + natural-path allocations DONE 2026-10-02
 
@@ -493,7 +558,8 @@ Notes:
   the −5…−10% that Criterion reports against the *committed* baseline is
   machine drift between sessions rather than a regression. The committed
   `docs/perf/baseline-2026-10-02.json` predates this change and several
-  correctness fixes, so it must be re-recorded before it is trusted again.
+  correctness fixes, so it must be re-recorded before it is trusted again —
+  **done 2026-10-03**, see "Phase 3 closing" below.
 - `screen_320x240/decode` is 1.2% slower: the screen header reads are narrow
   and the window path adds a span computation the old per-bit loop did not pay.
   That is well inside noise for a 10-sample run and is dwarfed by the +195% on
@@ -504,6 +570,13 @@ Notes:
   doing the work it always claimed to do.
 - The `-99%` Criterion prints on those screen rows are that correctness fix,
   not this optimisation.
+- The same confound is **wider than screen/realtime decode**, and this is the
+  trap worth recording: it inflates the *positive* deltas too. Commit `8291e0b`
+  changed `src/` in av1, bitstream, lean, lossless, realtime, screen **and vp9**,
+  so every cross-file comparison against the 10-02 baseline is contaminated in
+  both directions. `bitstream_rans/decode_noise` reads as +361% against it; the
+  same-session A/B for that crate measured 181 -> 195 MiB/s. **Never quote a
+  number from that diff.**
 - Bit-exactness guards: `read_bits` is checked against an independent
   bit-at-a-time reference for every width 1..=32 at every start offset, and the
   inverse table is checked against the old `partition_point` definition for all

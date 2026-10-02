@@ -185,6 +185,35 @@ pub(crate) fn ffmpeg_section(previous: Option<&str>) -> String {
     section
 }
 
+/// The marked section carrying hand-written notes about *this specific*
+/// snapshot, carried over verbatim when this tool regenerates PERFORMANCE.md.
+///
+/// The rest of PERFORMANCE.md is derived from the benchmark run, so anything
+/// written by hand into it is lost on the next `just bench-baseline` — which is
+/// exactly when it would matter most (a note explaining why an older snapshot
+/// is not comparable). These markers make the notes survive regeneration, the
+/// same way [`FFMPEG_SECTION_MARKERS`] preserves the ffmpeg comparison.
+pub(crate) const NOTES_SECTION_MARKERS: (&str, &str) =
+    ("<!-- perf-notes:start -->", "<!-- perf-notes:end -->");
+
+/// Extract the text between (and including) the perf-notes markers, if the
+/// previous PERFORMANCE.md contains a complete pair.
+pub(crate) fn notes_section(previous: Option<&str>) -> String {
+    let Some(text) = previous else {
+        return String::new();
+    };
+    let Some(start) = text.find(NOTES_SECTION_MARKERS.0) else {
+        return String::new();
+    };
+    let Some(end) = text[start..].find(NOTES_SECTION_MARKERS.1) else {
+        return String::new();
+    };
+    let end = start + end + NOTES_SECTION_MARKERS.1.len();
+    let mut section = text[start..end].to_string();
+    section.push('\n');
+    section
+}
+
 fn render_markdown(
     label: &str,
     results: &BTreeMap<String, BTreeMap<String, String>>,
@@ -237,6 +266,7 @@ fn render_markdown(
          - `Melem/s` on the volumetric bench counts 6 values per point (3 position \
          components plus 3 colour samples).\n",
     );
+    s.push_str(&notes_section(previous));
     s.push_str(&ffmpeg_section(previous));
     s
 }
@@ -371,5 +401,47 @@ mod tests {
     fn markdown_without_markers_renders_without_a_section() {
         let rendered = render_markdown("t", &BTreeMap::new(), None);
         assert!(!rendered.contains("ffmpeg-compare:start"));
+    }
+
+    /// The notes section explains why a given snapshot is or is not comparable
+    /// to another. It is the one hand-written part of PERFORMANCE.md, and the
+    /// rest of the file is rewritten from the benchmark run -- so if this
+    /// regresses, the explanation silently disappears on the next re-record,
+    /// precisely when someone is about to trust a bad cross-baseline delta.
+    #[test]
+    fn markdown_preserves_a_marked_notes_section() {
+        let previous =
+            "preamble\n<!-- perf-notes:start -->\nnot comparable\n<!-- perf-notes:end -->\n";
+        let rendered = render_markdown("t", &BTreeMap::new(), Some(previous));
+        assert!(rendered.contains("not comparable"), "notes must survive");
+        assert!(
+            !rendered.contains("preamble"),
+            "old preamble must be dropped"
+        );
+    }
+
+    /// Both carried-over sections must coexist, and the notes must precede the
+    /// ffmpeg table so a reader hits the caveat before the numbers.
+    #[test]
+    fn notes_and_ffmpeg_sections_both_survive_in_order() {
+        let previous = "<!-- perf-notes:start -->\nnote text\n<!-- perf-notes:end -->\n\
+                         <!-- ffmpeg-compare:start -->\nffmpeg text\n<!-- ffmpeg-compare:end -->\n";
+        let rendered = render_markdown("t", &BTreeMap::new(), Some(previous));
+        assert!(rendered.contains("note text"));
+        assert!(rendered.contains("ffmpeg text"));
+        let n = rendered.find("note text").expect("notes present");
+        let f = rendered
+            .find("ffmpeg text")
+            .expect("ffmpeg section present");
+        assert!(n < f, "notes must be rendered before the ffmpeg table");
+    }
+
+    /// A half-written notes section (start without end) must not be carried
+    /// over, or the truncation would be treated as content.
+    #[test]
+    fn an_unterminated_notes_section_is_dropped() {
+        let previous = "<!-- perf-notes:start -->\ntruncated text\n";
+        let rendered = render_markdown("t", &BTreeMap::new(), Some(previous));
+        assert!(!rendered.contains("truncated text"));
     }
 }

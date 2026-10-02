@@ -1,0 +1,124 @@
+{
+  "label": "2026-10-03",
+  "date": "2026-10-02",
+  "cpu": "Intel64 Family 6 Model 191 Stepping 2, GenuineIntel",
+  "logical_cores": 20,
+  "os": "Microsoft Windows [Version 10.0.26200.9457]",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "profile": "release",
+  "ffmpeg": "ffmpeg version 2023-12-28-git-c1340f3439-full_build-www.gyan.dev Copyright (c) 2000-2023 the FFmpeg developers",
+  "results": {
+    "out-kinetix-h264": {
+      "h264_decode_slice_1080p/parallel": "127.75 Melem/s",
+      "h264_decode_slice_1080p/serial": "117.25 Melem/s"
+    },
+    "tpt-kinetix-av1": {
+      "av1_encode_320x240/kinetix/": "14.518 ms",
+      "av1_encode_320x240/librav1e/": "30.670 ms"
+    },
+    "tpt-kinetix-bitstream": {
+      "bitstream_bitreader/read_bit": "97.989 MiB/s",
+      "bitstream_bitreader/read_bits_16": "305.83 MiB/s",
+      "bitstream_bitreader/read_u32_be": "606.96 MiB/s",
+      "bitstream_rans/decode_noise": "190.41 MiB/s",
+      "bitstream_rans/decode_static": "431.05 MiB/s",
+      "bitstream_rans/encode_noise": "160.43 MiB/s",
+      "bitstream_rans/encode_skewed": "149.94 MiB/s",
+      "bitstream_rans/encode_static": "207.30 MiB/s"
+    },
+    "tpt-kinetix-demux": {
+      "demux_containers/matroska/30": "11.343 Melem/s",
+      "demux_containers/mp4/300": "512.07 Kelem/s",
+      "demux_containers/mp4/3000": "398.87 Kelem/s",
+      "demux_containers/mp4/30000": "162.66 Kelem/s",
+      "demux_containers/mpegts/30": "1.4850 Melem/s"
+    },
+    "tpt-kinetix-face": {
+      "face_1280x720/decode_synth": "428.96 Melem/s",
+      "face_1280x720/encode": "9.4548 Gelem/s",
+      "face_1920x1080/decode_synth": "358.61 Melem/s",
+      "face_1920x1080/encode": "21.635 Gelem/s",
+      "face_320x240/decode_synth": "302.23 Melem/s",
+      "face_320x240/encode": "785.56 Melem/s"
+    },
+    "tpt-kinetix-lean": {
+      "lean_1280x720/decode": "13.560 Melem/s",
+      "lean_1280x720/encode": "609.71 Kelem/s",
+      "lean_1920x1080/decode": "13.917 Melem/s",
+      "lean_1920x1080/encode": "617.14 Kelem/s",
+      "lean_320x240/decode": "14.627 Melem/s",
+      "lean_320x240/encode": "594.78 Kelem/s"
+    },
+    "tpt-kinetix-lossless": {
+      "lossless_1080px_10bit/decode": "34.213 Melem/s",
+      "lossless_1080px_10bit/encode": "35.972 Melem/s",
+      "lossless_1080px_16bit/decode": "35.603 Melem/s",
+      "lossless_1080px_16bit/encode": "36.193 Melem/s",
+      "lossless_256px_10bit/decode": "26.871 Melem/s",
+      "lossless_256px_10bit/encode": "29.299 Melem/s",
+      "lossless_256px_16bit/decode": "26.064 Melem/s",
+      "lossless_256px_16bit/encode": "27.095 Melem/s",
+      "lossless_720px_10bit/decode": "33.610 Melem/s",
+      "lossless_720px_10bit/encode": "35.959 Melem/s",
+      "lossless_720px_16bit/decode": "35.037 Melem/s",
+      "lossless_720px_16bit/encode": "37.587 Melem/s"
+    },
+    "tpt-kinetix-mux": {
+      "mux_mp4_1080p/30": "172.11 Kelem/s",
+      "mux_mp4_1080p/300": "95.943 Kelem/s",
+      "mux_mp4_1080p/3000": "98.831 Kelem/s",
+      "mux_mp4_1080p/30000": "86.771 Kelem/s"
+    },
+    "tpt-kinetix-pipeline": {
+      "pipeline_transcode_320x240x8/ffmpeg_libaom": "10.440 Melem/s",
+      "pipeline_transcode_320x240x8/tpt-kinetix": "3.2851 Melem/s"
+    },
+    "tpt-kinetix-realtime": {
+      "realtime_1280x720/decode": "982.18 elem/s",
+      "realtime_1280x720/encode": "43.006 elem/s",
+      "realtime_1920x1080/decode": "431.13 elem/s",
+      "realtime_1920x1080/encode": "19.257 elem/s",
+      "realtime_320x240/decode": "12.466 Kelem/s",
+      "realtime_320x240/encode": "515.91 elem/s"
+    },
+    "tpt-kinetix-screen": {
+      "screen_1280x720/decode": "8.2797 Melem/s",
+      "screen_1280x720/encode": "6.9284 Melem/s",
+      "screen_1920x1080/decode": "8.4275 Melem/s",
+      "screen_1920x1080/encode": "7.4101 Melem/s",
+      "screen_320x240/decode": "8.0094 Melem/s",
+      "screen_320x240/encode": "7.3711 Melem/s"
+    },
+    "tpt-kinetix-vision": {
+      "vision_1280x720/decode_pixels": "13.455 Melem/s",
+      "vision_1280x720/decode_tensor": "85.730 Melem/s",
+      "vision_1280x720/encode": "576.96 Kelem/s",
+      "vision_1920x1080/decode_pixels": "14.060 Melem/s",
+      "vision_1920x1080/decode_tensor": "84.611 Melem/s",
+      "vision_1920x1080/encode": "554.08 Kelem/s",
+      "vision_320x240/decode_pixels": "13.813 Melem/s",
+      "vision_320x240/decode_tensor": "103.59 Melem/s",
+      "vision_320x240/encode": "577.96 Kelem/s"
+    },
+    "tpt-kinetix-volumetric": {
+      "volumetric_1000000pts_lift/decode": "98.048 Melem/s",
+      "volumetric_1000000pts_lift/encode": "17.290 Melem/s",
+      "volumetric_1000000pts_raht/decode": "104.45 Melem/s",
+      "volumetric_1000000pts_raht/encode": "16.927 Melem/s",
+      "volumetric_200000pts_lift/decode": "65.809 Melem/s",
+      "volumetric_200000pts_lift/encode": "11.006 Melem/s",
+      "volumetric_200000pts_raht/decode": "66.689 Melem/s",
+      "volumetric_200000pts_raht/encode": "11.779 Melem/s",
+      "volumetric_50000pts_lift/decode": "66.551 Melem/s",
+      "volumetric_50000pts_lift/encode": "12.279 Melem/s",
+      "volumetric_50000pts_raht/decode": "69.712 Melem/s",
+      "volumetric_50000pts_raht/encode": "11.570 Melem/s"
+    },
+    "tpt-kinetix-vp9": {
+      "vp9_decode_1280x720/1280x720": "266.53 Melem/s",
+      "vp9_decode_1920x1080/1920x1080": "262.50 Melem/s",
+      "vp9_decode_320x240/320x240": "159.52 Melem/s"
+    }
+  }
+}
