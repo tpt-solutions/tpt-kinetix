@@ -96,6 +96,12 @@ fn source(w: u32, h: u32, t: u32) -> FrameBuffer {
 
 /// Encode one frame and decode it back, returning the decoded luma.
 fn roundtrip_luma(w: u32, h: u32, t: u32) -> Vec<u8> {
+    roundtrip(w, h, t).0
+}
+
+/// Encode one frame and decode it back, returning `(luma, chroma)`, where
+/// `chroma` is the decoded Cb and Cr planes concatenated.
+fn roundtrip(w: u32, h: u32, t: u32) -> (Vec<u8>, Vec<u8>) {
     let seq = sequence();
     let fhdr = frame_header(w, h);
     let src = source(w, h, t);
@@ -124,7 +130,33 @@ fn roundtrip_luma(w: u32, h: u32, t: u32) -> Vec<u8> {
         (w, h),
         "decoded frame geometry mismatch at {w}x{h} frame {t}"
     );
-    frame.data[..(w * h) as usize].to_vec()
+    let luma_len = (w * h) as usize;
+    (
+        frame.data[..luma_len].to_vec(),
+        frame.data[luma_len..].to_vec(),
+    )
+}
+
+/// Pins the actual v1 contract: **luma** is bit-exact, chroma is not coded and
+/// decodes as all-zero.
+///
+/// This is the distinction that made `ffmpeg_compare` report screen as
+/// non-bit-exact for a long time. That harness compares whole frames, so any
+/// source with non-zero chroma can never round-trip — not because of a decoding
+/// bug, but because v1 only ever writes luma (`reconstruct.rs` has no chroma
+/// write path). The luma guarantee is the real one, and `check` asserts it.
+///
+/// If a later version codes chroma, delete this test and raise `bit_exact` back
+/// to `true` in the screen `OrigCompare`.
+#[test]
+fn luma_is_exact_and_chroma_is_not_coded() {
+    let (luma, chroma) = roundtrip(320, 240, 0);
+    let src = source(320, 240, 0);
+    assert_eq!(luma, src.luma, "luma must be bit-exact");
+    assert!(
+        chroma.iter().all(|&p| p == 0),
+        "v1 does not code chroma, so both planes must decode as zero"
+    );
 }
 
 fn check(w: u32, h: u32, frames: u32) {
@@ -165,33 +197,29 @@ fn roundtrip_is_bit_exact_1280x720() {
     check(1280, 720, 4);
 }
 
-/// **Known pre-existing bug — `#[ignore]`d so CI stays green. Remove the
-/// `#[ignore]` when fixed.**
-///
 /// 1920x1080 is 120 blocks wide but 67.5 blocks tall, so the bottom 8 rows are a
-/// *partial* block. The decoder reconstructs that partial block as zeros:
-/// first mismatch at `(0, 1072)` — exactly where block row 67 begins. The same
-/// source decoded at 320x240 and 1280x720 (both block-aligned on both axes) is
-/// bit-exact, which is why this went unnoticed: every benchmark and comparison
-/// clip so far has used aligned dimensions.
+/// *partial* block.
+///
+/// This was failing until the decode-side block grid was changed from truncating
+/// division to `div_ceil`, matching the encoder: the encoder wrote 68 block rows
+/// while the decoder walked only 67, so those 8 rows were never written and
+/// decoded as 0. First mismatch was at `(0, 1072)` — exactly where block row 67
+/// begins.
+///
+/// Regression guard for that specific class of bug: any frame dimension that is
+/// not a multiple of the 16-pixel base block.
 #[test]
-#[ignore = "screen decode reconstructs partial edge blocks as zeros (pre-existing, not from 5358e2c)"]
 fn roundtrip_is_bit_exact_1920x1080() {
     check(1920, 1080, 3);
 }
 
-/// **Known pre-existing bug — `#[ignore]`d so CI stays green. Remove the
-/// `#[ignore]` when fixed.**
+/// The same defect seen from the other axis: 67x53 is 4 full block columns plus a
+/// 3-pixel remainder, and the rightmost column was never written. First mismatch
+/// was at `(64, 0)` — the start of that partial column.
 ///
-/// The same partial-block defect seen from the other axis. 67x53 is 4 full
-/// block columns plus a 3-pixel remainder, and the first mismatch lands at
-/// `(64, 0)` — the start of that 3-pixel partial column.
-///
-/// Together with `roundtrip_is_bit_exact_1920x1080` this pins the failure to
-/// non-block-aligned geometry: aligned on both axes passes, misaligned on
-/// either axis fails at the first partial block.
+/// Together with `roundtrip_is_bit_exact_1920x1080` this covers both axes of the
+/// partial-block case.
 #[test]
-#[ignore = "screen decode reconstructs partial edge blocks as zeros (pre-existing, not from 5358e2c)"]
 fn roundtrip_is_bit_exact_odd_geometry() {
     check(67, 53, 3);
     check(130, 66, 2);

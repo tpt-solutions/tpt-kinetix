@@ -352,8 +352,16 @@ pub fn decode_frame_payload(
     let natural_blocks = decode_natural_stream(streams[3], modes.len())?;
 
     let cb_size = 1usize << seq.base_block_size_log2;
-    let gw = frame.width as usize / cb_size;
-    let gh = frame.height as usize / cb_size;
+    // Must use `div_ceil`, matching `encode_frame`. Truncating division here
+    // silently drops the final *partial* block row/column whenever a dimension
+    // is not a multiple of `cb_size`: at 1920x1080 the encoder writes 68 block
+    // rows (`ceil(1080/16)`) but this loop only walked 67 (`1080/16`), leaving
+    // the bottom 8 rows never written — and `FrameBuffer::new` zero-fills, so
+    // they decoded as 0. At 67x53 the same truncation dropped the rightmost
+    // 3-pixel column. Every comparison and benchmark clip in the repo uses
+    // block-aligned dimensions, so the two paths only ever agreed by accident.
+    let gw = (frame.width as usize).div_ceil(cb_size);
+    let gh = (frame.height as usize).div_ceil(cb_size);
     let mut fb = FrameBuffer::new(seq, frame);
 
     let dict = GlyphDictionary::new(seq.dict_cap as usize);

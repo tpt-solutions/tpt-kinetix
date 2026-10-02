@@ -1589,7 +1589,16 @@ fn push_original_rows(c: &OrigCompare, report: &mut Report) {
     let k_bytes: usize = k_packets.iter().map(|p| p.len()).sum();
     let k_decoded = decode(&k_packets);
     let (k_dec_s, k_dec_frames) = time_best(cfg.runs, || decode(&k_packets).len());
-    let exact = bit_exact && packets_bit_exact(&src.frames, &k_decoded);
+    // `packets_bit_exact` is the **measurement**; `bit_exact` is the
+    // **expectation**. They were previously collapsed with `&&` into a single
+    // `bit_exact` field, which destroyed the distinction: a codec declared
+    // lossless that failed looked identical to one that is lossy by design, and
+    // the renderer then printed `screen`'s failure as "lossy" — a correctness
+    // failure displayed as an expected quality setting. Both are recorded
+    // separately now; `bit_exact` stays the conjunction so existing consumers
+    // of the JSON keep their current meaning.
+    let measured_exact = packets_bit_exact(&src.frames, &k_decoded);
+    let exact = bit_exact && measured_exact;
 
     report.originals.push(json!({
         "codec": codec,
@@ -1599,6 +1608,8 @@ fn push_original_rows(c: &OrigCompare, report: &mut Report) {
         "bytes": k_bytes,
         "y_psnr": if exact { None } else { mean_y_psnr(&src.frames, &k_decoded).map(round2) },
         "bit_exact": exact,
+        "lossless_expected": bit_exact,
+        "bit_exact_measured": measured_exact,
         "decoded_frames": k_dec_frames,
         "source_frames": src.frames.len(),
         "settings": if codec == "screen" {
@@ -2045,7 +2056,19 @@ fn compare_screen(cfg: &Config, w: u32, h: u32, n: u32, corpus_dir: &Path, repor
             src: &src,
             encode: &encode,
             decode: &decode,
-            bit_exact: true,
+            // `false`, not `true`: screen v1 codes **luma only** — `reconstruct.rs`
+            // has no chroma write path at all (`fill_luma_block` /
+            // `blit_luma_block` are the only writers), so `FrameBuffer::new`'s
+            // zero-filled chroma survives decoding. A full-frame round-trip
+            // therefore *cannot* reproduce a source with non-zero chroma, and
+            // declaring `bit_exact: true` here only guaranteed a permanent false
+            // "MISMATCH" that was previously being rendered as "lossy" by a
+            // screen-specific special-case in the table renderer.
+            //
+            // The luma plane *is* bit-exact, which is the guarantee that actually
+            // matters and is asserted by `tpt-kinetix-screen/tests/roundtrip.rs`.
+            // Raise this to `true` when a later version codes chroma.
+            bit_exact: false,
             references: &references,
             corpus_dir,
         },
@@ -2442,15 +2465,29 @@ fn render_markdown(cfg: &Config, report: &Report) -> String {
                     r["decoded_frames"].as_u64().unwrap_or(0),
                     r["source_frames"].as_u64().unwrap_or(0)
                 );
-                // The `bit_exact` flag is the *expectation* (lossless codecs
-                // pass true); the row's own `bit_exact` is the measurement.
-                match (
-                    r["bit_exact"].as_bool().unwrap_or(false),
-                    r["codec"].as_str() == Some("screen"),
-                ) {
-                    (true, _) => format!("bit-exact ({frames})"),
-                    (false, true) => format!("lossy ({frames} frames)"),
-                    (false, false) => format!("MISMATCH ({frames} frames)"),
+                // The row carries both the expectation (`lossless_expected`) and the
+                // measurement (`bit_exact_measured`), so all four combinations are
+                // distinguishable. The screen special-case that used to live here
+                // is gone: it rendered a *declared-lossless* codec's failure as
+                // "lossy", which is exactly the case that must read as a
+                // failure. `bit_exact` is the conjunction and is kept as the
+                // fallback for rows written before those fields existed.
+                let expected = r["lossless_expected"]
+                    .as_bool()
+                    .unwrap_or(r["bit_exact"].as_bool().unwrap_or(false));
+                let measured = r["bit_exact_measured"]
+                    .as_bool()
+                    .unwrap_or(r["bit_exact"].as_bool().unwrap_or(false));
+                match (expected, measured) {
+                    (true, true) => format!("bit-exact ({frames})"),
+                    // Declared lossless but the round-trip did not reproduce the
+                    // source: a correctness bug, not a quality setting.
+                    (true, false) => format!("**MISMATCH** ({frames} frames)"),
+                    (false, true) => format!("bit-exact ({frames}, unexpected)"),
+                    // Lossy by design: reproducing the source exactly is not
+                    // required, so a non-bit-exact round-trip is the expected
+                    // outcome rather than a defect.
+                    (false, false) => format!("lossy ({frames} frames)"),
                 }
             } else {
                 "-".to_string()
