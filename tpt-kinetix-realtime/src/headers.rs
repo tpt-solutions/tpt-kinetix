@@ -123,6 +123,15 @@ impl FrameType {
 ///
 /// Everything a decoder needs to size its arenas exactly once — see the
 /// module docs for the byte layout.
+/// Largest block dimension v1 supports, as `log2`. Blocks run 8x8..64x64
+/// (`log2` 3..=6); the sequence header parser rejects anything larger, which is
+/// what lets the per-block scratch buffers be fixed-size arrays instead of
+/// per-block heap allocations.
+pub const MAX_BLOCK_SIZE_LOG2: u8 = 6;
+
+/// Block dimension implied by `MAX_BLOCK_SIZE_LOG2` (64).
+pub const MAX_BLOCK_SIZE: usize = 1 << MAX_BLOCK_SIZE_LOG2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceHeader {
     pub version: u8,
@@ -183,6 +192,19 @@ impl SequenceHeader {
         if min_block_size_log2 > max_block_size_log2 {
             return Err(KinetixError::Parse(format!(
                 "sequence header: min_block_size_log2 ({min_block_size_log2}) > max_block_size_log2 ({max_block_size_log2})"
+            )));
+        }
+        // Both fields are 4 bits wide, so without this bound a stream can claim
+        // a 32k x 32k minimum block. `block_sizes` derives the reconstruction
+        // block size straight from `min_block_size_log2`, and the per-block
+        // scratch buffers are sized by it, so an oversized value would ask for
+        // a multi-gigabyte allocation from a handful of bytes of input.
+        // v1 defines blocks in the 8x8..64x64 range (log2 3..=6), so anything
+        // larger is not a conforming stream.
+        if max_block_size_log2 > MAX_BLOCK_SIZE_LOG2 {
+            return Err(KinetixError::Parse(format!(
+                "sequence header: max_block_size_log2 ({max_block_size_log2}) > {} (unsupported block size)",
+                MAX_BLOCK_SIZE_LOG2
             )));
         }
         if slice_grid_cols == 0 || slice_grid_rows == 0 {

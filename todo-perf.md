@@ -208,9 +208,11 @@ Order:
 - [x] VP9 — **done 2026-10-02**, see below
 - [x] bitstream / rANS (shared by all original codecs, best leverage) — **done
   2026-10-02**, see below
-- [~] lean, realtime — lean done 2026-10-02 (encode +28%, decode +18%);
-  realtime still open, and it has the same per-block/per-mode allocation shape
-  (plus an `O(n^4)` transform that still rebuilds its matrix per call)
+- [x] lean, realtime — **done 2026-10-02**; lean encode +28% / decode +18%,
+  realtime 1080p encode ~+47% / decode ~+36%. Both were the same two causes
+  (Hadamard matrix rebuilt per transform call; ~5 allocations per block plus
+  ~6 per intra-mode trial in the encoder) and both also had the unvalidated
+  4-bit block-size field.
 - [ ] lossless, screen
 - [ ] vision, face, volumetric
 - [ ] out-kinetix-h264 (optional, unpublished, last)
@@ -249,13 +251,15 @@ speculating about arithmetic:
 - Bit-exactness: all 30 lean tests pass, including the `qp == 0` lossless
   round-trip suite the crate's guarantee rests on; workspace clippy `-D
   warnings` and `cargo fmt --check` clean; full workspace test suite green.
-- **The same shape is present in `tpt-kinetix-realtime` and
-  `tpt-kinetix-vision`**: both have the per-block `neighbours_*` returning
-  `Vec`s, the same 14-mode encoder search, and their own
-  `hadamard_2d_raw`/`inverse_2d` that still rebuild the matrix per call
-  (`vision/src/transform.rs`, `realtime/src/transform.rs`). That is the next
-  work, and it should now be a mechanical port of this change rather than a
-  fresh investigation.
+- **The same shape was present in `tpt-kinetix-realtime`, and is DONE** — it
+  was a mechanical port: realtime 1080p encode **~+47%** and decode **~+36%**
+  cumulative (transform caching alone accounted for +36.9% / +26.7%, the
+  allocation removal for a further +7.2% / +7.1%). It had the identical
+  unvalidated 4-bit `block_size_log2` field, now bounded the same way.
+  **`tpt-kinetix-vision` is the remaining port** and has not been done: it has
+  the same per-block `neighbours_*` returning `Vec`s, the same 14-mode encoder
+  search, and its own `transform.rs` that still rebuilds the matrix per call
+  (`vision/src/transform.rs`).
 
 ### VP9 — debug-switch environment lookups DONE 2026-10-02
 

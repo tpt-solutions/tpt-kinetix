@@ -34,7 +34,7 @@ use crate::headers::{ChromaFormat, FrameHeader, FrameType, SequenceHeader};
 use crate::prediction::{
     chroma_subpel, predict_inter_luma, predict_intra_block, IntraMode, MotionVector,
 };
-use crate::transform::{dequant, inverse_2d, quant, transform_2d};
+use crate::transform::{dequant, inverse_2d_with_scratch, quant, transform_2d};
 
 /// Substitution constant for unavailable intra-neighbour samples.
 const R: i32 = 128;
@@ -361,6 +361,9 @@ pub fn reconstruct_frame(
     let mut luma_db = vec![DeblockBlock::intra(qp); luma_total.max(1)];
     let mut chroma_db = vec![DeblockBlock::intra(qp); chroma_total.max(1)];
 
+    // One scratch set for the whole frame, shared by the luma and chroma loops.
+    let mut scratch = BlockScratch::new(luma_b.max(chroma_b));
+
     // Luma.
     for (bi, db) in luma_db.iter_mut().enumerate().take(luma_total) {
         let sx = bi % gw;
@@ -369,7 +372,18 @@ pub fn reconstruct_frame(
         let local = bi - chunk_range(luma_total, n_slices, slice).start;
         let block = &slices[slice][local];
         let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
-        *db = reconstruct_luma_block(&mut fb, reference, block, sx, sy, luma_b, qp, seq, frame)?;
+        *db = reconstruct_luma_block(
+            &mut fb,
+            reference,
+            block,
+            sx,
+            sy,
+            luma_b,
+            qp,
+            seq,
+            frame,
+            &mut scratch,
+        )?;
     }
 
     // Chroma (Cb, then Cr) — same grid as luma after subsampling.
@@ -390,7 +404,17 @@ pub fn reconstruct_frame(
                 .ok_or_else(|| KinetixError::Parse("chroma block index out of range".into()))?;
             let qp = crate::foveation::slice_qp_by_index(seq, frame, slice) as i32;
             *db = reconstruct_chroma_block(
-                &mut fb, reference, block, plane_idx, sx, sy, chroma_b, qp, seq, frame,
+                &mut fb,
+                reference,
+                block,
+                plane_idx,
+                sx,
+                sy,
+                chroma_b,
+                qp,
+                seq,
+                frame,
+                &mut scratch,
             )?;
         }
     }
@@ -441,21 +465,36 @@ fn reconstruct_luma_block(
     qp: i32,
     _seq: &SequenceHeader,
     _frame: &FrameHeader,
+    scratch: &mut BlockScratch,
 ) -> Result<DeblockBlock, KinetixError> {
     let x0 = bx * b;
     let y0 = by * b;
-    let mut pred = vec![0i32; b * b];
+    let BlockScratch {
+        pred,
+        above,
+        left,
+        coeffs,
+        residual,
+        tscratch,
+    } = scratch;
     let db = match block {
         BlockSyntax::Intra { mode, .. } => {
-            let (above, left, above_left) = neighbours_luma(fb, x0, y0, b);
+            let above_left = neighbours_luma(fb, x0, y0, b, above, left);
             let m = IntraMode::from_u8(*mode).unwrap_or(IntraMode::Dc);
-            predict_intra_block(&mut pred, b, m, &above, &left, above_left);
+            predict_intra_block(
+                &mut pred[..b * b],
+                b,
+                m,
+                &above[..b],
+                &left[..b],
+                above_left,
+            );
             DeblockBlock::intra(qp)
         }
         BlockSyntax::Inter { sub, mv, .. } => {
             let ref_ = reference.expect("inter without reference");
             predict_inter_luma(
-                &mut pred,
+                &mut pred[..b * b],
                 b,
                 &ref_.luma,
                 ref_.width,
@@ -472,7 +511,19 @@ fn reconstruct_luma_block(
             }
         }
     };
-    add_residual(&mut fb.luma, fb.width, x0, y0, b, qp, block, &pred);
+    add_residual(
+        &mut fb.luma,
+        fb.width,
+        x0,
+        y0,
+        b,
+        qp,
+        block,
+        &pred[..b * b],
+        coeffs,
+        residual,
+        tscratch,
+    );
     Ok(db)
 }
 
@@ -488,22 +539,37 @@ fn reconstruct_chroma_block(
     qp: i32,
     _seq: &SequenceHeader,
     _frame: &FrameHeader,
+    scratch: &mut BlockScratch,
 ) -> Result<DeblockBlock, KinetixError> {
     let x0 = bx * b;
     let y0 = by * b;
-    let mut pred = vec![0i32; b * b];
+    let BlockScratch {
+        pred,
+        above,
+        left,
+        coeffs,
+        residual,
+        tscratch,
+    } = scratch;
     let db = match block {
         BlockSyntax::Intra { mode, .. } => {
-            let (above, left, above_left) = neighbours_chroma(fb, x0, y0, b);
+            let above_left = neighbours_chroma(fb, x0, y0, b, above, left);
             let m = IntraMode::from_u8(*mode).unwrap_or(IntraMode::Dc);
-            predict_intra_block(&mut pred, b, m, &above, &left, above_left);
+            predict_intra_block(
+                &mut pred[..b * b],
+                b,
+                m,
+                &above[..b],
+                &left[..b],
+                above_left,
+            );
             DeblockBlock::intra(qp)
         }
         BlockSyntax::Inter { sub, mv, .. } => {
             let ref_ = reference.expect("inter without reference");
             let ref_plane = if plane_idx == 0 { &ref_.cb } else { &ref_.cr };
             predict_chroma_block(
-                &mut pred,
+                &mut pred[..b * b],
                 b,
                 ref_plane,
                 ref_.chroma_w,
@@ -525,7 +591,19 @@ fn reconstruct_chroma_block(
     } else {
         &mut fb.cr
     };
-    add_residual(plane, fb.chroma_w, x0, y0, b, qp, block, &pred);
+    add_residual(
+        plane,
+        fb.chroma_w,
+        x0,
+        y0,
+        b,
+        qp,
+        block,
+        &pred[..b * b],
+        coeffs,
+        residual,
+        tscratch,
+    );
     Ok(db)
 }
 
@@ -539,21 +617,23 @@ fn add_residual(
     qp: i32,
     block: &BlockSyntax,
     pred: &[i32],
+    coeffs: &mut [i32],
+    residual: &mut [i32],
+    tscratch: &mut [i32],
 ) {
     let n = b;
-    let mut coeffs = vec![0i32; n * n];
+    // The buffers are reused across blocks, so clear them first: the original
+    // code got a freshly zeroed `Vec` per block, and a short coefficient list
+    // must still leave the tail of the block at zero.
+    coeffs[..n * n].fill(0);
     let src = match block {
         BlockSyntax::Intra { coeffs, .. } => coeffs,
         BlockSyntax::Inter { coeffs, .. } => coeffs,
     };
-    for (k, &c) in src.iter().enumerate() {
-        if k >= coeffs.len() {
-            break;
-        }
+    for (k, &c) in src.iter().enumerate().take(n * n) {
         coeffs[k] = dequant(c, qp as u8);
     }
-    let mut residual = vec![0i32; n * n];
-    inverse_2d(&coeffs, n, &mut residual);
+    inverse_2d_with_scratch(&coeffs[..n * n], n, residual, tscratch);
     for r in 0..b {
         for c in 0..b {
             let px = x0 + c;
@@ -599,10 +679,53 @@ fn predict_chroma_block(
     }
 }
 
-fn neighbours_luma(fb: &FrameBuffer, x0: usize, y0: usize, b: usize) -> (Vec<i32>, Vec<i32>, i32) {
+/// Per-block scratch reused across a whole frame.
+///
+/// The reconstruction loop used to allocate a fresh `Vec` for the prediction
+/// block, the two neighbour rows, the dequantised coefficients and the residual
+/// *for every block*. One of these is created per frame instead and threaded
+/// through.
+pub(crate) struct BlockScratch {
+    /// `b * b` prediction samples for the current block.
+    pub pred: Vec<i32>,
+    /// `b` reconstructed samples above the block.
+    pub above: Vec<i32>,
+    /// `b` reconstructed samples left of the block.
+    pub left: Vec<i32>,
+    /// `b * b` dequantised coefficients.
+    pub coeffs: Vec<i32>,
+    /// `b * b` inverse-transform output (the residual).
+    pub residual: Vec<i32>,
+    /// `b * b` transform scratch. Must be distinct from both `coeffs` (the
+    /// transform's source) and `residual` (its destination).
+    pub tscratch: Vec<i32>,
+}
+
+impl BlockScratch {
+    pub(crate) fn new(block: usize) -> Self {
+        debug_assert!(block <= crate::headers::MAX_BLOCK_SIZE);
+        Self {
+            pred: vec![0; block * block],
+            above: vec![R; block],
+            left: vec![R; block],
+            coeffs: vec![0; block * block],
+            residual: vec![0; block * block],
+            tscratch: vec![0; block * block],
+        }
+    }
+}
+
+fn neighbours_luma(
+    fb: &FrameBuffer,
+    x0: usize,
+    y0: usize,
+    b: usize,
+    above: &mut [i32],
+    left: &mut [i32],
+) -> i32 {
     let stride = fb.width;
-    let mut above = vec![R; b];
-    let mut left = vec![R; b];
+    above[..b].fill(R);
+    left[..b].fill(R);
     let above_left = if x0 > 0 && y0 > 0 {
         fb.luma[(y0 - 1) * stride + (x0 - 1)] as i32
     } else {
@@ -624,7 +747,7 @@ fn neighbours_luma(fb: &FrameBuffer, x0: usize, y0: usize, b: usize) -> (Vec<i32
             }
         }
     }
-    (above, left, above_left)
+    above_left
 }
 
 fn neighbours_chroma(
@@ -632,10 +755,12 @@ fn neighbours_chroma(
     x0: usize,
     y0: usize,
     b: usize,
-) -> (Vec<i32>, Vec<i32>, i32) {
+    above: &mut [i32],
+    left: &mut [i32],
+) -> i32 {
     let stride = fb.chroma_w;
-    let mut above = vec![R; b];
-    let mut left = vec![R; b];
+    above[..b].fill(R);
+    left[..b].fill(R);
     let above_left = if x0 > 0 && y0 > 0 {
         fb.cb[(y0 - 1) * stride + (x0 - 1)] as i32
     } else {
@@ -657,7 +782,7 @@ fn neighbours_chroma(
             }
         }
     }
-    (above, left, above_left)
+    above_left
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +808,10 @@ pub fn encode_frame_slices(
     let n_slices = (seq.slice_grid_cols as usize) * (seq.slice_grid_rows as usize);
     let is_inter = frame.frame_type == FrameType::Inter;
 
+    // One scratch set for the whole frame; shared by the luma and chroma loops
+    // and reused for every block and every intra mode trial.
+    let mut scratch = EncodeScratch::new(luma_b.max(chroma_b));
+
     let mut luma_syntax = Vec::with_capacity(luma_total);
     for bi in 0..luma_total {
         let sx = bi % gw;
@@ -693,7 +822,14 @@ pub fn encode_frame_slices(
             slice_index_for(luma_total, n_slices, bi),
         );
         luma_syntax.push(encode_luma_block(
-            src, reference, sx, sy, luma_b, qp, is_inter,
+            src,
+            reference,
+            sx,
+            sy,
+            luma_b,
+            qp,
+            is_inter,
+            &mut scratch,
         )?);
     }
     let mut cb_syntax = Vec::with_capacity(chroma_total);
@@ -707,10 +843,26 @@ pub fn encode_frame_slices(
             slice_index_for(chroma_total, n_slices, bi),
         );
         cb_syntax.push(encode_chroma_block(
-            src, reference, 0, sx, sy, chroma_b, qp, is_inter,
+            src,
+            reference,
+            0,
+            sx,
+            sy,
+            chroma_b,
+            qp,
+            is_inter,
+            &mut scratch,
         )?);
         cr_syntax.push(encode_chroma_block(
-            src, reference, 1, sx, sy, chroma_b, qp, is_inter,
+            src,
+            reference,
+            1,
+            sx,
+            sy,
+            chroma_b,
+            qp,
+            is_inter,
+            &mut scratch,
         )?);
     }
 
@@ -733,6 +885,7 @@ pub fn encode_frame_slices(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_luma_block(
     src: &FrameBuffer,
     reference: Option<&FrameBuffer>,
@@ -741,23 +894,22 @@ fn encode_luma_block(
     b: usize,
     qp: u8,
     is_inter: bool,
+    s: &mut EncodeScratch,
 ) -> Result<BlockSyntax, KinetixError> {
     let stride = src.width;
     let x0 = bx * b;
     let y0 = by * b;
     let n = b * b;
-    let mut orig = vec![0i32; n];
     for r in 0..b {
         for c in 0..b {
-            orig[r * b + c] = src.luma[(y0 + r) * stride + (x0 + c)] as i32;
+            s.orig[r * b + c] = src.luma[(y0 + r) * stride + (x0 + c)] as i32;
         }
     }
 
     if is_inter {
         if let Some(ref_) = reference {
-            let mut pred = vec![0i32; n];
             predict_inter_luma(
-                &mut pred,
+                &mut s.pred[..n],
                 b,
                 &ref_.luma,
                 ref_.width,
@@ -767,36 +919,74 @@ fn encode_luma_block(
                 y0,
                 MotionVector::zero(),
             );
-            let coeffs = encode_residual(&orig, &pred, b, qp);
-            if coeffs_is_lossless(&orig, &pred, &coeffs, b, qp) {
-                return Ok(BlockSyntax::Inter {
-                    sub: 0,
-                    mv: MotionVector::zero(),
-                    coeffs,
-                });
-            }
+            encode_residual_into(
+                &s.orig[..n],
+                &s.pred[..n],
+                b,
+                qp,
+                &mut s.residual,
+                &mut s.transformed,
+                &mut s.coeffs,
+            );
+            let err = residual_error(
+                &s.orig[..n],
+                &s.pred[..n],
+                &s.coeffs,
+                b,
+                qp,
+                &mut s.full,
+                &mut s.back,
+                &mut s.tscratch,
+                &mut s.recon,
+            );
+            let sub = u8::from(err != 0);
             return Ok(BlockSyntax::Inter {
-                sub: 1,
+                sub,
                 mv: MotionVector::zero(),
-                coeffs,
+                coeffs: s.coeffs.clone(),
             });
         }
     }
 
-    let (above, left, above_left) = neighbours_luma(src, x0, y0, b);
+    let above_left = neighbours_luma(src, x0, y0, b, &mut s.above, &mut s.left);
     let mut best_mode = IntraMode::Dc;
-    let mut best_coeffs = vec![];
+    let mut best_coeffs: Vec<i32> = Vec::new();
     let mut best_err = i64::MAX;
     for m in 0..crate::prediction::NUM_INTRA_MODES {
         let mode = IntraMode::from_u8(m).unwrap();
-        let mut pred = vec![0i32; n];
-        predict_intra_block(&mut pred, b, mode, &above, &left, above_left);
-        let coeffs = encode_residual(&orig, &pred, b, qp);
-        let err = residual_error(&orig, &pred, &coeffs, b, qp);
+        predict_intra_block(
+            &mut s.pred[..n],
+            b,
+            mode,
+            &s.above[..b],
+            &s.left[..b],
+            above_left,
+        );
+        encode_residual_into(
+            &s.orig[..n],
+            &s.pred[..n],
+            b,
+            qp,
+            &mut s.residual,
+            &mut s.transformed,
+            &mut s.coeffs,
+        );
+        let err = residual_error(
+            &s.orig[..n],
+            &s.pred[..n],
+            &s.coeffs,
+            b,
+            qp,
+            &mut s.full,
+            &mut s.back,
+            &mut s.tscratch,
+            &mut s.recon,
+        );
         if err < best_err {
             best_err = err;
             best_mode = mode;
-            best_coeffs = coeffs;
+            best_coeffs.clear();
+            best_coeffs.extend_from_slice(&s.coeffs);
         }
     }
     Ok(BlockSyntax::Intra {
@@ -815,24 +1005,23 @@ fn encode_chroma_block(
     b: usize,
     qp: u8,
     is_inter: bool,
+    s: &mut EncodeScratch,
 ) -> Result<BlockSyntax, KinetixError> {
     let stride = src.chroma_w;
     let x0 = bx * b;
     let y0 = by * b;
     let n = b * b;
     let plane = if plane_idx == 0 { &src.cb } else { &src.cr };
-    let mut orig = vec![0i32; n];
     for r in 0..b {
         for c in 0..b {
-            orig[r * b + c] = plane[(y0 + r) * stride + (x0 + c)] as i32;
+            s.orig[r * b + c] = plane[(y0 + r) * stride + (x0 + c)] as i32;
         }
     }
     if is_inter {
         if let Some(ref_) = reference {
             let ref_plane = if plane_idx == 0 { &ref_.cb } else { &ref_.cr };
-            let mut pred = vec![0i32; n];
             predict_chroma_block(
-                &mut pred,
+                &mut s.pred[..n],
                 b,
                 ref_plane,
                 ref_.chroma_w,
@@ -842,30 +1031,74 @@ fn encode_chroma_block(
                 y0,
                 MotionVector::zero(),
             );
-            let coeffs = encode_residual(&orig, &pred, b, qp);
-            if coeffs_is_lossless(&orig, &pred, &coeffs, b, qp) {
+            encode_residual_into(
+                &s.orig[..n],
+                &s.pred[..n],
+                b,
+                qp,
+                &mut s.residual,
+                &mut s.transformed,
+                &mut s.coeffs,
+            );
+            let err = residual_error(
+                &s.orig[..n],
+                &s.pred[..n],
+                &s.coeffs,
+                b,
+                qp,
+                &mut s.full,
+                &mut s.back,
+                &mut s.tscratch,
+                &mut s.recon,
+            );
+            if err == 0 {
                 return Ok(BlockSyntax::Inter {
                     sub: 0,
                     mv: MotionVector::zero(),
-                    coeffs,
+                    coeffs: s.coeffs.clone(),
                 });
             }
         }
     }
-    let (above, left, above_left) = neighbours_chroma(src, x0, y0, b);
+    let above_left = neighbours_chroma(src, x0, y0, b, &mut s.above, &mut s.left);
     let mut best_mode = IntraMode::Dc;
-    let mut best_coeffs = vec![];
+    let mut best_coeffs: Vec<i32> = Vec::new();
     let mut best_err = i64::MAX;
     for m in 0..crate::prediction::NUM_INTRA_MODES {
         let mode = IntraMode::from_u8(m).unwrap();
-        let mut pred = vec![0i32; n];
-        predict_intra_block(&mut pred, b, mode, &above, &left, above_left);
-        let coeffs = encode_residual(&orig, &pred, b, qp);
-        let err = residual_error(&orig, &pred, &coeffs, b, qp);
+        predict_intra_block(
+            &mut s.pred[..n],
+            b,
+            mode,
+            &s.above[..b],
+            &s.left[..b],
+            above_left,
+        );
+        encode_residual_into(
+            &s.orig[..n],
+            &s.pred[..n],
+            b,
+            qp,
+            &mut s.residual,
+            &mut s.transformed,
+            &mut s.coeffs,
+        );
+        let err = residual_error(
+            &s.orig[..n],
+            &s.pred[..n],
+            &s.coeffs,
+            b,
+            qp,
+            &mut s.full,
+            &mut s.back,
+            &mut s.tscratch,
+            &mut s.recon,
+        );
         if err < best_err {
             best_err = err;
             best_mode = mode;
-            best_coeffs = coeffs;
+            best_coeffs.clear();
+            best_coeffs.extend_from_slice(&s.coeffs);
         }
     }
     Ok(BlockSyntax::Intra {
@@ -874,58 +1107,133 @@ fn encode_chroma_block(
     })
 }
 
-/// Transform `orig - pred`, quantise, and return the (trimmed) coefficient
-/// list. The forward transform ([`transform_2d`]) must run here so that the
-/// decode side's [`inverse_2d`] is the exact inverse — otherwise the stored
+/// Per-frame scratch for the encoder's mode search.
+///
+/// The encoder trials all 14 intra modes for every block, and each trial used
+/// to allocate ~6 `Vec`s (prediction, residual, transformed, coefficients,
+/// dequantised coefficients, reconstruction). At 14 modes per block that is
+/// ~84 heap allocations per block. Every buffer below is allocated once per
+/// frame and reused.
+pub(crate) struct EncodeScratch {
+    /// Source block samples.
+    pub orig: Vec<i32>,
+    /// Prediction for the mode currently being trialled.
+    pub pred: Vec<i32>,
+    /// `orig - pred`.
+    pub residual: Vec<i32>,
+    /// Forward-transform output.
+    pub transformed: Vec<i32>,
+    /// Dequantised coefficients.
+    pub full: Vec<i32>,
+    /// Inverse-transform output.
+    pub back: Vec<i32>,
+    /// Transform scratch.
+    pub tscratch: Vec<i32>,
+    /// Reconstructed block.
+    pub recon: Vec<i32>,
+    /// `b` samples above the block.
+    pub above: Vec<i32>,
+    /// `b` samples left of the block.
+    pub left: Vec<i32>,
+    /// Coefficient list for the mode being trialled (reused; cloned only when
+    /// a mode turns out to be the best so far).
+    pub coeffs: Vec<i32>,
+}
+
+impl EncodeScratch {
+    pub(crate) fn new(block: usize) -> Self {
+        debug_assert!(block <= crate::headers::MAX_BLOCK_SIZE);
+        let n = block * block;
+        Self {
+            orig: vec![0; n],
+            pred: vec![0; n],
+            residual: vec![0; n],
+            transformed: vec![0; n],
+            full: vec![0; n],
+            back: vec![0; n],
+            tscratch: vec![0; n],
+            recon: vec![0; n],
+            above: vec![R; block],
+            left: vec![R; block],
+            coeffs: Vec::with_capacity(n),
+        }
+    }
+}
+
+/// Transform `orig - pred`, quantise, and write the (trimmed) coefficient list
+/// into `out` (cleared first, so it can be reused across mode trials). The
+/// forward transform ([`transform_2d`]) must run here so that the decode side's
+/// [`crate::transform::inverse_2d`] is the exact inverse — otherwise the stored
 /// coefficients would be spatial residuals mis-decoded as frequency data.
-fn encode_residual(orig: &[i32], pred: &[i32], b: usize, qp: u8) -> Vec<i32> {
+fn encode_residual_into(
+    orig: &[i32],
+    pred: &[i32],
+    b: usize,
+    qp: u8,
+    residual: &mut [i32],
+    transformed: &mut [i32],
+    out: &mut Vec<i32>,
+) {
     let n = b * b;
-    let mut residual = vec![0i32; n];
     for i in 0..n {
         residual[i] = orig[i] - pred[i];
     }
-    let mut transformed = vec![0i32; n];
-    transform_2d(&residual, b, &mut transformed);
-    let mut coeffs = Vec::with_capacity(n);
+    transform_2d(&residual[..n], b, transformed);
+    out.clear();
+    out.reserve(n);
     let mut last = 0;
-    for (i, &t) in transformed.iter().enumerate() {
+    for (i, &t) in transformed[..n].iter().enumerate() {
         let q = quant(t, qp);
-        coeffs.push(q);
+        out.push(q);
         if q != 0 {
             last = i + 1;
         }
     }
-    coeffs.truncate(last);
-    coeffs
+    out.truncate(last);
 }
 
-fn apply_reconstruct(pred: &[i32], coeffs: &[i32], b: usize, qp: u8) -> Vec<i32> {
+/// Reconstruct `pred + residual(coeffs)` into `out`, reusing every buffer.
+#[allow(clippy::too_many_arguments)]
+fn apply_reconstruct_into(
+    pred: &[i32],
+    coeffs: &[i32],
+    b: usize,
+    qp: u8,
+    full: &mut [i32],
+    back: &mut [i32],
+    tscratch: &mut [i32],
+    out: &mut [i32],
+) {
     let n = b * b;
-    let mut full = vec![0i32; n];
-    for (k, &c) in coeffs.iter().enumerate() {
-        if k >= n {
-            break;
-        }
+    full[..n].fill(0);
+    for (k, &c) in coeffs.iter().enumerate().take(n) {
         full[k] = dequant(c, qp);
     }
-    let mut residual = vec![0i32; n];
-    inverse_2d(&full, b, &mut residual);
-    let mut out = vec![0i32; n];
+    inverse_2d_with_scratch(&full[..n], b, back, tscratch);
     for i in 0..n {
-        out[i] = (pred[i] + residual[i]).clamp(0, 255);
+        out[i] = (pred[i] + back[i]).clamp(0, 255);
     }
-    out
 }
 
-fn coeffs_is_lossless(orig: &[i32], pred: &[i32], coeffs: &[i32], b: usize, qp: u8) -> bool {
-    residual_error(orig, pred, coeffs, b, qp) == 0
-}
-
-fn residual_error(orig: &[i32], pred: &[i32], coeffs: &[i32], b: usize, qp: u8) -> i64 {
-    let recon = apply_reconstruct(pred, coeffs, b, qp);
-    orig.iter()
-        .zip(recon.iter())
-        .map(|(a, b)| (a - b).abs() as i64)
+/// Max absolute reconstruction error, computed without allocating.
+#[allow(clippy::too_many_arguments)]
+fn residual_error(
+    orig: &[i32],
+    pred: &[i32],
+    coeffs: &[i32],
+    b: usize,
+    qp: u8,
+    full: &mut [i32],
+    back: &mut [i32],
+    tscratch: &mut [i32],
+    recon: &mut [i32],
+) -> i64 {
+    let n = b * b;
+    apply_reconstruct_into(pred, coeffs, b, qp, full, back, tscratch, recon);
+    orig[..n]
+        .iter()
+        .zip(recon[..n].iter())
+        .map(|(a, r)| (a - r).abs() as i64)
         .max()
         .unwrap_or(0)
 }
