@@ -203,8 +203,11 @@ via existing `rayon` (tile / superblock-row / frame level); check release profil
 `codegen-units = 1`) and allocation reuse (frame arenas).
 
 Order:
-- [~] AV1 — deblock done 2026-10-02 (-16% @320x240, -15% @720p); tiles/entropy
-  and reconstruction still open
+- [~] AV1 — deblock done 2026-10-02 (-16% @320x240, -15% @720p). Tiles/entropy and
+  reconstruction audited 2026-10-02: the per-leaf residual `vec![0i32; ..]` was
+  tried as a per-tile reusable scratch and **rejected — 1.6%, inside the ±5%
+  noise floor** (see below). Unlike the original codecs, allocation is *not*
+  AV1's lever: the entropy decode it sits next to dominates. Left open.
 - [x] VP9 — **done 2026-10-02**, see below
 - [x] bitstream / rANS (shared by all original codecs, best leverage) — **done
   2026-10-02**, see below
@@ -376,6 +379,48 @@ counts and sink values in both arms.
     itself much cheaper; it does not change any decoded output.
   - After both audits, no crate is left with a bare `env::var` in a decode
     path.
+
+### AV1 tiles — per-leaf residual scratch REJECTED 2026-10-02
+
+The one AV1 pattern that looked exactly like the win that gave lean/realtime/
+vision 18-47%. Both `intra_block.rs` and `inter_block.rs` allocated
+`vec![0i32; leaf_tx_w * leaf_tx_h]` — up to 16 KiB — **per leaf transform
+block**, and in the intra path it was allocated *before* the skip test, so a
+skipped leaf paid a full malloc + memset for a buffer that stayed zero until
+the add.
+
+Implemented it as a per-tile `TileDecodeState::residual_scratch` (64×64, cleared
+per use, so bit-exactness is trivially preserved), then A/B'd same-session on
+the cached 1280x720 corpus via `profile_decode`, 3 iterations x 180 frames,
+alternating stash/unstash builds:
+
+| Build | samples | median |
+|:---|---:|---:|
+| with scratch | 16.99 / 17.14 / 17.08 s | 17.08 s |
+| control | 17.36 / 17.11 / 17.38 s | 17.36 s |
+
+**1.6% — inside the ±5% noise floor, so not a win. Reverted.** Had this been
+measured against the stored Criterion baseline instead of same-session, it would
+have looked like a plausible small win and shipped for nothing.
+
+The lesson is the one that separates the two halves of this phase: for the
+*original* codecs the hot loops were transform-bound, so removing per-block
+allocation paid 18-47%. In AV1 the leaf sits next to a symbol decoder reading
+CDF-coded coefficients, and that decode is an order of magnitude more expensive
+than the malloc it would save. **Allocation was never AV1's lever** — deblock
+was, and that one was two mallocs per *filtered row*, a far higher-frequency
+allocation than one per leaf.
+
+A second finding from the same attempt: the **inter** path cannot take the
+scratch as-is. It calls whole-`self` methods (`read_coeffs`, the context
+helpers) while the residual is live, so a borrow of `self.residual_scratch`
+cannot outlive them — 7 borrow errors. The intra path has no such
+interleaving. Reverting inter and keeping intra is what made it compile, and
+given the measurement it was not worth further plumbing.
+
+Not pursued for the same reason: CDEF, loop restoration, superres and film
+grain are untested for perf, but none has the two-mallocs-per-row shape that
+made deblock worth 15-16%. They need a sampler to rank first.
 
 ### AV1 — deblocking loop filter DONE 2026-10-02
 
