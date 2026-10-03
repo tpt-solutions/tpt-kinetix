@@ -84,6 +84,16 @@ impl<S: ReadAt> Mp4Reader<S> {
         &self.tracks
     }
 
+    /// Codec-agnostic descriptions of every track, indexed like the packets'
+    /// `stream_index`.
+    pub fn streams(&self) -> Vec<tpt_kinetix_core::stream::StreamInfo> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| t.stream_info(i as u32))
+            .collect()
+    }
+
     /// The flat sample index of track `track` (in decode order).
     pub fn samples(&self, track: usize) -> &[SampleRef] {
         self.index.get(track).map_or(&[], Vec::as_slice)

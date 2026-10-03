@@ -39,6 +39,12 @@ pub enum CodecId {
     Opus,
     /// FLAC audio (`fLaC`).
     Flac,
+    /// MPEG-1/2 Layer III audio (`.mp3`, or `mp4a` with object type 0x6B/0x69).
+    Mp3,
+    /// Dolby Digital / AC-3 (`ac-3`).
+    Ac3,
+    /// Dolby Digital Plus / E-AC-3 (`ec-3`).
+    Eac3,
     /// An unrecognised codec; carries the raw sample-entry fourcc.
     Unknown([u8; 4]),
 }
@@ -66,6 +72,9 @@ impl CodecId {
             b"mp4a" => CodecId::Aac,
             b"Opus" => CodecId::Opus,
             b"fLaC" => CodecId::Flac,
+            b".mp3" => CodecId::Mp3,
+            b"ac-3" => CodecId::Ac3,
+            b"ec-3" => CodecId::Eac3,
             _ => CodecId::Unknown(fourcc),
         }
     }
@@ -76,7 +85,12 @@ impl CodecId {
     pub fn media_type(&self) -> MediaType {
         match self {
             CodecId::H264 | CodecId::H265 | CodecId::Av1 | CodecId::Vp9 => MediaType::Video,
-            CodecId::Aac | CodecId::Opus | CodecId::Flac => MediaType::Audio,
+            CodecId::Aac
+            | CodecId::Opus
+            | CodecId::Flac
+            | CodecId::Mp3
+            | CodecId::Ac3
+            | CodecId::Eac3 => MediaType::Audio,
             CodecId::Unknown(_) => MediaType::Other,
         }
     }
@@ -91,6 +105,9 @@ impl CodecId {
             CodecId::Aac => "aac",
             CodecId::Opus => "opus",
             CodecId::Flac => "flac",
+            CodecId::Mp3 => "mp3",
+            CodecId::Ac3 => "ac3",
+            CodecId::Eac3 => "eac3",
             CodecId::Unknown(_) => "unknown",
         }
     }
@@ -133,6 +150,14 @@ mod tests {
         assert_eq!(CodecId::from_fourcc(*b"mp4a"), CodecId::Aac);
         assert_eq!(CodecId::from_fourcc(*b"Opus"), CodecId::Opus);
         assert_eq!(CodecId::from_fourcc(*b"fLaC"), CodecId::Flac);
+    }
+
+    #[test]
+    fn resolves_dolby_and_mp3() {
+        assert_eq!(CodecId::from_fourcc(*b".mp3"), CodecId::Mp3);
+        assert_eq!(CodecId::from_fourcc(*b"ac-3"), CodecId::Ac3);
+        assert_eq!(CodecId::from_fourcc(*b"ec-3"), CodecId::Eac3);
+        assert_eq!(CodecId::Eac3.media_type(), MediaType::Audio);
     }
 
     #[test]

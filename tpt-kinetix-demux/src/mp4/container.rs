@@ -2,12 +2,15 @@
 
 use anyhow::{anyhow, Result};
 use tpt_kinetix_core::codec::{media_type_from_handler, CodecId, MediaType};
+use tpt_kinetix_core::stream::StreamInfo;
 
+use super::boxes::SampleEntry;
 use super::boxes::{
     parse_box_header, parse_co64, parse_ctts, parse_hdlr, parse_mdhd, parse_mvhd, parse_stco,
     parse_stsc, parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, CttsBox, MdhdBox,
     StscBox, StssBox, StszBox, SttsBox, TkhdBox,
 };
+use super::config::parse_sample_entry;
 
 /// A fully-parsed MP4 track, including its complete sample table.
 #[derive(Debug, Clone)]
@@ -37,9 +40,34 @@ pub struct Mp4Track {
     pub stsc: StscBox,
     /// Composition-time offsets (`pts - dts`); empty when the track has no `ctts`.
     pub ctts: CttsBox,
+    /// Codec configuration record (`avcC`, `hvcC`, `av1C`, `vpcC`, AAC
+    /// `AudioSpecificConfig`, `dOps`, …); empty when the entry has none.
+    pub extradata: Vec<u8>,
+    /// Channel count (audio tracks), else 0.
+    pub channels: u16,
+    /// Sample rate in Hz (audio tracks), else 0.
+    pub sample_rate: u32,
+    /// Bits per sample (audio tracks), else 0.
+    pub bits_per_sample: u16,
 }
 
 impl Mp4Track {
+    /// The codec-agnostic description of this track (`index` is its position in
+    /// the demuxer's track list, i.e. the `stream_index` of its packets).
+    pub fn stream_info(&self, index: u32) -> StreamInfo {
+        let codec = self.codec.unwrap_or(CodecId::Unknown([0; 4]));
+        let mut s = StreamInfo::new(index, codec, self.timescale);
+        s.media_type = self.media_type;
+        s.duration = self.duration;
+        s.width = self.width;
+        s.height = self.height;
+        s.channels = self.channels;
+        s.sample_rate = self.sample_rate;
+        s.bits_per_sample = self.bits_per_sample;
+        s.extradata = self.extradata.clone();
+        s
+    }
+
     /// Returns the number of samples in this track.
     pub fn sample_count(&self) -> usize {
         if self.stsz.default_size != 0 {
@@ -105,6 +133,7 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
     let mut stsc: Option<StscBox> = None;
     let mut ctts = CttsBox::default();
     let mut codec: Option<CodecId> = None;
+    let mut first_entry: Option<SampleEntry> = None;
 
     for (box_type, payload) in walk_boxes(trak_payload) {
         match &box_type {
@@ -167,6 +196,7 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
                                             }
                                             b"stsd" => {
                                                 if let Ok((_, stsd)) = parse_stsd(stbl_payload) {
+                                                    first_entry = stsd.entries.first().cloned();
                                                     codec = stsd
                                                         .codec_fourcc()
                                                         .map(CodecId::from_fourcc);
@@ -193,21 +223,43 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
     let chunk_offsets = chunk_offsets.ok_or_else(|| anyhow!("missing stco/co64 box"))?;
     let stsc = stsc.ok_or_else(|| anyhow!("missing stsc box"))?;
 
+    let media_type = media_type_from_handler(handler_type);
+    let entry_cfg = first_entry
+        .as_ref()
+        .map(|e| parse_sample_entry(media_type, &e.extra))
+        .unwrap_or_default();
+    // `mp4a` is the sample-entry for any MPEG-4 audio: the object type says
+    // whether it is AAC or MP3.
+    if codec == Some(CodecId::Aac) && matches!(entry_cfg.object_type, Some(0x69 | 0x6B)) {
+        codec = Some(CodecId::Mp3);
+    }
+    // Prefer the sample entry's own size over `tkhd` (which may be a display
+    // size under a transform), falling back to `tkhd` when it has none.
+    let (width, height) = if entry_cfg.width != 0 && entry_cfg.height != 0 {
+        (entry_cfg.width, entry_cfg.height)
+    } else {
+        (tkhd.width, tkhd.height)
+    };
+
     Ok(Mp4Track {
         track_id: tkhd.track_id,
         timescale: mdhd.timescale,
         duration: mdhd.duration,
         handler_type,
-        media_type: media_type_from_handler(handler_type),
+        media_type,
         codec,
-        width: tkhd.width,
-        height: tkhd.height,
+        width,
+        height,
         stts,
         stss,
         stsz,
         chunk_offsets,
         stsc,
         ctts,
+        extradata: entry_cfg.extradata,
+        channels: entry_cfg.channels,
+        sample_rate: entry_cfg.sample_rate,
+        bits_per_sample: entry_cfg.bits_per_sample,
     })
 }
 

@@ -212,6 +212,21 @@ fn print_mp4_tracks(label: &str, tracks: &[tpt_kinetix_demux::mp4::Mp4Track]) {
         if track.width != 0 || track.height != 0 {
             println!("    resolution: {}x{}", track.width, track.height);
         }
+        if track.channels != 0 || track.sample_rate != 0 {
+            println!(
+                "    audio: {} ch, {} Hz{}",
+                track.channels,
+                track.sample_rate,
+                if track.bits_per_sample != 0 {
+                    format!(", {}-bit", track.bits_per_sample)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        if !track.extradata.is_empty() {
+            println!("    codec config: {} bytes", track.extradata.len());
+        }
 
         if let Some(caps) = decoder_capabilities_for(track.codec) {
             let status = if caps.pixel_exact {

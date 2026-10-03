@@ -9,6 +9,7 @@
 //! - [`pixel_format`] — supported pixel / chroma-sampling formats
 //! - [`frame`] — decoded [`frame::VideoFrame`] and [`frame::PointCloud`]
 //! - [`packet`] — compressed [`packet::Packet`] as produced by a demuxer
+//! - [`stream`] — codec-agnostic [`stream::StreamInfo`] for passthrough remux/packaging
 //! - [`encode`] — codec-agnostic encoder configuration
 //! - [`capabilities`] — per-decoder [`capabilities::DecoderCapabilities`] introspection
 
@@ -19,6 +20,7 @@ pub mod error;
 pub mod frame;
 pub mod packet;
 pub mod pixel_format;
+pub mod stream;
 pub mod timestamp;
 
 // Convenience re-exports of the most commonly used types.
@@ -31,4 +33,5 @@ pub use frame::{
 };
 pub use packet::Packet;
 pub use pixel_format::PixelFormat;
+pub use stream::StreamInfo;
 pub use timestamp::Timestamp;

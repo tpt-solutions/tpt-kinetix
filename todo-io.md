@@ -52,7 +52,7 @@ Known/qualitative, to be measured before claiming:
 - [~] **M1 — Streaming demux.** *(MP4 done 2026-10-04: `ReadAt` source trait + `Mp4Reader`; CLI `probe` no longer loads the file; TS and MKV still take a whole buffer; HTTP-range source + fragmented MP4 still open.)* `Demuxer` over `Read + Seek` (and an async/ranged source
   trait); MP4 reads `moov` without loading `mdat`; samples are read on demand. Replace every
   `fs::read` in CLI/examples. Test with a >RAM synthetic sparse file and an HTTP-range mock.
-- [ ] **M2 — Codec-agnostic tracks.** Packets carry `codec id + extradata` for H.264, AV1,
+- [~] **M2 — Codec-agnostic tracks.** *(MP4 done 2026-10-04: `core::StreamInfo`, `Mp4Reader::streams()`; MKV and TS still to do.)* Packets carry `codec id + extradata` for H.264, AV1,
   VP9, **AAC/Opus/MP3 as opaque passthrough** (no decoder). Demux MP4/MKV/TS multi-track.
 - [ ] **M3 — Streaming muxer.** `Write`-based MP4 muxer: multi-track, faststart, edit lists,
   and **fragmented MP4 / CMAF**. Remux (`tpt-kinetix remux in out`) round-trips vs
@@ -104,3 +104,18 @@ Over a real network the byte count and request count (each a round trip) are wha
 for a moov-at-end file. Caveats: localhost only (no latency), ffprobe was not tuned (`-probesize` /
 `-analyzeduration` can lower its cost at the price of accuracy), one container type.
 Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range server, seek cost).
+
+### M2 progress (2026-10-04) — MP4 side
+
+* `tpt-kinetix-core::StreamInfo` (codec, timescale, duration, video size, audio channels/rate/bits, codec
+  config record `extradata`); new `CodecId::{Mp3, Ac3, Eac3}`.
+* `mp4::config::parse_sample_entry`: video/audio sample-entry fixed fields (audio v0/v1/v2 layouts) and the
+  config child boxes: `avcC`, `hvcC`, `av1C`, `vpcC`, `dOps`, `dfLa`, `dac3`, `dec3`, plus the AAC
+  `AudioSpecificConfig` out of `esds` (MPEG-4 descriptor walk; `mp4a` + object type 0x6B/0x69 is MP3).
+  Bounds-checked; truncation/hostile input yields fewer fields, never a panic.
+* Validated against real encoders (`tests/real_ffmpeg.rs`, skipped without ffmpeg): H.264+AAC, AV1+Opus,
+  VP9+Opus, HEVC+AC-3 (6 ch), H.264+MP3, H.264+FLAC, H.264+E-AC-3 — codec, size, channels, rate all equal
+  `ffprobe`, and `avcC`/`hvcC`/`av1C` sizes equal ffmpeg's `extradata_size`.
+* `probe` prints audio layout and config sizes.
+* Still to do for M2: Matroska (`CodecPrivate` → extradata, multi-track, lacing, Cues, EBML-void/unknown sizes),
+  MPEG-TS (PMT descriptors -> StreamInfo; AAC ADTS -> AudioSpecificConfig), stream-info from fragmented MP4.

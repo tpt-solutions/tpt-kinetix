@@ -8,6 +8,7 @@
 //! - [`container`] — top-level `moov` walker and [`Mp4Track`]
 
 pub mod boxes;
+pub mod config;
 pub mod container;
 pub mod reader;
 
@@ -17,6 +18,7 @@ pub use boxes::{
     CttsEntry, FtypBox, MdhdBox, MvhdBox, SampleEntry, StcoBox, StscBox, StscEntry, StsdBox,
     StssBox, StszBox, SttsBox, SttsEntry, TkhdBox,
 };
+pub use config::{parse_sample_entry, SampleEntryConfig};
 pub use container::{parse_moov_payload, parse_mp4, Mp4Track};
 pub use reader::{Mp4Reader, SampleRef, MAX_MOOV_BYTES, MAX_SAMPLES_PER_TRACK};
 use tpt_kinetix_core::{error::KinetixError, packet::Packet};
