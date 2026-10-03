@@ -53,7 +53,7 @@ pub(super) fn dequantize_coeffs(
     qindex_dc: u8,
     qindex_ac: u8,
     bit_depth: u32,
-) -> Vec<i32> {
+) -> crate::pool::Pooled<i32> {
     dequantize_coeffs_qm(quant, tx_size, qindex_dc, qindex_ac, bit_depth, None)
 }
 
@@ -104,7 +104,7 @@ pub(super) fn dequantize_coeffs_qm(
     qindex_ac: u8,
     bit_depth: u32,
     qm: Option<&[u8]>,
-) -> Vec<i32> {
+) -> crate::pool::Pooled<i32> {
     let dc = dc_dequant(qindex_dc, bit_depth) as i64;
     let ac = ac_dequant(qindex_ac, bit_depth) as i64;
     let denom = dq_denom(tx_size) as i64;
@@ -112,10 +112,9 @@ pub(super) fn dequantize_coeffs_qm(
     let clip_hi: i64 = (1i64 << (7 + bit_depth)) - 1;
     let tw = av1::TX_WIDTH[tx_size].min(32);
     let th = av1::TX_HEIGHT[tx_size].min(32);
-    quant
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| {
+    let mut out = crate::pool::Pooled::<i32>::zeroed(quant.len());
+    for (i, (slot, &c)) in out.iter_mut().zip(quant).enumerate() {
+        *slot = {
             let mut q = if i == 0 { dc } else { ac };
             if let Some(m) = qm {
                 // dav1d's tables are stored transposed relative to the raster
@@ -127,8 +126,9 @@ pub(super) fn dequantize_coeffs_qm(
             let sign: i64 = if dq < 0 { -1 } else { 1 };
             let dq2 = sign * ((dq.abs() & 0xFFFFFF) / denom);
             dq2.clamp(clip_lo, clip_hi) as i32
-        })
-        .collect()
+        };
+    }
+    out
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -2986,6 +2986,7 @@ impl<'a> TileDecodeState<'a> {
 
         // Collected overlap jobs, gathered first so the mutable plane borrow is
         // taken only for the blend.
+        #[derive(Clone, Copy)]
         struct ObmcJob {
             pass: u8,
             px: usize,
@@ -2999,7 +3000,10 @@ impl<'a> TileDecodeState<'a> {
             filters: [u8; 2],
             nb_ref: u8,
         }
-        let mut jobs: Vec<ObmcJob> = Vec::new();
+        // At most 4 above + 4 left neighbours, so a fixed array avoids a heap
+        // allocation per OBMC block.
+        let mut jobs: [Option<ObmcJob>; 8] = [None; 8];
+        let mut n_jobs = 0usize;
 
         if avail_u && SUBSAMPLED_SIZE[bsize][subx][suby] >= BLOCK_8X8 {
             let n_limit = 4.min((bw4 as u32).trailing_zeros() as usize);
@@ -3018,7 +3022,7 @@ impl<'a> TileDecodeState<'a> {
                     let px = ((x4 * MI_SIZE) as isize - self.tile_px_x0 as isize) >> subx;
                     let py = ((mi_row * MI_SIZE) as isize - self.tile_px_y0 as isize) >> suby;
                     if px >= 0 && py >= 0 && pred_w > 0 && pred_h > 0 {
-                        jobs.push(ObmcJob {
+                        jobs[n_jobs] = Some(ObmcJob {
                             pass: 0,
                             px: px as usize,
                             py: py as usize,
@@ -3031,6 +3035,7 @@ impl<'a> TileDecodeState<'a> {
                             ],
                             nb_ref,
                         });
+                        n_jobs += 1;
                     }
                 }
                 x4 += step4;
@@ -3053,7 +3058,7 @@ impl<'a> TileDecodeState<'a> {
                     let px = ((mi_col * MI_SIZE) as isize - self.tile_px_x0 as isize) >> subx;
                     let py = ((y4 * MI_SIZE) as isize - self.tile_px_y0 as isize) >> suby;
                     if px >= 0 && py >= 0 && pred_w > 0 && pred_h > 0 {
-                        jobs.push(ObmcJob {
+                        jobs[n_jobs] = Some(ObmcJob {
                             pass: 1,
                             px: px as usize,
                             py: py as usize,
@@ -3066,6 +3071,7 @@ impl<'a> TileDecodeState<'a> {
                             ],
                             nb_ref,
                         });
+                        n_jobs += 1;
                     }
                 }
                 y4 += step4;
@@ -3097,11 +3103,8 @@ impl<'a> TileDecodeState<'a> {
             && obmc_xy_target.is_none_or(|(tc, tr)| mi_col == tc && mi_row == tr)
             && (obmc_xy_target.is_some() || (mi_col == 4 && mi_row == 20));
         if dbg_obmc {
-            eprintln!(
-                "OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}",
-                jobs.len()
-            );
-            for j in &jobs {
+            eprintln!("OBMC mi=({mi_col},{mi_row}) bsize={bsize} jobs={}", n_jobs);
+            for j in jobs[..n_jobs].iter().flatten() {
                 eprintln!(
                     "  job pass={} px={} py={} w={} h={} nb_ref={} dir0_v={} dir1_h={} mv=({},{})",
                     j.pass,
@@ -3117,7 +3120,7 @@ impl<'a> TileDecodeState<'a> {
                 );
             }
         }
-        for job in jobs {
+        for job in jobs.into_iter().flatten() {
             let ObmcJob {
                 pass,
                 px,
@@ -3136,7 +3139,7 @@ impl<'a> TileDecodeState<'a> {
                 continue;
             };
             let (rp, rw, _) = rf.plane(plane);
-            let mut obmc = vec![0 as Px; pred_w * pred_h];
+            let mut obmc = crate::pool::Pooled::<Px>::zeroed(pred_w * pred_h);
             // `filters` here is `[dir0, dir1]` (see the neighbour-job
             // construction above); dir1 is horizontal, dir0 is vertical.
             // `px`/`py` are tile-local (the destination write below uses them
@@ -3538,7 +3541,7 @@ impl<'a> TileDecodeState<'a> {
                 (self.subsampling_x as u32, self.subsampling_y as u32)
             };
             let tmp = {
-                let mut t = vec![0 as Px; bw * bh];
+                let mut t = crate::pool::Pooled::<Px>::zeroed(bw * bh);
                 if let Some(rf) = self.ref_slots.slots[slot0] {
                     let (rp, rw, _) = rf.plane(plane);
                     // dav1d's mc()/warp_affine() clamp reference reads at the
@@ -4087,7 +4090,7 @@ impl<'a> TileDecodeState<'a> {
                         leaf_tx_w as u8,
                         leaf_tx_h as u8,
                     );
-                    let mut residual = vec![0i32; leaf_tx_w * leaf_tx_h];
+                    let mut residual = crate::pool::Pooled::<i32>::zeroed(leaf_tx_w * leaf_tx_h);
                     let blk = TxBlockCtx {
                         plane: 0,
                         tx_size: leaf_tx,
@@ -4462,7 +4465,7 @@ impl<'a> TileDecodeState<'a> {
                                 if plane != chroma_pass + 1 {
                                     continue;
                                 }
-                                let mut residual = vec![0i32; cw * ch];
+                                let mut residual = crate::pool::Pooled::<i32>::zeroed(cw * ch);
                                 if !has_residual {
                                     // A skipped block reads no chroma coeffs but must
                                     // still reset the neighbour context — the luma path

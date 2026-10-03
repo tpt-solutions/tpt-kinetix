@@ -23,6 +23,7 @@ rav1e = { version = "0.8", default-features = false }
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = "1.5"
+backtrace = "0.3"
 
 [[bench]]
 name = "av1_encode"

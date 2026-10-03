@@ -83,9 +83,15 @@ thread_local! {
     static SYMBOL_TRACE: RefCell<Option<Vec<SymbolTraceEntry>>> = const { RefCell::new(None) };
 }
 
+/// Process-wide hint that some thread has ever enabled tracing, so the
+/// per-symbol check is one relaxed load instead of a thread-local borrow.
+static TRACE_EVER_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Start (or reset) a symbol trace for the current thread. Call before
 /// decoding; drain with [`take_symbol_trace`] after.
 pub fn enable_symbol_trace() {
+    TRACE_EVER_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     SYMBOL_TRACE.with(|t| *t.borrow_mut() = Some(Vec::new()));
     BLOCK_MARKERS.with(|t| *t.borrow_mut() = Some(Vec::new()));
 }
@@ -93,7 +99,8 @@ pub fn enable_symbol_trace() {
 /// Whether a trace session is currently active on this thread (checked once
 /// per `read_symbol` call; cheap relative to the arithmetic decode itself).
 pub fn symbol_trace_enabled() -> bool {
-    SYMBOL_TRACE.with(|t| t.borrow().is_some())
+    TRACE_EVER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+        && SYMBOL_TRACE.with(|t| t.borrow().is_some())
 }
 
 /// Take (and clear) the accumulated trace for the current thread.
@@ -366,14 +373,9 @@ pub fn take_block_markers() -> Vec<BlockMarker> {
 /// `x` must be >= 1 (guaranteed by all call sites below: `SymbolRange` is
 /// always >= 1, and `N` — the symbol count — is always >= 2).
 #[inline]
-fn floor_log2(mut x: u32) -> u32 {
+fn floor_log2(x: u32) -> u32 {
     debug_assert!(x >= 1);
-    let mut s = 0u32;
-    while x != 0 {
-        x >>= 1;
-        s += 1;
-    }
-    s - 1
+    31 - x.leading_zeros()
 }
 
 /// The AV1 symbol (arithmetic) decoder.
@@ -481,27 +483,31 @@ impl<'a> SymbolDecoder<'a> {
         self.bit_pos
     }
 
-    /// Raw bitstream bit read, MSB-first, byte-aligned start. Returns 0 for
-    /// positions past the end of `data` (spec §8.2.2 padding behavior).
-    fn read_bit(&mut self) -> u32 {
-        let byte_idx = self.bit_pos / 8;
-        let bit = if byte_idx < self.data.len() {
-            let shift = 7 - (self.bit_pos % 8);
-            (self.data[byte_idx] >> shift) & 1
-        } else {
-            0
-        };
-        self.bit_pos += 1;
-        bit as u32
-    }
-
-    /// `f(n)` (§9 "Parsing process for f(n)"): read `n` bits MSB-first.
+    /// `f(n)` (§9 "Parsing process for f(n)"): read `n` (<= 15) bits MSB-first.
+    ///
+    /// Gathers the bits from a 32-bit big-endian window instead of looping bit
+    /// by bit; bytes past the end of `data` read as zero, as the old per-bit
+    /// reader did.
+    #[inline]
     fn f(&mut self, n: u32) -> u32 {
-        let mut x = 0u32;
-        for _ in 0..n {
-            x = 2 * x + self.read_bit();
+        debug_assert!(n <= 15);
+        if n == 0 {
+            return 0;
         }
-        x
+        let byte_idx = self.bit_pos >> 3;
+        let bit_off = (self.bit_pos & 7) as u32;
+        let window = match self.data.get(byte_idx..byte_idx + 4) {
+            Some(b) => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+            None => {
+                let mut w = 0u32;
+                for k in 0..4 {
+                    w = (w << 8) | self.data.get(byte_idx + k).copied().unwrap_or(0) as u32;
+                }
+                w
+            }
+        };
+        self.bit_pos += n as usize;
+        (window >> (32 - bit_off - n)) & ((1u32 << n) - 1)
     }
 
     /// `read_symbol(cdf)` (§8.2.6).
@@ -569,32 +575,18 @@ impl<'a> SymbolDecoder<'a> {
         if self.allow_update_cdf {
             let count = cdf[n] as u32;
             let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
-            for (i, slot) in cdf[..n - 1].iter_mut().enumerate() {
-                // `tmp` is 0 for entries *before* the decoded symbol and
-                // `1 << 15` for the symbol itself and every entry *after* it —
-                // that asymmetry is what keeps the CDF monotonic as it adapts.
-                //
-                // The original spelling was a sticky flag with no `else`:
-                // `if i == symbol { tmp = 1 << 15; }`, so `tmp` stayed set for
-                // the rest of the loop. Writing the obvious per-element
-                // `if i == symbol { .. } else { 0 }` is **wrong** — it resets
-                // `tmp` after the symbol and decodes differently (it broke
-                // `multi_symbol_uniform4_matches_reference_trace` and the
-                // coefficient oracle the first time it was tried). The `>=`
-                // below is the branchless form of the sticky semantics, and
-                // `cdf_update_matches_branching_form` now guards it against the
-                // original transcription.
-                let tmp: u32 = if (i as u32) >= symbol as u32 {
-                    1 << 15
-                } else {
-                    0
-                };
+            // Entries before the decoded symbol decay toward 0; the symbol's own
+            // entry and every later one grow toward `1 << 15` (that asymmetry
+            // keeps the CDF monotonic). `cdf_update_matches_branching_form`
+            // guards this split form against the original sticky-`tmp` loop.
+            let (before, after) = cdf[..n - 1].split_at_mut(symbol.min(n - 1));
+            for slot in before {
                 let c = *slot as u32;
-                *slot = if tmp < c {
-                    (c - ((c - tmp) >> rate)) as u16
-                } else {
-                    (c + ((tmp - c) >> rate)) as u16
-                };
+                *slot = (c - (c >> rate)) as u16;
+            }
+            for slot in after {
+                let c = *slot as u32;
+                *slot = (c + (((1u32 << 15) - c) >> rate)) as u16;
             }
             if cdf[n] < 32 {
                 cdf[n] += 1;

@@ -35,8 +35,8 @@ fn directional_prediction_filter_type_changes_sub_pel_output() {
         .map(|i| if i % 2 == 0 { 20 } else { 230 })
         .collect();
     let borders = BlockBorders {
-        top: jagged.clone(),
-        left: jagged,
+        top: jagged.clone().into(),
+        left: jagged.into(),
         tl: 128,
         have_above: true,
         have_left: true,
@@ -171,8 +171,8 @@ fn directional_prediction_covers_all_modes_without_panicking() {
             let left: Vec<i32> = (0..2 * size).map(|i| (i * 13 % 256) as i32).collect();
             let mut out = vec![0i32; size * size];
             let borders = BlockBorders {
-                top,
-                left,
+                top: top.into(),
+                left: left.into(),
                 tl: 128,
                 have_above: true,
                 have_left: true,
@@ -218,8 +218,8 @@ fn directional_edge_filter_gates_on_have_above_left_not_zone_need() {
         .map(|i| if i % 2 == 0 { 0 } else { 255 })
         .collect();
     let borders = BlockBorders {
-        top: jagged.clone(),
-        left: jagged,
+        top: jagged.clone().into(),
+        left: jagged.into(),
         tl: 128,
         have_above: false,
         have_left: false,
@@ -1993,8 +1993,8 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
     // row is a constant 200 must predict exactly 200, not the average of
     // 200 with a synthesized left column.
     let borders = BlockBorders {
-        top: vec![200; 8],
-        left: vec![200; 8],
+        top: vec![200; 8].into(),
+        left: vec![200; 8].into(),
         tl: 200,
         have_above: true,
         have_left: false,
@@ -2007,8 +2007,8 @@ fn dc_pred_via_predict_intra_block_uses_the_border_availability_flags() {
     // `1 << (BitDepth - 1)` branch regardless of what the (substituted)
     // arrays happen to contain.
     let borders = BlockBorders {
-        top: vec![127; 8],
-        left: vec![129; 8],
+        top: vec![127; 8].into(),
+        left: vec![129; 8].into(),
         tl: 128,
         have_above: false,
         have_left: false,

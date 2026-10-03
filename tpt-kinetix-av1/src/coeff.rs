@@ -466,7 +466,7 @@ pub struct TxBlockCtx {
 pub struct CoeffBlock {
     /// Quantized, signed coefficients in raster order within the transform
     /// block (the spec's `Quant` array, after sign application).
-    pub quant: Vec<i32>,
+    pub quant: crate::pool::Pooled<i32>,
     /// End-of-block position: the number of scan positions that were coded.
     /// Zero means `all_zero` was set and no residual is present.
     pub eob: usize,
@@ -545,7 +545,7 @@ pub fn read_coeffs(
         num_coeffs.min(1024)
     };
 
-    let mut quant = vec![0i32; num_coeffs];
+    let mut quant = crate::pool::Pooled::<i32>::zeroed(num_coeffs);
     let mut eob = 0usize;
     let mut cul_level: u32 = 0;
     let mut dc_category: u8 = 0;

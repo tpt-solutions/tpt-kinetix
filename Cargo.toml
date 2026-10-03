@@ -120,3 +120,9 @@ opt-level = 3
 # the lld-link issue is resolved or the lockstep test lands elsewhere.
 [profile.dev.package.out-kinetix-h264]
 codegen-units = 1
+
+# Release codegen plus line tables, for `tpt-kinetix-av1`'s `prof_sample` example
+# (an in-process sampling profiler; `samply`/ETW need an elevated shell here).
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"

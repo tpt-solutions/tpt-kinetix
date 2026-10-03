@@ -111,7 +111,7 @@ pub(super) fn reconstruct_tx_block(
         )
     });
 
-    let mut residual = vec![0i32; num_coeffs];
+    let mut residual = crate::pool::Pooled::<i32>::zeroed(num_coeffs);
     if !skip {
         if dbg {
             eprintln!("DBG bit_pos before coeffs = {:?}", dec.dbg_bit_pos());
@@ -246,7 +246,7 @@ pub(super) fn reconstruct_tx_block(
             borders.have_left
         );
     }
-    let mut pred = vec![0i32; num_coeffs];
+    let mut pred = crate::pool::Pooled::<i32>::zeroed(num_coeffs);
     // Targeted intra prediction dump: `KINETIX_AV1_DBG_TXB=x,y` brackets the
     // block covering that luma pixel and prints the decoded mode, the borders
     // actually sampled, and the resulting prediction. The `dbg`/`dbg_px` gates

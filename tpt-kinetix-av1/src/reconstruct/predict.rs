@@ -940,9 +940,9 @@ pub(super) fn clip1(x: i32, bit_depth: u32) -> i32 {
 /// every tile.
 pub(super) struct BlockBorders {
     /// `AboveRow[0 .. w-1]`.
-    pub(super) top: Vec<i32>,
+    pub(super) top: crate::pool::Pooled<i32>,
     /// `LeftCol[0 .. h-1]`.
-    pub(super) left: Vec<i32>,
+    pub(super) left: crate::pool::Pooled<i32>,
     /// `AboveRow[-1]`, which §7.11.2.1 also assigns to `LeftCol[-1]`.
     pub(super) tl: i32,
     /// `haveAbove`: there are valid samples above this transform block.
@@ -1029,26 +1029,28 @@ pub(super) fn block_borders(
     let left_limit = max_y.min(px_y + if have_below_left { 2 * tx_h } else { tx_h } - 1);
 
     // AboveRow[i], i = 0..w+h-1.
-    let top: Vec<i32> = if !have_above && have_left {
-        vec![sample(px_x - 1, px_y); ext]
+    let mut top = crate::pool::Pooled::<i32>::zeroed(ext);
+    if !have_above && have_left {
+        top.fill(sample(px_x - 1, px_y));
     } else if !have_above {
-        vec![mid - 1; ext]
+        top.fill(mid - 1);
     } else {
-        (0..ext)
-            .map(|i| sample(above_limit.min(px_x + i), px_y - 1))
-            .collect()
-    };
+        for (i, d) in top.iter_mut().enumerate() {
+            *d = sample(above_limit.min(px_x + i), px_y - 1);
+        }
+    }
 
     // LeftCol[i], i = 0..w+h-1.
-    let left: Vec<i32> = if !have_left && have_above {
-        vec![sample(px_x, px_y - 1); ext]
+    let mut left = crate::pool::Pooled::<i32>::zeroed(ext);
+    if !have_left && have_above {
+        left.fill(sample(px_x, px_y - 1));
     } else if !have_left {
-        vec![mid + 1; ext]
+        left.fill(mid + 1);
     } else {
-        (0..ext)
-            .map(|i| sample(px_x - 1, left_limit.min(px_y + i)))
-            .collect()
-    };
+        for (i, d) in left.iter_mut().enumerate() {
+            *d = sample(px_x - 1, left_limit.min(px_y + i));
+        }
+    }
 
     // AboveRow[-1] (== LeftCol[-1]).
     let tl = match (have_above, have_left) {

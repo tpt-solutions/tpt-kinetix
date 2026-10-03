@@ -1093,3 +1093,59 @@ least cross-crate information. Re-measuring it under fat LTO is still open.
 
 - Target hardware for headline numbers: dev machine only, or also RPi-class ARM (lean/face budgets)?
 - Regression threshold for `bench-compare`.
+
+## 2026-10-03 — real profile: entropy decode is NOT the bottleneck
+
+Built `tpt-kinetix-av1/examples/prof_sample.rs` (in-process sampler: suspends the
+decode thread every 0.5 ms, resolves RIPs through inlined frames; also a counting
+allocator that attributes allocation sites). Run with
+`cargo run --profile profiling -p tpt-kinetix-av1 --example prof_sample -- "" 2`
+(`PROF_ALLOC=1` for allocation sites). Needs no elevation, unlike `samply`.
+
+FATE corpus, main thread (only the calling thread is sampled, rayon workers are not):
+
+| Share | Where |
+|---:|:---|
+| 17-18% | blocked in rayon join (`ZwWaitForAlertByThreadId`) — idle, not work |
+| ~8% | `warp::warp_affine_8x8` |
+| ~5% | `inter::filter_rows_h` (+ `motion_compensate`/`gather_patch` ~5%) |
+| ~10% | heap alloc/free (`RtlAllocateHeap`, `RtlFreeHeap`, `NtFree/AllocateVirtualMemory`) |
+| ~5% | `sgrproj_filter_plane`, ~4% `filter_line_1d_into` |
+| **~3%** | `entropy::read_symbol` |
+
+Only ~4.5M `read_symbol` calls decode in ~1.6 s (~350 ns/symbol of total wall
+time), so the earlier "86% unattributed block syntax" is inter reconstruction and
+allocation, not the arithmetic decoder. **Item 5's refill/CDF micro-opts were
+implemented and are bit-exact (FATE 204/204) but measure neutral** (1.567 vs 1.572 s).
+Kept because they are correct and cheap (bit-by-bit refill -> 32-bit window,
+`leading_zeros` floor_log2, split CDF update, trace flag one atomic load).
+
+Allocation: 3.43M allocations / 2.68 GB per corpus pass. Pooling the MC scratch
+(`inter.rs` `take_buf`/`put_buf`) -> 2.57M / 1.92 GB, ~4-5% faster in an alternating
+A/B (noisy: base 1.68/1.73/1.73 s vs 1.68/1.67/1.55 s). Remaining top sites:
+`inter_predict_plane` tmp `Vec<Px>`, `apply_obmc`, per-block `residual` Vecs in
+`add_inter_residual`, `read_coeffs` `quant` Vec, `inter_mv_stack` scratch,
+`split_into_subblocks`, `block_borders`.
+
+Next: pool those remaining per-block Vecs; then warp_affine_8x8 and filter_rows_h
+(the actual arithmetic hot spots, where SIMD may now be justified); investigate the
+17% rayon wait (post-filter load imbalance).
+
+### Follow-up (same day): pooling + warp patch, measured
+
+Alternating A/B of prebuilt bench binaries (`fate_corpus`, 4 pairs each):
+
+| Step | Mean | vs previous |
+|:---|---:|---:|
+| base (entropy micro-opts only) | 1.656 s | |
+| + MC scratch pool, per-block residual/pred buffer pool (`pool.rs`; 3.43M -> 1.98M allocs, 2.68 -> 1.62 GB) | 1.569 s | -5.3% |
+| + warp 15x15 patch gathered once (`gather_warp_patch`) instead of 960 clamped taps/8x8 | 1.525 s | -3.4% |
+
+Cumulative ~-8%. FATE 204/204 and the av1 test suite stay green. Remaining
+allocation sites are small per-block Vecs (`inter_mv_stack` stack/out, `block_borders`,
+`split_into_subblocks`, `read_coeffs` quant, obmc jobs). Next: `filter_rows_h`
+(row-wise 8-tap, SIMD candidate), `sgrproj`, and the 17% rayon wait.
+
+**Rejected 2026-10-03:** tap-major rewrite of `inter::filter_rows_h` (8 contiguous multiply-add passes per row, intended to vectorise) — bit-exact but consistently ~1.5% *slower* (1.540 vs 1.511 s, 4/4 alternating pairs): most MC blocks are narrow, so eight passes over a short row lose to the fused per-pixel form. Reverted. A real win here needs explicit SIMD on a transposed/padded layout, not a loop reshuffle.
+
+**Allocation round 2 (2026-10-03):** OBMC job list -> fixed array; intra `BlockBorders`, `CoeffBlock.quant`, `dequantize_coeffs_qm` output, intra `residual`/`pred` and the OBMC prediction now come from `pool::Pooled`. Bit-exact (FATE 204/204). Measured only ~-0.8% (1.536 vs 1.549 s, 4 alternating pairs, within noise): the allocator is no longer a lever — the remaining ~2M allocations are small and cheap. Stop pooling; next gains must come from arithmetic (explicit SIMD for `filter_rows_h`/`motion_compensate`, ~9%, then `sgrproj`/`deblock`, ~3% each) or the 17% rayon wait.

@@ -207,6 +207,31 @@ fn subpel_kernel(kind: u8, frac: i32, bits: u32, small: bool) -> [i32; 8] {
     defaults::SUBPEL_FILTERS[set][pos as usize]
 }
 
+thread_local! {
+    /// Pool of scratch `Vec<i32>`s for the MC passes. Every block used to
+    /// allocate (and free) its patch and intermediate-row buffers; with ~3.4M
+    /// allocations over the FATE corpus the allocator was ~10% of decode.
+    static MC_POOL: std::cell::RefCell<Vec<Vec<i32>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A zero-filled `len`-long scratch buffer from the pool (return it with
+/// [`put_buf`] when done; dropping it instead is merely slower).
+fn take_buf(len: usize) -> Vec<i32> {
+    let mut v = MC_POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default();
+    v.clear();
+    v.resize(len, 0);
+    v
+}
+
+fn put_buf(v: Vec<i32>) {
+    MC_POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.len() < 8 {
+            p.push(v);
+        }
+    });
+}
+
 /// Copy the `pw` x `ph` window of `refp` whose top-left is `(x0, y0)` into a
 /// contiguous buffer, clamping every coordinate to the plane exactly as the
 /// per-tap `clamp` in the filters used to. Doing the clamp once per sample
@@ -222,7 +247,7 @@ fn gather_patch(
     pw: usize,
     ph: usize,
 ) -> Vec<i32> {
-    let mut patch = vec![0i32; pw * ph];
+    let mut patch = take_buf(pw * ph);
     let inside = x0 >= 0 && x0 as usize + pw <= ref_w;
     for ty in 0..ph {
         let ry = (y0 + ty as i32).clamp(0, ref_h as i32 - 1) as usize;
@@ -252,7 +277,7 @@ fn filter_rows_h(
     shift: u32,
 ) -> Vec<i32> {
     let pw = bw + 7;
-    let mut out = vec![0i32; bw * rows];
+    let mut out = take_buf(bw * rows);
     for ty in 0..rows {
         let src = &patch[ty * pw..(ty + 1) * pw];
         let dst = &mut out[ty * bw..(ty + 1) * bw];
@@ -432,11 +457,13 @@ pub fn motion_compensate(
             bh,
         );
         let rows = filter_rows_h(&patch, bw, bh, &kw, h_only_rnd, 6);
+        put_buf(patch);
         for y in 0..bh {
             for x in 0..bw {
                 dest[y * dest_stride + x] = (rows[y * bw + x]).clamp(0, pix_max) as Px;
             }
         }
+        put_buf(rows);
         return;
     }
     if !h_subpel && v_subpel {
@@ -454,6 +481,7 @@ pub fn motion_compensate(
         filter_rows_v(&patch, bw, bh, &kh, |s, y, x| {
             dest[y * dest_stride + x] = ((s + 32) >> 6).clamp(0, pix_max) as Px;
         });
+        put_buf(patch);
         return;
     }
     // §7.11.3.3: the AV1 `Subpel_Filters` table is 128-scale (`FILTER_BITS =
@@ -477,12 +505,14 @@ pub fn motion_compensate(
         ext_h,
     );
     let tmp = filter_rows_h(&patch, bw, ext_h, &kw, (1 << (6 - ib)) >> 1, 6 - ib);
+    put_buf(patch);
 
     // Vertical pass from `tmp` (already offset by 3 rows) into `dest`. `dest`
     // is the destination *block* buffer (stride `dest_stride`, sized `bw`x`bh`).
     filter_rows_v(&tmp, bw, bh, &kh, |s, y, x| {
         dest[y * dest_stride + x] = ((s + (1 << (5 + ib))) >> (6 + ib)).clamp(0, pix_max) as Px;
     });
+    put_buf(tmp);
 }
 
 /// Compound "prep" motion compensation (§7.11.3.2, `isCompound == 1`): the same
@@ -527,10 +557,12 @@ pub fn motion_compensate_prep(
         ext_h,
     );
     let tmp = filter_rows_h(&patch, bw, ext_h, &kw, (1 << (6 - ib)) >> 1, 6 - ib);
+    put_buf(patch);
     let mut out = vec![0i32; bw * bh];
     filter_rows_v(&tmp, bw, bh, &kh, |s, y, x| {
         out[y * bw + x] = (s + 32) >> 6;
     });
+    put_buf(tmp);
     out
 }
 

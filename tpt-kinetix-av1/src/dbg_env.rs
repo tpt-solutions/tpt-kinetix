@@ -44,7 +44,7 @@ pub fn var(key: &str) -> Result<String, std::env::VarError> {
 /// Env-gated phase timing (`KINETIX_AV1_PHASE=1`), the admin-free stand-in for
 /// a sampling profiler (todo-perf.md Phase 2). AV1 decode is single-threaded,
 /// so thread-local accumulators are enough; a per-frame summary is printed
-/// every [`PHASE_REPORT_EVERY`] frames.
+/// every `PHASE_REPORT_EVERY` frames.
 #[derive(Default)]
 pub struct Av1PhaseTimers {
     pub tile_ns: std::cell::Cell<u64>,

@@ -55,6 +55,8 @@ pub mod frame;
 pub mod inter;
 pub mod loop_filter;
 pub mod obu;
+#[doc(hidden)]
+pub mod pool;
 pub mod reconstruct;
 mod simd;
 mod superres;

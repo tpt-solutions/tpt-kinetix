@@ -458,6 +458,37 @@ const WARPED_FILTERS: [[i8; 8]; 193] = [
     [0, 0, 0, 0, 2, 127, -1, 0],
 ];
 
+/// The 15x15 reference window a warped 8x8 block's two passes read
+/// (`(dx-3 ..= dx+11, dy-3 ..= dy+11)`), edge-clamped once per sample here so the
+/// filter loops index it directly instead of clamping every tap (960 taps per
+/// block collapse into 225 reads, and the interior case is straight row copies).
+fn gather_warp_patch(
+    refp: &[Px],
+    ref_stride: usize,
+    ref_w: usize,
+    ref_h: usize,
+    dx: i32,
+    dy: i32,
+) -> [[i32; 15]; 15] {
+    let mut patch = [[0i32; 15]; 15];
+    let x0 = dx - 3;
+    let inside_x = x0 >= 0 && x0 as usize + 15 <= ref_w;
+    for (yy, row) in patch.iter_mut().enumerate() {
+        let ry = (dy - 3 + yy as i32).clamp(0, ref_h as i32 - 1) as usize;
+        let src = &refp[ry * ref_stride..ry * ref_stride + ref_w];
+        if inside_x {
+            for (d, &v) in row.iter_mut().zip(&src[x0 as usize..x0 as usize + 15]) {
+                *d = v as i32;
+            }
+        } else {
+            for (c, d) in row.iter_mut().enumerate() {
+                *d = src[(x0 + c as i32).clamp(0, ref_w as i32 - 1) as usize] as i32;
+            }
+        }
+    }
+    patch
+}
+
 /// One 8×8 warp-filtered sub-block (dav1d `warp_affine_8x8_c`, 8-bit path):
 /// two-pass separable 8-tap filtering from `dav1d_mc_warp_filter`, phase
 /// stepped by `alpha`/`beta` (horizontal pass, over 15 source rows) then
@@ -520,6 +551,7 @@ fn warp_affine_8x8(
         );
     }
     let dbg_n = crate::debug_frame_seq::current();
+    let patch = gather_warp_patch(refp, ref_stride, ref_w, ref_h, dx, dy);
     let mut mid = [[0i32; 8]; 15];
     let mut mx_row = mx0;
     for (yy, row) in mid.iter_mut().enumerate() {
@@ -536,10 +568,9 @@ fn warp_affine_8x8(
                         .collect::<Vec<_>>()
                 );
             }
-            let sx = dx + xx as i32;
             let mut s = 0i32;
             for (k, &c) in filter.iter().enumerate() {
-                s += c as i32 * sample(sx + k as i32 - 3, sy);
+                s += c as i32 * patch[yy][xx + k];
             }
             // sh = 7 - intermediate_bits.
             *out = (s + ((1 << (7 - ib)) >> 1)) >> (7 - ib);
@@ -677,26 +708,20 @@ fn warp_affine_8x8_prep(
     // domain, whose values are `pixel << 4` and legitimately exceed the
     // stream's max sample. The final round + clamp to `Px` happens in the
     // compound blend.
-    let sample = |ix: i32, iy: i32| -> i32 {
-        let cx = ix.clamp(0, ref_w as i32 - 1) as usize;
-        let cy = iy.clamp(0, ref_h as i32 - 1) as usize;
-        refp[cy * ref_stride + cx] as i32
-    };
     let filter_row = |phase: i32| -> &'static [i8; 8] {
         let idx = (64 + ((phase + 512) >> 10)).clamp(0, 192);
         &WARPED_FILTERS[idx as usize]
     };
+    let patch = gather_warp_patch(refp, ref_stride, ref_w, ref_h, dx, dy);
     let mut mid = [[0i32; 8]; 15];
     let mut mx_row = mx0;
     for (yy, row) in mid.iter_mut().enumerate() {
-        let sy = dy + yy as i32 - 3;
         let mut tmx = mx_row;
         for (xx, out) in row.iter_mut().enumerate() {
             let filter = filter_row(tmx);
-            let sx = dx + xx as i32;
             let mut s = 0i32;
             for (k, &c) in filter.iter().enumerate() {
-                s += c as i32 * sample(sx + k as i32 - 3, sy);
+                s += c as i32 * patch[yy][xx + k];
             }
             *out = (s + ((1 << (7 - ib)) >> 1)) >> (7 - ib);
             tmx += alpha;
