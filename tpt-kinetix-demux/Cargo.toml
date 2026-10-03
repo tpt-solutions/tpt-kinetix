@@ -23,9 +23,12 @@ tpt-kinetix-core = { workspace = true }
 byteorder = "1.5"
 wasm-bindgen = { version = "0.2", optional = true }
 serde_json = { workspace = true, optional = true }
+# HTTP/HTTPS range-request source (`http` feature); already in the workspace graph via tpt-kinetix-kg.
+ureq = { version = "3.4", optional = true }
 
 [features]
 wasm = ["dep:wasm-bindgen", "dep:serde_json"]
+http = ["dep:ureq"]
 
 [dev-dependencies]
 proptest = "1.5"

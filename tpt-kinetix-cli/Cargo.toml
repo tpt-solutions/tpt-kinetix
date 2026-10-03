@@ -24,7 +24,7 @@ tracing-subscriber = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.38", features = ["full"] }
 tpt-kinetix-core = { workspace = true }
-tpt-kinetix-demux = { workspace = true }
+tpt-kinetix-demux = { workspace = true, features = ["http"] }
 tpt-kinetix-vp9 = { workspace = true, optional = true }
 tpt-kinetix-av1 = { workspace = true }
 tpt-kinetix-vision = { workspace = true }

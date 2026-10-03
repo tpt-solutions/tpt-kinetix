@@ -144,6 +144,22 @@ async fn main() -> Result<()> {
 fn probe(input: &std::path::Path) -> Result<()> {
     use tpt_kinetix_demux::ReadAt;
 
+    // `http://` / `https://` inputs are probed with range requests: only the
+    // box headers and the `moov` index are fetched, never the media.
+    let spec = input.to_string_lossy();
+    if spec.starts_with("http://") || spec.starts_with("https://") {
+        let reader = tpt_kinetix_demux::Mp4Reader::open(tpt_kinetix_demux::http::open_url(&spec))
+            .with_context(|| format!("failed to probe remote MP4: {spec}"))?;
+        print_mp4_tracks(&spec, reader.tracks());
+        let src = reader.into_source();
+        println!(
+            "I/O: {} HTTP request(s), {} bytes transferred",
+            src.requests(),
+            src.bytes_transferred()
+        );
+        return Ok(());
+    }
+
     let file = std::fs::File::open(input)
         .with_context(|| format!("failed to open input file: {}", input.display()))?;
 
@@ -166,8 +182,13 @@ fn probe(input: &std::path::Path) -> Result<()> {
     let demuxer = tpt_kinetix_demux::Mp4Reader::open(file)
         .with_context(|| format!("failed to parse MP4 container: {}", input.display()))?;
 
-    let tracks = demuxer.tracks();
-    println!("File: {}", input.display());
+    print_mp4_tracks(&input.display().to_string(), demuxer.tracks());
+    Ok(())
+}
+
+/// Prints the per-track summary shared by local and remote MP4 probes.
+fn print_mp4_tracks(label: &str, tracks: &[tpt_kinetix_demux::mp4::Mp4Track]) {
+    println!("File: {label}");
     println!("Tracks: {}", tracks.len());
 
     for track in tracks {
@@ -201,8 +222,6 @@ fn probe(input: &std::path::Path) -> Result<()> {
             println!("    decoder: {status} — {}", caps.notes);
         }
     }
-
-    Ok(())
 }
 
 /// Heuristic container sniff: 0x47 sync byte at offset 0, confirmed by the

@@ -12,6 +12,8 @@
 //! a memory buffer, or — in future — an HTTP range backend): it never loads
 //! the whole file. See [`source`].
 
+#[cfg(feature = "http")]
+pub mod http;
 pub mod mkv;
 pub mod mp4;
 pub mod source;

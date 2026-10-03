@@ -84,3 +84,23 @@ feature. (Existing decoders stay and keep their conformance tests.)
 * Remaining for M1: streaming TS (`TsDemuxer` still takes a `Vec`), MKV, an HTTP-range `ReadAt`
   (probe an S3 object in ~2 requests), fragmented MP4 (`moof`) input, `Mp4Demuxer` callers in
   pipeline/CLI transcode that still `fs::read` (`stage.rs`, `main.rs`).
+
+### Remote probing (2026-10-04) — first measured win vs ffprobe
+
+`tpt-kinetix probe http(s)://…` runs `Mp4Reader` over `http::HttpRangeSource` (cargo feature `http`, `ureq`
+transport, `RangeFetch` trait for custom stacks such as signed S3). 64 KiB read-ahead blocks; the first
+request doubles as the length probe (`Content-Range`); reads >= a block go as one exact range; a server that
+ignores `Range` is an error, never a silent full download. Local range server, same machine:
+
+| File | Tool | Requests | Bytes transferred | Time |
+|:---|:---|---:|---:|---:|
+| 85 MB, moov at end | `tpt-kinetix probe` | 2 | **127 KB** | 71 ms |
+| 85 MB, moov at end | `ffprobe -show_streams -show_format` | 3 | 2.14 MB | 114 ms |
+| 2.2 GB (93,600 samples) | `tpt-kinetix probe` | 3 | 1.14 MB (≈ the moov itself) | 108-480 ms* |
+| 2.2 GB (93,600 samples) | `ffprobe -show_streams -show_format` | 3 | 3.11 MB | 1446 ms |
+
+\* cold-cache variance of the test server; ffprobe's full probe also spends time analysing the stream.
+Over a real network the byte count and request count (each a round trip) are what matter: ~17x fewer bytes
+for a moov-at-end file. Caveats: localhost only (no latency), ffprobe was not tuned (`-probesize` /
+`-analyzeduration` can lower its cost at the price of accuracy), one container type.
+Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range server, seek cost).
