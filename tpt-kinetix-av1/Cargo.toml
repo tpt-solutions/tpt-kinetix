@@ -27,3 +27,7 @@ proptest = "1.5"
 [[bench]]
 name = "av1_encode"
 harness = false
+
+[[bench]]
+name = "av1_decode"
+harness = false

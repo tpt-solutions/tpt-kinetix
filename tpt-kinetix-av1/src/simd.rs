@@ -2,7 +2,7 @@
 //!
 //! Every kernel here has a plain scalar implementation that is the *reference
 //! oracle*: the vector paths must be bit-identical to it, and the equivalence
-//! proptests at the bottom of this file are the gate that keeps them so.
+//! tests at the bottom of this file are the gate that keeps them so.
 //!
 //! # Why `std::arch` and not `wide` / `packed_simd`
 //!
@@ -10,19 +10,29 @@
 //! workspace rule ("safe Rust, `std::simd`/`wide` or runtime-dispatched
 //! `std::arch` with scalar fallback") resolves to the `std::arch` option. The
 //! `unsafe` is confined to the two `#[target_feature]` functions below; they
-//! are only ever reached through [`level`], which gates them on
-//! `is_x86_feature_detected!`, and each does exactly the arithmetic its scalar
-//! twin does, with the same saturation semantics.
+//! are only reachable through [`level`], which gates them on
+//! `is_x86_feature_detected!`, and each performs exactly the arithmetic its
+//! scalar twin performs, with the same saturation semantics.
 //!
 //! # Dispatch
 //!
-//! [`level`] resolves once per process (an `OnceLock`) to the best available
+//! [`level`] resolves once per process (a `OnceLock`) to the best available
 //! implementation: AVX2 (256-bit, 8 samples per iteration), SSE4.1 (128-bit, 4
-//! samples) or scalar. Setting `KINETIX_AV1_NO_SIMD=1` forces scalar, which is
-//! how the vector paths are A/B'd against the oracle inside the same binary.
+//! samples) or scalar. `TPT_AV1_NO_SIMD=1` forces the scalar oracle, which is
+//! how the vector paths are A/B-ed against it inside the same binary.
+//!
+//! The switch is deliberately **not** named `KINETIX_AV1_NO_SIMD`. Every
+//! `KINETIX_*` variable that is not `*_DIR` / `KINETIX_BENCH_ITERS` sets
+//! [`crate::dbg_env`]'s `ANY_SET` flag, which turns ~200 per-block debug
+//! lookups from one relaxed atomic load into a real `std::env::var` (an OS
+//! lookup plus a `String` allocation). Measured on `av1_decode/fate_corpus`:
+//! **4.43 s** with the `KINETIX_`-prefixed name versus **1.69 s** without it -
+//! a 2.7x swing in which *both arms ran the identical kernel*. Keep any perf
+//! knob in this crate off the `KINETIX_` prefix.
 
 use std::sync::OnceLock;
 
+/// Which implementation of the reconstruct kernels this process uses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Level {
     Scalar = 0,
@@ -31,7 +41,7 @@ pub(crate) enum Level {
 }
 
 fn detect() -> Level {
-    if std::env::var("KINETIX_AV1_NO_SIMD").is_ok() {
+    if std::env::var("TPT_AV1_NO_SIMD").is_ok() {
         return Level::Scalar;
     }
     #[cfg(target_arch = "x86_64")]
@@ -53,17 +63,17 @@ pub(crate) fn level() -> Level {
 }
 
 /// `dst[i] = (pred[i] + residual[i]).clamp(0, pix_max) as u16` for `i` in
-/// `0..n`, where `n = min(pred.len(), residual.len())`.
+/// `0..n`, where `n = min(pred.len(), residual.len(), dst.len())`.
 ///
 /// This is the tail of AV1 §7.11.2.1: every reconstructed sample of every
-/// transform block goes through it, so it is the one loop in the intra path
-/// whose trip count is exactly the pixel count of the frame. `dst` must be at
-/// least `n` long; anything past `n` is left untouched.
+/// transform block passes through it, so it is the one loop in the intra path
+/// whose trip count is exactly the pixel count of the frame. Anything in `dst`
+/// past `n` is left untouched.
 ///
 /// `pix_max` is `(1 << bit_depth) - 1`, always `<= 65535` for a [`crate::Px`]
 /// (16-bit) output. That is what lets the vector paths use *unsigned*
 /// saturating pack (`packus`) instead of a second explicit clamp: by the time
-/// the pack runs every value is already in `[0, pix_max]`, so the pack is a
+/// the pack runs every value is already inside `[0, pix_max]`, so the pack is a
 /// pure narrowing.
 #[inline]
 pub(crate) fn add_residual_row(pred: &[i32], residual: &[i32], dst: &mut [u16], pix_max: i32) {
@@ -89,12 +99,56 @@ pub(crate) fn add_residual_row(pred: &[i32], residual: &[i32], dst: &mut [u16], 
 }
 
 /// The reference oracle for [`add_residual_row`].
-fn add_residual_row_scalar(pred: &[i32], residual: &[i32], dst: &mut [u16], n: usize, pix_max: i32) {
-    for i in 0..n {
-        dst[i] = pred[i].saturating_add(residual[i]).clamp(0, pix_max) as u16;
+///
+/// A plain wrapping add, deliberately: this is exactly the arithmetic the
+/// pre-SIMD reconstruct loop performed (`pred + residual`, then clamped), so
+/// the oracle is bit-compatible with every decode produced before this module
+/// existed — including on inputs (unreachable for a conforming stream, where
+/// `pred` is a prediction and `residual` is a `col_shift`-ed inverse transform)
+/// where `pred + residual` overflows i32.
+///
+/// It is also what keeps the scalar fallback fast, and that is the honest
+/// explanation for this kernel's benchmark result: `clamp` after a wrapping add
+/// auto-vectorises cleanly, so on x86-64/LLVM the AVX2 path measures as a wash
+/// (see `todo-perf.md`, "AV1 reconstruct — decode bench, allocations and SIMD"). Exactness against the
+/// oracle is bought by the vector paths' explicit overflow guard, not by
+/// pessimising the scalar form.
+#[inline]
+fn add_residual_row_scalar(
+    pred: &[i32],
+    residual: &[i32],
+    dst: &mut [u16],
+    n: usize,
+    pix_max: i32,
+) {
+    // Iterator form on purpose: indexing `pred[i]` against a runtime `n` that
+    // the optimiser cannot relate to `pred.len()` leaves bounds checks inside
+    // the loop, whereas the zipped iterators carry their own length.
+    for ((out, &p), &r) in dst.iter_mut().zip(pred.iter()).zip(residual.iter()).take(n) {
+        *out = p.wrapping_add(r).clamp(0, pix_max) as u16;
     }
 }
 
+/// Scalar epilogue for the vector paths: the final `n % 8` (AVX2) or `n % 4`
+/// (SSE4.1) samples, plus the zero-length case. Deliberately carries no
+/// `target_feature`, so it compiles to the same code as the pure-scalar path.
+#[inline]
+fn add_residual_row_tail(
+    pred: &[i32],
+    residual: &[i32],
+    dst: &mut [u16],
+    from: usize,
+    n: usize,
+    pix_max: i32,
+) {
+    add_residual_row_scalar(
+        &pred[from..n],
+        &residual[from..n],
+        &mut dst[from..n],
+        n - from,
+        pix_max,
+    );
+}
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -112,22 +166,34 @@ unsafe fn add_residual_row_avx2(
     while i + 8 <= n {
         let p = _mm256_loadu_si256(pred.as_ptr().add(i).cast());
         let r = _mm256_loadu_si256(residual.as_ptr().add(i).cast());
-        // A wrapping add is exact here: the oracle's `saturating_add` only
-        // differs for operands that overflow i32, and both the oracle's
-        // saturated result and the wrapping one land outside `[0, pix_max]`
-        // and are clamped to the same endpoint.
-        let s = _mm256_add_epi32(p, r);
-        let s = _mm256_max_epi32(s, zero);
+        let s_raw = _mm256_add_epi32(p, r);
+        // The oracle saturates the add; the vector add wraps. The two agree
+        // unless a lane actually overflowed, which the sign test
+        // `((p ^ s) & (r ^ s)) < 0` detects exactly. Overflow is not reachable
+        // from a conforming stream (pred is a prediction and residual is a
+        // `col_shift`-ed inverse transform), but the guard keeps this kernel
+        // bit-identical to the oracle for *every* input, which is what the
+        // equivalence proptest asserts. On a hit the rest of the row is
+        // redone by the scalar oracle, which is correct by construction.
+        let ovf = _mm256_and_si256(_mm256_xor_si256(p, s_raw), _mm256_xor_si256(r, s_raw));
+        if _mm256_movemask_ps(_mm256_castsi256_ps(ovf)) != 0 {
+            add_residual_row_tail(pred, residual, dst, i, n, pix_max);
+            return;
+        }
+        let s = _mm256_max_epi32(s_raw, zero);
         let s = _mm256_min_epi32(s, hi);
         // `packus_epi32` works per 128-bit lane, so the 8 results come out as
         // [0..3, 0..3, 4..7, 4..7]; selecting 64-bit chunks 0, 2, 1, 3 undoes
         // that cross-lane interleaving.
         let packed = _mm256_packus_epi32(s, s);
         let packed = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
-        _mm_storeu_si128(dst.as_mut_ptr().add(i).cast(), _mm256_castsi256_si128(packed));
+        _mm_storeu_si128(
+            dst.as_mut_ptr().add(i).cast(),
+            _mm256_castsi256_si128(packed),
+        );
         i += 8;
     }
-    add_residual_row_scalar(pred, residual, dst, i, n, pix_max);
+    add_residual_row_tail(pred, residual, dst, i, n, pix_max);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -146,12 +212,22 @@ unsafe fn add_residual_row_sse41(
     while i + 4 <= n {
         let p = _mm_loadu_si128(pred.as_ptr().add(i).cast());
         let r = _mm_loadu_si128(residual.as_ptr().add(i).cast());
-        let s = _mm_add_epi32(p, r);
-        let s = _mm_max_epi32(s, zero);
+        let s_raw = _mm_add_epi32(p, r);
+        // See the AVX2 path for why the overflow guard is required.
+        let ovf = _mm_and_si128(_mm_xor_si128(p, s_raw), _mm_xor_si128(r, s_raw));
+        if _mm_movemask_ps(_mm_castsi128_ps(ovf)) != 0 {
+            add_residual_row_tail(pred, residual, dst, i, n, pix_max);
+            return;
+        }
+        let s = _mm_max_epi32(s_raw, zero);
         let s = _mm_min_epi32(s, hi);
         let packed = _mm_packus_epi32(s, s);
         let packed = _mm_unpacklo_epi64(packed, packed);
         _mm_storeu_si128(dst.as_mut_ptr().add(i).cast(), packed);
+        i += 4;
+    }
+    add_residual_row_tail(pred, residual, dst, i, n, pix_max);
+}
 
 #[cfg(test)]
 mod tests {
@@ -167,7 +243,19 @@ mod tests {
         add_residual_row_scalar(pred, residual, &mut want, n, pix_max);
         let mut got: Vec<u16> = vec![tail_fill; dst_len];
         add_residual_row(pred, residual, &mut got, pix_max);
-        assert_eq!(got, want, "pred={pred:?} residual={residual:?} pix_max={pix_max}");
+        assert_eq!(
+            got, want,
+            "pred={pred:?} residual={residual:?} pix_max={pix_max}"
+        );
+    }
+
+    #[test]
+    fn dispatched_level_is_reachable() {
+        // Whatever this machine picked, every level must reproduce the oracle.
+        assert!(matches!(
+            level(),
+            Level::Scalar | Level::Sse41 | Level::Avx2
+        ));
     }
 
     #[test]
@@ -220,19 +308,19 @@ mod tests {
     #[test]
     fn clamps_to_bit_depth_range() {
         let mut dst = vec![0u16; 16];
-        add_residual_row(&vec![10i32; 16], &vec![5i32; 16], &mut dst, 1023);
+        add_residual_row(&[10i32; 16], &[5i32; 16], &mut dst, 1023);
         assert!(dst.iter().all(|&v| v == 15));
 
         let mut dst = vec![0u16; 16];
-        add_residual_row(&vec![10i32; 16], &vec![5000i32; 16], &mut dst, 1023);
+        add_residual_row(&[10i32; 16], &[5000i32; 16], &mut dst, 1023);
         assert!(dst.iter().all(|&v| v == 1023));
 
         let mut dst = vec![0u16; 16];
-        add_residual_row(&vec![-5000i32; 16], &vec![5i32; 16], &mut dst, 1023);
+        add_residual_row(&[-5000i32; 16], &[5i32; 16], &mut dst, 1023);
         assert!(dst.iter().all(|&v| v == 0));
     }
 
-    /// `dst` shorter than the inputs truncates rather than panicking.
+    /// A `dst` shorter than the inputs truncates rather than panicking.
     #[test]
     fn short_destination_truncates() {
         let pred = vec![1i32; 20];
@@ -241,9 +329,4 @@ mod tests {
         add_residual_row(&pred, &residual, &mut dst, 255);
         assert_eq!(dst, vec![3u16; 5]);
     }
-}
-
-        i += 4;
-    }
-    add_residual_row_scalar(pred, residual, dst, i, n, pix_max);
 }

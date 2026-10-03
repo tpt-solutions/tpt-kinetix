@@ -53,6 +53,22 @@ pub struct Av1PhaseTimers {
     pub superres_ns: std::cell::Cell<u64>,
     pub lr_ns: std::cell::Cell<u64>,
     pub grain_ns: std::cell::Cell<u64>,
+    /// Tile-phase sub-splits (todo-perf.md Phase 3b item 2). `tile_ns` lumps
+    /// entropy decode, coefficient read, dequant + inverse transform,
+    /// prediction and motion compensation together, and every measurement so
+    /// far says the entropy slice dominates — so the ranking *inside* the tile
+    /// phase is what decides whether the next move is a SIMD kernel (item 3)
+    /// or entropy work (item 5). These four are all subsets of `tile_ns`; their
+    /// sum is less than it because the partition/mode syntax between blocks is
+    /// untimed.
+    /// Coefficient read through the symbol decoder (`read_coeffs`).
+    pub coeff_ns: std::cell::Cell<u64>,
+    /// Dequantize + 2-D inverse transform.
+    pub itx_ns: std::cell::Cell<u64>,
+    /// Intra prediction + the residual add back into the plane.
+    pub pred_ns: std::cell::Cell<u64>,
+    /// Inter prediction: motion-vector prediction + motion compensation.
+    pub mc_ns: std::cell::Cell<u64>,
     pub frames: std::cell::Cell<u64>,
 }
 
@@ -111,12 +127,25 @@ pub fn av1_phase_frame_tick() {
                 us(l),
                 us(g),
             );
+            // Second line rather than an extension of the first: anything
+            // scraping the phase line (docs, ad-hoc greps) keeps working.
+            eprintln!(
+                "av1 tile sub-phases (per-frame avg over {f}, all subsets of tiles): coeffs {:.0}us itx {:.0}us intra-pred {:.0}us mc {:.0}us",
+                us(&p.coeff_ns),
+                us(&p.itx_ns),
+                us(&p.pred_ns),
+                us(&p.mc_ns),
+            );
             p.tile_ns.set(0);
             p.deblock_ns.set(0);
             p.cdef_ns.set(0);
             p.superres_ns.set(0);
             p.lr_ns.set(0);
             p.grain_ns.set(0);
+            p.coeff_ns.set(0);
+            p.itx_ns.set(0);
+            p.pred_ns.set(0);
+            p.mc_ns.set(0);
             p.frames.set(0);
         }
     });

@@ -138,7 +138,11 @@ pub(super) fn reconstruct_tx_block(
         let capture = crate::entropy::should_capture(blk);
         let pre_ctx_snap = capture.then(|| ctxs.ctx_snapshot(blk.plane));
         let pre_cdf_snap = capture.then(|| cdfs.cdf_snapshot());
-        let coeffs = read_coeffs(dec, cdfs, ctxs, blk)?;
+        // Phase 3b item 2: split the tile phase so entropy read, inverse
+        // transform and prediction can be ranked against each other. Free when
+        // `KINETIX_AV1_PHASE` is unset.
+        let coeffs =
+            crate::dbg_env::av1_timed(&|p| &p.coeff_ns, || read_coeffs(dec, cdfs, ctxs, blk))?;
         if crate::dbg_env::var("KINETIX_AV1_TRACE").is_ok() {
             eprintln!(
                 "KTRACE CF plane={mark_plane} px=({px_x},{px_y}) tx={tx_w}x{tx_h} txtp={} eob={} r={}",
@@ -182,14 +186,16 @@ pub(super) fn reconstruct_tx_block(
                     &dequant[..]
                 );
             }
-            inverse_transform(
-                &dequant,
-                coeffs.tx_type,
-                internal_tx_size,
-                blk.lossless,
-                bit_depth,
-                &mut residual,
-            );
+            crate::dbg_env::av1_timed(&|p| &p.itx_ns, || {
+                inverse_transform(
+                    &dequant,
+                    coeffs.tx_type,
+                    internal_tx_size,
+                    blk.lossless,
+                    bit_depth,
+                    &mut residual,
+                )
+            });
             if dbg {
                 eprintln!(
                     "DBG residual[0..8]={:?}",
@@ -288,7 +294,7 @@ pub(super) fn reconstruct_tx_block(
     if dbg {
         eprintln!("DBG palette_present={}", palette.is_some());
     }
-    match &palette {
+    crate::dbg_env::av1_timed(&|p| &p.pred_ns, || match &palette {
         Some(p) => predict_palette(p, tx_w, tx_h, bit_depth, &mut pred),
         None => match filter_intra_mode {
             Some(fi_mode) if blk.plane == 0 => {
@@ -317,7 +323,7 @@ pub(super) fn reconstruct_tx_block(
                 bit_depth,
             ),
         },
-    }
+    });
     // `predict_chroma_from_luma` (AV1 spec §7.11.5): applied to the DC
     // prediction just computed above, before the residual is added.
     if let Some(cfl) = &cfl {
@@ -355,11 +361,11 @@ pub(super) fn reconstruct_tx_block(
         for dy in 0..tx_h {
             let sy = px_y + dy;
             let base = sy * stride + px_x;
-            let row = (dy * tx_w)..(dy * tx_w + tx_w);
+            let (r0, r1) = (dy * tx_w, dy * tx_w + tx_w);
             let Some(dst_row) = samples.get_mut(base..base + tx_w) else {
                 break;
             };
-            crate::simd::add_residual_row(&pred[row], &residual[row], dst_row, pix_max);
+            crate::simd::add_residual_row(&pred[r0..r1], &residual[r0..r1], dst_row, pix_max);
         }
     } else {
         for dy in 0..tx_h {

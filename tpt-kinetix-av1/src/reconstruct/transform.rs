@@ -74,10 +74,26 @@ fn hadamard(t: &mut [i64], a: usize, b: usize, flip: bool, r: u32) {
 
 /// Inverse DCT array permutation (spec §7.13.2.2): in-place bit-reversal
 /// permutation of `t[0..2^n]`.
+///
+/// Implemented as a cycle chase over a *stack* permutation table rather than
+/// `t.to_vec()`: this runs once per 1-D transform, i.e. `w + h` times per
+/// transform block, so the previous copy was one heap allocation per row *and*
+/// per column of every block of every plane. Cycle chasing performs the same
+/// permutation (`result[i] == original[brev(n, i)]`) with no allocation.
 pub(super) fn inverse_dct_permute(t: &mut [i64], n: u32) {
-    let copy: Vec<i64> = t.to_vec();
-    for i in 0..(1usize << n) {
-        t[i] = copy[brev(n, i)];
+    let len = 1usize << n;
+    let mut perm = [0usize; 64];
+    for (i, slot) in perm.iter_mut().enumerate().take(len) {
+        *slot = brev(n, i);
+    }
+    for i in 0..len {
+        // Follow the cycle until it returns to `i`, rotating each element into
+        // its final slot.
+        while perm[i] > i {
+            let j = perm[i];
+            t.swap(i, j);
+            perm.swap(i, j);
+        }
     }
 }
 
@@ -267,19 +283,26 @@ fn inverse_dct(t: &mut [i64], n: u32, r: u32) {
 }
 
 /// ADST input array permutation (spec §7.13.2.4), `3 <= n <= 4`.
+///
+/// `n0 <= 16`, so the "copy" is a stack array. The previous `t[..n0].to_vec()`
+/// was one heap allocation per ADST8/ADST16 1-D transform — again `w + h`
+/// times per transform block.
 fn adst_input_permute(t: &mut [i64], n: u32) {
     let n0 = 1usize << n;
-    let copy: Vec<i64> = t[..n0].to_vec();
+    let mut copy = [0i64; 16];
+    copy[..n0].copy_from_slice(&t[..n0]);
     for (i, slot) in t.iter_mut().enumerate().take(n0) {
         let idx = if i & 1 != 0 { i - 1 } else { n0 - i - 1 };
         *slot = copy[idx];
     }
 }
 
-/// ADST output array permutation (spec §7.13.2.5), `3 <= n <= 4`.
+/// ADST output array permutation (spec §7.13.2.5), `3 <= n <= 4`. Stack copy,
+/// see [`adst_input_permute`].
 fn adst_output_permute(t: &mut [i64], n: u32) {
     let n0 = 1usize << n;
-    let copy: Vec<i64> = t[..n0].to_vec();
+    let mut copy = [0i64; 16];
+    copy[..n0].copy_from_slice(&t[..n0]);
     for (i, slot) in t.iter_mut().enumerate().take(n0) {
         let a = (i >> 3) & 1;
         let b = ((i >> 2) & 1) ^ ((i >> 3) & 1);
@@ -567,76 +590,113 @@ pub(super) fn inverse_transform(
     let adj = av1::ADJUSTED_TX_SIZE[tx_size];
     let adj_w = av1::TX_WIDTH[adj];
     let adj_h = av1::TX_HEIGHT[adj];
-    let mut residual = vec![0i64; w * h];
-    let mut t = vec![0i64; w.max(h)];
-    // Spec §7.13.3: "If Abs(log2W - log2H) is equal to 1, T[j] is set equal
-    // to Round2(T[j] * 2896, 12)" — the sqrt(2) rescale needed only for the
-    // non-power-of-4-aspect-ratio rectangular sizes (2:1 is exact, but a
-    // width-vs-height *log2* difference of 1 means the two axes differ by a
-    // factor of 2, and the row transform itself is normalized per `log2W`
-    // only, so the row needs this extra correction before the row 1-D
-    // transform is applied).
-    let needs_rescale = log2w.abs_diff(log2h) == 1;
-    for i in 0..h {
-        for j in 0..w {
-            t[j] = if i < adj_h && j < adj_w {
-                dequant[i * adj_w + j] as i64
-            } else {
-                0
-            };
-        }
-        // Every 1-D inverse transform is linear with no additive offset, so an
-        // all-zero row maps to an all-zero row (`residual` is already zero).
-        if t[..w].iter().all(|&v| v == 0) {
-            continue;
-        }
-        if needs_rescale {
-            for v in t.iter_mut().take(w) {
-                *v = round2(*v * 2896, 12);
+    // Per-thread reusable scratch for the row/column intermediate. The previous
+    // code allocated two `Vec<i64>` per transform block (`w*h` and
+    // `max(w,h)`), i.e. two mallocs + two zero-fills for every transform block
+    // of every plane of every frame. `t` (at most 64 taps) is a stack array;
+    // only the `w*h` intermediate needs a heap buffer, and it is reused across
+    // every block this thread decodes.
+    //
+    // Re-entrancy: this is the *leaf* of the reconstruct path (nothing below it
+    // calls back into `inverse_transform`), so a single per-thread buffer with
+    // no nesting depth counter is sufficient. It is sized on demand and never
+    // shrinks, so steady-state decoding does no allocation at all.
+    scratch::with_residual(w * h, |residual| {
+        let mut tbuf = [0i64; 64];
+        let t = &mut tbuf[..w.max(h)];
+        residual.fill(0);
+        // Spec §7.13.3: "If Abs(log2W - log2H) is equal to 1, T[j] is set equal
+        // to Round2(T[j] * 2896, 12)" — the sqrt(2) rescale needed only for the
+        // non-power-of-4-aspect-ratio rectangular sizes (2:1 is exact, but a
+        // width-vs-height *log2* difference of 1 means the two axes differ by a
+        // factor of 2, and the row transform itself is normalized per `log2W`
+        // only, so the row needs this extra correction before the row 1-D
+        // transform is applied).
+        let needs_rescale = log2w.abs_diff(log2h) == 1;
+        for i in 0..h {
+            for j in 0..w {
+                t[j] = if i < adj_h && j < adj_w {
+                    dequant[i * adj_w + j] as i64
+                } else {
+                    0
+                };
+            }
+            // Every 1-D inverse transform is linear with no additive offset, so an
+            // all-zero row maps to an all-zero row (`residual` is already zero).
+            if t[..w].iter().all(|&v| v == 0) {
+                continue;
+            }
+            if needs_rescale {
+                for v in t.iter_mut().take(w) {
+                    *v = round2(*v * 2896, 12);
+                }
+            }
+            match row_kind {
+                AxisTransform::Dct => inverse_dct(&mut t[..w], log2w, row_clamp_range),
+                AxisTransform::Adst => inverse_adst(&mut t[..w], log2w, row_clamp_range),
+                AxisTransform::Identity => inverse_identity(&mut t[..w], log2w),
+            }
+            if row_flip {
+                t[..w].reverse();
+            }
+            for j in 0..w {
+                residual[i * w + j] = round2(t[j], row_shift);
             }
         }
-        match row_kind {
-            AxisTransform::Dct => inverse_dct(&mut t, log2w, row_clamp_range),
-            AxisTransform::Adst => inverse_adst(&mut t, log2w, row_clamp_range),
-            AxisTransform::Identity => inverse_identity(&mut t, log2w),
+
+        let lo = -(1i64 << (col_clamp_range - 1));
+        let hi = (1i64 << (col_clamp_range - 1)) - 1;
+        for v in residual.iter_mut() {
+            *v = (*v).clamp(lo, hi);
         }
-        if row_flip {
-            t[..w].reverse();
-        }
+
         for j in 0..w {
-            residual[i * w + j] = round2(t[j], row_shift);
+            for i in 0..h {
+                t[i] = residual[i * w + j];
+            }
+            // Same zero-in/zero-out shortcut as the row pass.
+            if t[..h].iter().all(|&v| v == 0) {
+                continue;
+            }
+            match col_kind {
+                AxisTransform::Dct => inverse_dct(&mut t[..h], log2h, col_clamp_range),
+                AxisTransform::Adst => inverse_adst(&mut t[..h], log2h, col_clamp_range),
+                AxisTransform::Identity => inverse_identity(&mut t[..h], log2h),
+            }
+            if col_flip {
+                t[..h].reverse();
+            }
+            for i in 0..h {
+                residual[i * w + j] = round2(t[i], col_shift);
+            }
         }
+
+        for i in 0..(w * h) {
+            dst[i] = residual[i] as i32;
+        }
+    })
+}
+
+/// Per-thread scratch for [`inverse_transform`]'s `w * h` intermediate.
+mod scratch {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static RESIDUAL: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
     }
 
-    let lo = -(1i64 << (col_clamp_range - 1));
-    let hi = (1i64 << (col_clamp_range - 1)) - 1;
-    for v in residual.iter_mut() {
-        *v = (*v).clamp(lo, hi);
-    }
-
-    for j in 0..w {
-        for i in 0..h {
-            t[i] = residual[i * w + j];
-        }
-        // Same zero-in/zero-out shortcut as the row pass.
-        if t[..h].iter().all(|&v| v == 0) {
-            continue;
-        }
-        match col_kind {
-            AxisTransform::Dct => inverse_dct(&mut t, log2h, col_clamp_range),
-            AxisTransform::Adst => inverse_adst(&mut t, log2h, col_clamp_range),
-            AxisTransform::Identity => inverse_identity(&mut t, log2h),
-        }
-        if col_flip {
-            t[..h].reverse();
-        }
-        for i in 0..h {
-            residual[i * w + j] = round2(t[i], col_shift);
-        }
-    }
-
-    for i in 0..(w * h) {
-        dst[i] = residual[i] as i32;
+    /// Run `f` with a zeroed `len`-element scratch slice borrowed from this
+    /// thread's reusable buffer, growing it if needed. The buffer is never
+    /// shrunk, so after the first (largest) transform block a thread performs
+    /// no allocation here again.
+    pub(super) fn with_residual<R>(len: usize, f: impl FnOnce(&mut [i64]) -> R) -> R {
+        RESIDUAL.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            if buf.len() < len {
+                buf.resize(len, 0);
+            }
+            f(&mut buf[..len])
+        })
     }
 }
 

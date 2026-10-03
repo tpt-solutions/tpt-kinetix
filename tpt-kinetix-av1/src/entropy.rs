@@ -518,7 +518,14 @@ impl<'a> SymbolDecoder<'a> {
         let n = cdf.len() - 1;
         debug_assert!(n >= 2, "cdf must describe at least 2 symbols");
         debug_assert_eq!(cdf[n - 1], 1 << 15, "cdf[N-1] must be 32768");
-        let location = Location::caller();
+        // `Location::caller()` is only *used* by the symbol trace, which is off
+        // in every decode that is not being traced. Capturing it unconditionally
+        // put a `#[track_caller]` location on the hottest function in the
+        // decoder (every syntax element and every coefficient goes through
+        // here), which costs a hidden argument through the whole call chain and
+        // blocks inlining. Capture it only when it will actually be reported.
+        let tracing = symbol_trace_enabled();
+        let location = tracing.then(Location::caller);
         let bit_pos_before = self.bit_pos;
 
         let mut cur = self.symbol_range;
@@ -562,11 +569,26 @@ impl<'a> SymbolDecoder<'a> {
         if self.allow_update_cdf {
             let count = cdf[n] as u32;
             let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
-            let mut tmp: u32 = 0;
             for (i, slot) in cdf[..n - 1].iter_mut().enumerate() {
-                if i == symbol {
-                    tmp = 1 << 15;
-                }
+                // `tmp` is 0 for entries *before* the decoded symbol and
+                // `1 << 15` for the symbol itself and every entry *after* it —
+                // that asymmetry is what keeps the CDF monotonic as it adapts.
+                //
+                // The original spelling was a sticky flag with no `else`:
+                // `if i == symbol { tmp = 1 << 15; }`, so `tmp` stayed set for
+                // the rest of the loop. Writing the obvious per-element
+                // `if i == symbol { .. } else { 0 }` is **wrong** — it resets
+                // `tmp` after the symbol and decodes differently (it broke
+                // `multi_symbol_uniform4_matches_reference_trace` and the
+                // coefficient oracle the first time it was tried). The `>=`
+                // below is the branchless form of the sticky semantics, and
+                // `cdf_update_matches_branching_form` now guards it against the
+                // original transcription.
+                let tmp: u32 = if (i as u32) >= symbol as u32 {
+                    1 << 15
+                } else {
+                    0
+                };
                 let c = *slot as u32;
                 *slot = if tmp < c {
                     (c - ((c - tmp) >> rate)) as u16
@@ -583,7 +605,7 @@ impl<'a> SymbolDecoder<'a> {
             let loc = Location::caller();
             eprintln!("KSEQ {} {}", self.symbol_range, loc);
         }
-        if symbol_trace_enabled() {
+        if tracing {
             let bit_pos_after = self.bit_pos;
             push_symbol_trace(|seq| SymbolTraceEntry {
                 seq,
@@ -593,7 +615,7 @@ impl<'a> SymbolDecoder<'a> {
                 bit_pos_after,
                 sym_range: self.symbol_range,
                 sym_value: self.symbol_value,
-                location,
+                location: location.unwrap(),
             });
         }
 
@@ -639,6 +661,85 @@ mod tests {
     // spec itself does not ship a worked numeric example for the symbol
     // decoder, so this differential check (two independent implementations
     // of the same spec text) stands in for it.
+
+    /// The branchless CDF update in [`SymbolDecoder::read_symbol`] must be
+    /// bit-identical to the branching form it replaced, for every alphabet
+    /// size, every decoded symbol and every adaptation counter. This is the
+    /// oracle the comment on that loop cites: the two implementations are
+    /// transcribed side by side here and compared over exhaustive-ish inputs.
+    #[test]
+    fn cdf_update_matches_branching_form() {
+        /// The original, branching transcription of spec §6.8.2.
+        fn branching(cdf: &mut [u16], symbol: usize) {
+            let n = cdf.len() - 1;
+            let count = cdf[n] as u32;
+            let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
+            let mut tmp: u32 = 0;
+            for (i, slot) in cdf[..n - 1].iter_mut().enumerate() {
+                if i == symbol {
+                    tmp = 1 << 15;
+                }
+                let c = *slot as u32;
+                *slot = if tmp < c {
+                    (c - ((c - tmp) >> rate)) as u16
+                } else {
+                    (c + ((tmp - c) >> rate)) as u16
+                };
+            }
+            if cdf[n] < 32 {
+                cdf[n] += 1;
+            }
+        }
+
+        /// The branchless form as it appears in `read_symbol`.
+        fn branchless(cdf: &mut [u16], symbol: usize) {
+            let n = cdf.len() - 1;
+            let count = cdf[n] as u32;
+            let rate = 3 + (count > 15) as u32 + (count > 31) as u32 + floor_log2(n as u32).min(2);
+            for (i, slot) in cdf[..n - 1].iter_mut().enumerate() {
+                let tmp: u32 = if (i as u32) >= symbol as u32 {
+                    1 << 15
+                } else {
+                    0
+                };
+                let c = *slot as u32;
+                *slot = if tmp < c {
+                    (c - ((c - tmp) >> rate)) as u16
+                } else {
+                    (c + ((tmp - c) >> rate)) as u16
+                };
+            }
+            if cdf[n] < 32 {
+                cdf[n] += 1;
+            }
+        }
+
+        // Alphabet sizes 2..=16 (the real AV1 maximum), every symbol in each,
+        // and adaptation counters spanning every rate change (0..=32).
+        for n in 2..=16usize {
+            for symbol in 0..n {
+                for count in 0..=33u16 {
+                    let mk = |seed: u32| -> Vec<u16> {
+                        let mut c = Vec::with_capacity(n + 1);
+                        // A strictly increasing, spec-valid ramp ending at 32768.
+                        for i in 0..n - 1 {
+                            c.push(((i as u32 + 1) * (1 << 15) / n as u32 + seed) as u16);
+                        }
+                        c.push(1 << 15);
+                        c.push(count);
+                        c
+                    };
+                    for seed in [0u32, 7, 1000, 20000] {
+                        let mut a = mk(seed);
+                        let mut b = mk(seed);
+                        branching(&mut a, symbol);
+                        branchless(&mut b, symbol);
+                        assert_eq!(a, b, "n={n} symbol={symbol} count={count} seed={seed}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn floor_log2_matches_bit_length_minus_one() {

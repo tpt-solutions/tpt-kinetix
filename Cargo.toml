@@ -73,6 +73,32 @@ tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.1.0" }
 tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.0", default-features = false }
 tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.0", default-features = false }
 
+[profile.release]
+# Phase 3b item 1 of todo-perf.md. The workspace shipped with no release profile
+# at all, i.e. Cargo's defaults: `opt-level = 3`, `codegen-units = 16`, no LTO.
+# For a decoder that is mostly cross-crate inlining (coefficient tables,
+# transform kernels, bit readers) the defaults leave real work on the table, and
+# the same measurement session showed hand-written AVX2 losing to what LLVM
+# already emits - so whole-program codegen is the higher-leverage lever.
+#
+# `lto = "fat"` + `codegen-units = 1` is the standard pairing: LTO needs
+# cross-unit visibility and a single CGU is what makes "fat" practical.
+# `panic = unwind` is left at the default on purpose - every crate here is a
+# library, and `panic = "abort"` would break downstream `catch_unwind` users.
+#
+# Cost: release builds of this workspace (19 crates, incl. rav1e) go from
+# roughly a minute to several minutes. `cargo bench` uses the `bench` profile,
+# which inherits `release`, so the published benchmarks measure this too.
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+# Explicit so a future edit to `[profile.release]` cannot silently move the
+# benchmark numbers. `bench` inherits `release` by default; stating the keys
+# here keeps that inheritance explicit rather than accidental.
+lto = "fat"
+codegen-units = 1
+
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"

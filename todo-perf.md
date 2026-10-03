@@ -229,7 +229,10 @@ Order:
   reconstruction audited 2026-10-02: the per-leaf residual `vec![0i32; ..]` was
   tried as a per-tile reusable scratch and **rejected — 1.6%, inside the ±5%
   noise floor** (see below). Unlike the original codecs, allocation is *not*
-  AV1's lever: the entropy decode it sits next to dominates. Left open.
+  AV1's lever: the entropy decode it sits next to dominates. The reconstruct
+  path's own allocations and a SIMD add-residual kernel were then measured on a
+  purpose-built decode bench — **NEUTRAL**, see "AV1 reconstruct — decode bench,
+  allocations and SIMD" below. Entropy decode itself is still the open AV1 item.
 - [x] VP9 — **done 2026-10-02**, see below
 - [x] bitstream / rANS (shared by all original codecs, best leverage) — **done
   2026-10-02**, see below
@@ -816,19 +819,30 @@ Code-shape wins (env::var, matrix caching, allocations) are exhausted; the remai
 codegen, SIMD and threading. Rules: same-session A/B only, bit-exact gates after every step, scalar
 path kept as oracle. Commit or stash unrelated working-tree edits before A/B work.
 
-- [ ] 1. Build profile: root `Cargo.toml` has **no `[profile.release]`** (codegen-units=16, no LTO).
-  Try `lto = "fat"`, `codegen-units = 1`; keep `panic = unwind` (library). `target-cpu=x86-64-v3`
-  only as an opt-in documented build, never the default. Measure with `profile_decode`
-  (`av1 target/perf-corpus/av1_1280x720.ivf 3`) + `just bench`.
-- [ ] 2. Function-level profiler: run `samply` once from an elevated shell (or WPR/ETW). Rank the AV1
-  tile phase (symbol decode vs coef read vs inverse transform vs MC) and CDEF / loop restoration.
-- [ ] 3. SIMD kernels (runtime-dispatched `std::arch`, AVX2 with SSE4.1 fallback, scalar oracle,
+- [x] 1. Build profile: root `Cargo.toml` had **no `[profile.release]`** (codegen-units=16, no LTO).
+  `lto = "fat"` + `codegen-units = 1` now set for `release` and `bench`. **-4 to -5%, every
+  round, every case** — see "release profile — LTO" below. `target-cpu=x86-64-v3` still
+  deliberately not done (would need to be an opt-in documented build, never the default).
+- [~] 2. Function-level profiler: `samply` needs an elevated shell here, so the ranking came from
+  the built-in `KINETIX_AV1_PHASE=1` timers. Coarse: **tiles 53-90%, deblock 6-34%, loop
+  restoration 2-13%**. Sub-split inside tiles (four new timers): coefficients 10-12%, inverse
+  transform **1-2%**, intra prediction **<1%**, **~86% unattributed block syntax**. See
+  "Tile-phase sub-split" below — the ~86% is the whole ballgame. Still missing: attribution
+  *within* that 86% (instrument the symbol decoder, not its callers), and any MC split.
+- [~] 3. SIMD kernels (runtime-dispatched `std::arch`, AVX2 with SSE4.1 fallback, scalar oracle,
   SIMD-vs-scalar proptests per kernel), in order:
-  - [ ] VP9 loop filter (`tpt-kinetix-vp9/src/loop_filter.rs`, 49-63% of VP9)
-  - [ ] AV1 inverse transforms
-  - [ ] AV1/VP9 motion-compensation filters
-  - [ ] AV1 CDEF + loop restoration
-  - [ ] Intra predictors
+  - [ ] VP9 loop filter (`tpt-kinetix-vp9/src/loop_filter.rs`, 49-63% of VP9) — still the best
+    candidate in the whole file, but see the VP9 correctness prerequisite below
+  - [x] ~~AV1 inverse transforms~~ — **struck 2026-10-03: measured at 1-2% of a frame**
+  - [ ] AV1/VP9 motion-compensation filters — unmeasured (the AV1 inter path is unattributed)
+  - [ ] AV1 CDEF + loop restoration — ~0 on the current corpus only because it does not enable
+    them; still unmeasured for performance
+  - [x] ~~Intra predictors~~ — **struck 2026-10-03: measured at <1% of a frame**
+
+  **Caveat earned the hard way**: the first kernel attempted (AV1 `add_residual_row`) measured
+  neutral in two profiles and six cases, because LLVM already auto-vectorises that pattern.
+  Do not assume hand-SIMD wins here — measure each candidate against its own scalar form
+  *first*, and prefer item 5 where the hot code is branchy rather than arithmetic.
 - [ ] 4. Parallelism on single-tile streams:
   - [ ] Superblock-row post-filters (needs dav1d-style delayed horizontal pass to stay bit-exact)
   - [ ] Frame-level overlap of loop filter (frame N) with entropy decode (N+1)
@@ -841,12 +855,233 @@ path kept as oracle. Commit or stash unrelated working-tree edits before A/B wor
 
 Out of scope: H.264, the original codecs, anything that changes decoded output.
 
+### AV1 reconstruct — decode bench, allocations and SIMD NEUTRAL 2026-10-03
+
+The AV1 crate had **no decode bench at all** (only `av1_encode`), which is why
+two previous attempts at AV1 reconstruct work could only be judged by eyeballing
+wall clock. Added `tpt-kinetix-av1/benches/av1_decode.rs` with two corpora:
+`av1_decode/fate_corpus` (the six `fixtures/av1-fate` streams, 204 frames — the
+same corpus the bit-exactness gate uses) and `av1_decode/320x240` / `1280x720`
+(ffmpeg `testsrc` + libaom, 60 / 20 frames).
+
+With that in place, two changes to the intra reconstruct path were measured
+against `dd59364` (the parent of the session's auto-commit `071dae4`),
+interleaved 2x2 in one session, `sample-size 25`:
+
+| Case | OLD (dd59364) | NEW | Delta |
+|:---|---:|---:|---:|
+| `fate_corpus` | 1.695 s / 1.740 s | 1.673 s / 1.764 s | ±2% (noise) |
+| `320x240` | 157.4 ms / 156.6 ms | 157.5 ms / 156.3 ms | ±0.5% (noise) |
+| `1280x720` | 642 ms / 633 ms | 643 ms / 636 ms | ±1% (noise) |
+
+**Verdict: neutral — no win, no regression.** What was in the change:
+
+1. `src/simd.rs` (new): runtime-dispatched `add_residual_row`
+   (`pred + residual -> clamp -> u16`, the §7.11.2.1 write-back), AVX2 /
+   SSE4.1 / scalar, with a scalar oracle, an exact i32-overflow guard so the
+   vector paths are bit-identical to the oracle for *every* input, and
+   SIMD-vs-scalar equivalence proptests.
+2. `inverse_dct_permute` / `adst_input_permute` / `adst_output_permute`: the
+   `t.to_vec()` copies replaced by a stack array / cycle chase. That was one
+   heap allocation per 1-D transform, i.e. `w + h` per transform block.
+3. `inverse_transform`: the two per-block `vec![i64]>` replaced by a stack
+   `t` and a per-thread reusable `residual` scratch (grows once, never shrinks).
+
+The reason the SIMD kernel buys nothing is worth recording: **the scalar
+version already auto-vectorises.** `clamp` after a plain wrapping add is a
+pattern LLVM turns into exactly the same `pmaxsd`/`pminsd`/`packus` sequence
+the hand-written AVX2 path emits. The same trap as the VP9 loop-filter scalar rewrite above, one level
+deeper: on this compiler and ISA, "scalar" is not a baseline.
+
+All three changes are kept: they are bit-exact (FATE **204/204 vs dav1d**,
+`libaom_crosscheck` 2 passed, `phase_c_conformance` luma diff 0/12288, 179 lib
+tests), they remove real work from the allocator, and the SIMD module is the
+crate's only vectorised kernel with a testable oracle — but they are **not**
+claimed as a speedup. Recorded here so the next session does not re-measure
+them as if they were still untried.
+
+**Re-measured under fat LTO (same day, later): still neutral.** Because the
+kernel's dispatch is a runtime env switch that does *not* trip `dbg_env`, this
+A/B needs no rebuild at all — the same binary was run alternately with and
+without `TPT_AV1_NO_SIMD`, 4 paired rounds:
+
+| Case | mean simd-vs-scalar | per-round spread |
+|:---|---:|:---|
+| `fate_corpus` | **-0.3%** | +2.1 / -1.0 / -1.9 / -0.6 |
+| `320x240` | **+1.2%** | +6.5 / +2.0 / -7.0 / +3.3 |
+| `1280x720` | **+0.8%** | +3.9 / +2.0 / -6.6 / +4.1 |
+
+Means within ±1.2%, round-to-round spread ±7% and sign-flipping. Two profiles,
+six corpora-cases, one verdict: **the hand-written AVX2 buys nothing on this
+ISA, with or without LTO.** If someone wants to delete it, `src/simd.rs` plus
+the 15-line fast path in `reconstruct_block.rs` are the whole removal, and the
+scalar fast path should stay — the allocation removals are the part of this
+work with independent justification.
+
+**Methodology trap found the hard way — do not A/B AV1 through a `KINETIX_*`
+variable.** The first version of the kernel's override switch was
+`KINETIX_AV1_NO_SIMD`. `dbg_env`'s `ANY_SET` scanner treats *every*
+`KINETIX_*` variable that is not `*_DIR` / `KINETIX_BENCH_ITERS` as "a debug
+switch is on", which converts ~200 per-block `std::env::var` lookups (OS lookup
++ `String` allocation each) back on. The A/B read **4.43 s vs 1.69 s** — a
+"2.7x SIMD win" in which both arms ran the *identical* kernel. Renaming the
+switch to `TPT_AV1_NO_SIMD` (no `KINETIX_` prefix) collapsed the two arms to
+within 1%, which is the real answer. Any future perf knob in this crate must
+avoid the `KINETIX_` prefix, or be excluded from the scanner the way
+`*_DIR` is.
+
+### release profile — LTO + codegen-units=1 DONE 2026-10-03
+
+The workspace shipped with **no `[profile.release]` at all**, i.e. Cargo's
+defaults: `opt-level = 3`, `codegen-units = 16`, no LTO. Set
+`lto = "fat"` + `codegen-units = 1` on both `release` and `bench` (stated
+explicitly on `bench` so a later edit to `release` cannot silently move the
+published numbers). `panic` stays `unwind` — every crate here is a library.
+
+**-4 to -5%, and unlike everything else in this file it survived every round of
+every case.** Medians of 3 paired rounds, both binaries pre-built and then
+alternated run-by-run in one window (see the method note below — this is the
+only configuration that produced a trustworthy result, because rebuilds of
+1.3-2.4 min each were themselves shifting the machine):
+
+| Case | default profile | fat LTO | Delta |
+|:---|---:|---:|---:|
+| `av1_decode/fate_corpus` | 1.833 s | 1.752 s | **-4.4%** |
+| `av1_decode/320x240` | 165.5 ms | 159.0 ms | **-4.0%** |
+| `av1_decode/1280x720` | 707.4 ms | 671.1 ms | **-5.1%** |
+| `vp9_decode_1280x720` | 37.79 ms | 35.23 ms | **-6.8%** |
+| `vp9_decode_1920x1080` | 79.73 ms | 75.70 ms | **-5.1%** |
+
+Paired, every LTO run beat the default run it was interleaved with, on all
+three AV1 corpora — 9/9 pairs. The VP9 rows are from an earlier same-session
+pair (also LTO-favourable, but 1 pair only, so treat them as indicative).
+
+Gates under the new profile: FATE **204/204 bit-exact vs dav1d**,
+`libaom_crosscheck` 2 passed (93 s), `phase_c_conformance` luma diff 0/12288,
+AV1 lib tests 179 passed **in release**, VP9 lib+integration tests pass in
+release, full `cargo build --release --workspace` clean (1.7 min incremental),
+and `wasm32-unknown-unknown` still builds for `tpt-kinetix-core` /
+`tpt-kinetix-demux` (the web-demo target). LTO is a codegen change, so the
+release-mode test runs above are the ones that matter — `cargo test` alone uses
+the dev profile and would not have exercised this at all.
+
+### Tile-phase sub-split (item 2 completed) — and it kills two SIMD targets 2026-10-03
+
+Added four tile sub-phase timers (`coeff_ns`, `itx_ns`, `pred_ns`, `mc_ns`) to
+`dbg_env::Av1PhaseTimers`, wrapped around `read_coeffs`, dequant +
+`inverse_transform`, and the intra-prediction dispatch in
+`reconstruct_block.rs`. Free when `KINETIX_AV1_PHASE` is unset (same guarded
+predicate as the existing six phases); a new second report line keeps the
+existing phase line's format intact for anything scraping it.
+
+Same corpus, same run (`av1_fate_score`, 204 frames):
+
+| Phase | frames 1-100 | frames 101-200 |
+|:---|---:|---:|
+| tiles (total) | 7617 us | 17718 us |
+| — coefficients (`read_coeffs`) | 764 us (10.0%) | 2156 us (12.2%) |
+| — dequant + inverse transform | 141 us (1.9%) | 212 us (1.2%) |
+| — intra prediction | 46 us (0.6%) | 70 us (0.4%) |
+| **— everything else in the tile phase** | **~87%** | **~86%** |
+
+**This is the most actionable measurement in the file.** Only ~13% of the tile
+phase is coefficient reading, inverse transform and prediction combined. The
+inverse transform — the thing `inverse_dct`/`inverse_adst` do, and the obvious
+"vectorise the transforms" target — is **1-2% of a frame**. Intra predictors are
+**under 1%**. Neither can ever repay a SIMD kernel, let alone both.
+
+The remaining ~86% is the *non-coefficient* symbol decoding: partition/mode
+syntax, intra mode + angle delta + filter params, palette/CFL syntax, tx-size
+derivation, MV prediction, and dequant (untimed here, but it sits between the
+two timers and is nowhere near 80% of a frame). So:
+
+- **Item 3's AV1 rows "inverse transforms" and "intra predictors" are dead
+  ends — struck, with a measurement rather than a guess.**
+- **Item 5 (entropy decode) is the only high-value target left in the AV1
+  decoder**, and specifically the *block syntax* reads rather than the
+  coefficient reads everyone assumed. That also explains, retroactively, why
+  every AV1 reconstruct-side attempt in this file has been a wash: the
+  reconstruct side is not where the time is.
+
+Caveats, stated rather than buried: three `Instant::now()` pairs per transform
+block inflate the tile total (`tiles` moved 9374 -> 7617 us in block 1 and
+16526 -> 17718 us in block 2 across runs, i.e. the overhead is real and
+sign-inconsistent), and it is *additive*, so if anything the ~13% is an
+**over**estimate and the ~86% an underestimate. Also `mc` reads 0: the inter
+path's `motion_compensate*` calls sit inside nested arms of a 227 KB function
+and were deliberately left uninstrumented rather than risk that file, so the
+inter share of the ~86% is unattributed. The FATE corpus is intra-heavy.
+
+**Concrete next step**: instrument the symbol decoder itself (reads + CDF
+updates) rather than its callers, which attributes the ~86% to specific syntax
+elements and directly informs item 5's three sub-items (refill, branchless CDF
+adaptation, context lookups).
+
+
+`samply` needs an elevated shell on this box, so the ranking came from the
+`KINETIX_AV1_PHASE=1` timers instead (`av1_fate_score`, 204 frames, two 100-frame
+report blocks):
+
+| Phase | frames 1-100 | frames 101-200 |
+|:---|---:|---:|
+| tiles (entropy + reconstruct) | 9374 us (53%) | 16526 us (90%) |
+| deblock | 6032 us (34%) | 1505 us (9%) |
+| loop restoration | 2341 us (13%) | 275 us (2%) |
+| film grain | 74 us (0.4%) | 0 |
+| CDEF / superres | 0 | 0 |
+
+(The timers sit inside a `KINETIX_`-prefixed run, so `dbg_env` is on its slow
+path and absolute numbers are inflated — most of that overhead lands in the
+per-block tile phase, so treat the *tile* share as an upper bound and the
+deblock/restoration shares as lower bounds. The ordering is what matters.)
+
+Two things follow, and both change the plan:
+
+1. **The tile phase is 53-90% of decode.** Everything else combined is under
+   half, and deblock — the one AV1 win this project has (-16%) — is already
+   spent. Loop restoration is the only untouched post-filter showing real time
+   (13% on the first block), while CDEF/superres/film-grain are ~0 *only because
+   this corpus does not enable them*: still unmeasured for performance, exactly
+   as the deblock entry warned.
+2. **Item 5 (entropy decode) should be attempted before more of item 3 (SIMD).**
+   The tile phase lumps symbol decode, coefficient read, inverse transform and
+   motion compensation, and every AV1 measurement so far says the entropy
+   decode dominates whatever it sits next to (that is what sank the two rejected
+   allocation attempts). SIMD is the right tool for the transform/MC/post-filter
+   slice; the entropy slice wants refill, branchless CDF adaptation and cheaper
+   context lookups instead. Ranking those four needs finer timers than the
+   current six phases — **that is the concrete next step**, and it is cheap:
+   four more `av1_timed` wrappers around the existing call sites, gated on the
+   same env var so they cost nothing when off.
+
+
+Cost: a cold release build of the 19-crate workspace goes from roughly a minute
+to a few minutes. Worth it for a decoder, and the dev profile is untouched, so
+edit-build-test loops are unaffected.
+
+**Method note — the measurement design matters more than usual here.** The
+first three attempts (rebuild-and-measure per arm) produced a *reversing*
+signal: one round said LTO was 6% faster on `fate_corpus` and 1.4% faster at
+720p, the next said 4% faster and 0% — because a 2-minute rebuild between arms
+warms/cools the box more than the effect being measured. Only after building
+both bench binaries once and alternating them run-by-run did the result become
+monotonic. **For any future change whose expected effect is under ~5%, build
+both binaries first, then alternate runs; never rebuild between arms.**
+
+This also retroactively explains item 3's disappointing first entry: the SIMD
+kernel was measured under the *default* profile, where the compiler had the
+least cross-crate information. Re-measuring it under fat LTO is still open.
+
 ## Phase 4 — Guardrails (every optimisation change)
 
-- [ ] `just check` passes
-- [ ] `just conformance` unchanged (`pixel_exact` stays true); FATE 204/204; `tests/libaom_crosscheck.rs` passes
-- [ ] Original codecs: existing roundtrip / bit-exact tests pass
-- [ ] SIMD-vs-scalar equivalence proptests for each vectorised kernel
+- [x] `just check` passes — `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets
+  -- -D warnings` clean, `cargo test --workspace --lib --bins --tests` exit 0
+- [x] `just conformance` unchanged (`pixel_exact` stays true); FATE 204/204; `tests/libaom_crosscheck.rs` passes
+  — re-run **under fat LTO** (a codegen change, so the release-profile runs are the ones that count):
+  FATE 204/204, libaom_crosscheck 2 passed, `phase_c_conformance` luma diff 0/12288
+- [x] Original codecs: existing roundtrip / bit-exact tests pass — VP9 lib+integration tests pass in
+  release; workspace suite green
+- [x] SIMD-vs-scalar equivalence proptests for each vectorised kernel — `simd::tests::prop_add_residual_row_matches_scalar` (AV1 `add_residual_row`), plus edge/extremes/clamp unit tests
 - [ ] Relevant fuzz target run >= 60s after touching any parser — attempted
   2026-10-03: `cargo +nightly fuzz run` cannot link on this box (the installed
   nightly's sysroot is missing `librustc-nightly_rt.asan.a`; `--sanitizer none`
