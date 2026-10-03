@@ -864,7 +864,7 @@ pub fn dequant_idct_8x8_scan(
         } else {
             (scaled + (1 << (5 - shift as i32))) >> (6 - shift as i32)
         };
-        if std::env::var("KINETIX_DBG_DEQUANT8").is_ok() && coeffs[z] != 0 {
+        if crate::dbg_env::var("KINETIX_DBG_DEQUANT8").is_ok() && coeffs[z] != 0 {
             let (col, row) = (raster % 8, raster / 8);
             eprintln!(
                 "KDEQUANT z={z} pos=({col},{row}) level={} weight={weight} cls={cls} ls={ls} d={}",

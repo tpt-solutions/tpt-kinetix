@@ -137,10 +137,29 @@ Correctness gaps the verify-before-timing gate surfaced (each UNVERIFIED row in
   only, bottom-right 86x32 px, pre-loop-filter buffers already wrong — a
   **4x4 coefficient-decode desync** in a mixed-block-size neighbourhood.
   Repro + reference pinned at
-  `tpt-kinetix-vp9/tests/fixtures/div128/` (see its README); next step is
-  rebuilding the instrumented libvpx oracle (todo-vp9.md Session #v4
-  methodology — the old `%TEMP%/libvpx2` build is gone). The perf corpus stays
-  pinned to clips that verify; VP9 rows read `UNVERIFIED` until then.
+  `tpt-kinetix-vp9/tests/fixtures/div128/`.
+  **Oracle rebuilt and bug isolated 2026-10-03**: an instrumented libvpx
+  v1.13.1 (provenance-only, `/tmp/libvpx` + `vpxsym.c` harness; rebuild steps
+  in the div128 README) now proves on the solo keyframe that the coefficient
+  token stream (9109 PTE/PTV lines), every dequantized value, and all 867 luma
+  intra predictions are **bit-identical** to libvpx. With both loop filters
+  disabled the frames still differ from pixel (240, 208) — and the first
+  overall difference is a single sample, (231, 2), one sample left of the
+  vertical block edge x=232 between a **skip** 8x8 DC block and a
+  4x4-partitioned intra neighbour: our loop filter modifies it (−1) where
+  libvpx leaves it untouched. The remaining bug is a per-edge level/skip-rule
+  difference in `tpt-kinetix-vp9/src/loop_filter.rs`; the full isolation
+  method and oracle rebuild steps are in the div128 README.
+  Sharpened 2026-10-03: with BOTH loop filters disabled the pre-LF frames are
+  identical through the x=232 edge region — the first post-LF divergence is a
+  single sample, (231, 2) on row 0, where OUR filter modified the flat-145
+  skip block by -1 and libvpx left it. The edge separates a **skip** 8x8 DC
+  block (mi 0,28) from a 4x4-partitioned intra block (mi 0,29, D153/TM
+  sub-modes): our LF filters that edge, libvpx does not. VP9 decoder
+  allocation-scratch migration (XfmScratch, removing 4 vec allocs + a
+  `.to_vec()` per transform block) was also tried and REJECTED the same day:
+  tiles 560 us vs a 538-609 us noise band, matching the AV1 precedent. The perf corpus
+  stays pinned to clips that verify; VP9 rows read `UNVERIFIED` until then.
 - **realtime — FIXED 2026-10-02**: two stacked bugs. (1) The frame-header
   writer/parser pair was asymmetric (writer emitted an empty intra-refresh
   mask where the parser always reads `refresh_mask_len()` bytes, and
@@ -228,7 +247,7 @@ Order:
   decode_pixels +19%; no new validation needed, its parser already bounded the
   block size). face and volumetric audited the same day: **no hot spot found**,
   so this row is done-but-for-the-record rather than work still to do
-- [ ] out-kinetix-h264 (optional, unpublished, last)
+- [x] out-kinetix-h264 — **done 2026-10-03**, see below
 
 ### face, volumetric — audited 2026-10-02, no hot spot found
 
@@ -558,6 +577,23 @@ counts and sink values in both arms.
   - After both audits, no crate is left with a bare `env::var` in a decode
     path.
 
+### VP9 loop-filter scalar rewrite — REJECTED 2026-10-03
+
+The Phase 2 ranking made the LF kernel the top VP9 target, so its inner loop
+(`loop_filter_edge`) was rewritten three ways, each keeping the arithmetic
+identical: (1) per-line window slices with usize addressing and the repeated
+wide-tap loads hoisted, (2) the same plus a `Tap` trait abstraction,
+(3) const-generic vertical/horizontal specializations with compile-time
+window offsets. **All three measured 2.1–2.4x SLOWER than the existing
+kernel** (438 us vs 1070-1205 us per frame at 320x240, clean A/B via
+`git stash`). The existing i64-addressing code is already compiler-optimal
+scalar — the casts fold into base+constant addressing and the bounds checks
+are cheap. Lesson recorded: this kernel only moves via real SIMD
+(`std::arch` with the scalar kept as oracle + equivalence proptests, per the
+Phase 3 rules) or via per-superblock-row parallelism (which needs the
+dav1d-style delayed-horizontal-pass restructuring to stay bit-exact). Both
+are real projects, not drive-by wins.
+
 ### AV1 tiles — per-leaf residual scratch REJECTED 2026-10-02
 
 The one AV1 pattern that looked exactly like the win that gave lean/realtime/
@@ -699,13 +735,123 @@ Notes:
   genuinely per-bit API, so the ceiling is the loop, not the primitive), and
   `StaticModel` still computes its slot arithmetically rather than by table.
 
+### bitstream follow-up — whole-struct windowed reader (same day, on top)
+
+The "still open" note above is closed. A follow-up rewrite makes a persistent
+64-bit window plus a single absolute bit position the `BitReader`'s whole
+state: the window refills once per 64 bits (or at end-of-buffer), every
+positioning API (`bit_position` / `byte_align` / `remaining_bytes` / ...)
+derives from the one counter, and the per-bit path has no bounds check at all.
+Same public API, same exhaustion and partial-consumption contracts, pinned by
+the existing reference-equality tests plus new mixed-read coherence tests.
+
+Measured on top of the committed state (same machine, Criterion, `--quiet`):
+
+| Case | committed (2026-10-02) | windowed reader | Delta |
+|:---|---:|---:|---:|
+| `bitstream_bitreader/read_bit` | 99.0 MiB/s | 286.8 MiB/s | **+190%** |
+| `bitstream_bitreader/read_bits_16` | 307.6 MiB/s | 861.9 MiB/s | **+180%** |
+| `bitstream_bitreader/read_u32_be` | 619.9 MiB/s | 1420.4 MiB/s | **+129%** |
+
+One real bug was caught by the reference tests during the rewrite and fixed:
+the refill must cap the loaded-bit count at 64 *before* subtracting the
+consumed head of the current byte, or a mid-byte refill reports shifted-out
+bits as valid and feeds zeros to the decoder mid-stream.
+
+### lean / realtime / vision — scratch-slice test fix (2026-10-03)
+
+`master` shipped with 4 failing `tpt-kinetix-lean` tests: the scratch-reuse
+refactor passed whole-frame scratch buffers where
+`hadamard_2d_raw` / `inverse_2d_with_scratch` debug-assert exact `n*n`
+slices, so any 4x4 chroma block (scratch 64, block 16) tripped the assert.
+The same unsliced pattern existed in `tpt-kinetix-realtime` and
+`tpt-kinetix-vision` (latent - their tests size chroma differently). All call
+sites now hand down `&mut buf[..n * n]` slices; the strict asserts stay.
+
+### out-kinetix-h264 — debug-switch environment lookups DONE 2026-10-03
+
+Same disease VP9 had, one crate over: 148 `std::env::var` / `var_os` call
+sites, several of them per macroblock — `KINETIX_BINTRACE` read 4+ times per
+MB in both the CAVLC and CABAC paths, `KINETIX_FFLAG` per MB, and
+`KINETIX_SKIP_DEBLOCK` per MB in all three deblocking entry points. At 1080p
+that is tens of thousands of environment locks + scans + `OsString`
+allocations per frame on the hottest paths.
+
+Fix: an `out_kinetix_h264::dbg_env` module mirroring the AV1/VP9 pattern — an
+`ANY_SET` atomic re-scanned once per `H264Decoder::decode` call, so with no
+`KINETIX_*` variable set every lookup is one relaxed atomic load, and with one
+set the reads are exactly `std::env::var` (tools that toggle variables between
+decode calls behave as before). All 148 sites now route through it; every env
+key in the crate is `KINETIX_`-prefixed, which the fast path's scan assumes.
+
+Measured against `baseline-2026-10-03.json` (committed before this change),
+full `bench-compare` run, nothing else executing:
+
+| Case | Before | After | Delta |
+|:---|---:|---:|---:|
+| `h264_decode_slice_1080p/parallel` | 127.75 Melem/s | 291.92 Melem/s | **+128%** |
+| `h264_decode_slice_1080p/serial` | 117.25 Melem/s | 229.73 Melem/s | **+96%** |
+
+Bit-exactness holds: all 391 crate tests pass, including the CAVLC/CABAC
+conformance suites and the env-toggling dbg tests (they set variables *before*
+`decode`, which re-scans).
+
+### bench-compare drift floor (2026-10-03, methodology note)
+
+A full `bench-compare` against the 2026-10-03 baseline with the bitstream +
+h264 changes in tree reported 31 "regressions" — 24 of them in crates with
+**zero code delta** in this working tree (face, vision, screen, volumetric),
+at the same −5…−15% the previous session already proved is machine drift via
+control rows. The one touched crate that showed rows down (realtime, from the
+scratch-slice fix) was A/B'd interleaved 2×2 and the gap flips direction
+between rounds: ±3% noise, no real cost. Lesson recorded for the next person:
+never run two bench suites concurrently on one machine (the first attempt
+showed 57 regressions purely from self-contention), and never trust a
+cross-session diff below ±10%.
+
+## Phase 3b — Closing the gap to ffmpeg (opened 2026-10-03)
+
+Goal: from ~6-9x slower than single-threaded libdav1d/libvpx to ~2-3x. Beating ffmpeg is not a goal.
+Code-shape wins (env::var, matrix caching, allocations) are exhausted; the remaining levers are build
+codegen, SIMD and threading. Rules: same-session A/B only, bit-exact gates after every step, scalar
+path kept as oracle. Commit or stash unrelated working-tree edits before A/B work.
+
+- [ ] 1. Build profile: root `Cargo.toml` has **no `[profile.release]`** (codegen-units=16, no LTO).
+  Try `lto = "fat"`, `codegen-units = 1`; keep `panic = unwind` (library). `target-cpu=x86-64-v3`
+  only as an opt-in documented build, never the default. Measure with `profile_decode`
+  (`av1 target/perf-corpus/av1_1280x720.ivf 3`) + `just bench`.
+- [ ] 2. Function-level profiler: run `samply` once from an elevated shell (or WPR/ETW). Rank the AV1
+  tile phase (symbol decode vs coef read vs inverse transform vs MC) and CDEF / loop restoration.
+- [ ] 3. SIMD kernels (runtime-dispatched `std::arch`, AVX2 with SSE4.1 fallback, scalar oracle,
+  SIMD-vs-scalar proptests per kernel), in order:
+  - [ ] VP9 loop filter (`tpt-kinetix-vp9/src/loop_filter.rs`, 49-63% of VP9)
+  - [ ] AV1 inverse transforms
+  - [ ] AV1/VP9 motion-compensation filters
+  - [ ] AV1 CDEF + loop restoration
+  - [ ] Intra predictors
+- [ ] 4. Parallelism on single-tile streams:
+  - [ ] Superblock-row post-filters (needs dav1d-style delayed horizontal pass to stay bit-exact)
+  - [ ] Frame-level overlap of loop filter (frame N) with entropy decode (N+1)
+  - [ ] VP9 tile-column threading
+- [ ] 5. Entropy decode: symbol decoder refill, branchless CDF adaptation, coef-context lookups.
+- [ ] 6. Allocation/memory: only if the profiler shows it matters (AV1 evidence says no).
+- [ ] Prerequisite for trustworthy VP9 speed numbers: fix the VP9 loop-filter skip-edge correctness
+  bug (rows read `UNVERIFIED` until then).
+- [ ] Headline metric: refresh `just bench-ffmpeg` ratio vs `-threads 1` ffmpeg after each major step.
+
+Out of scope: H.264, the original codecs, anything that changes decoded output.
+
 ## Phase 4 — Guardrails (every optimisation change)
 
 - [ ] `just check` passes
 - [ ] `just conformance` unchanged (`pixel_exact` stays true); FATE 204/204; `tests/libaom_crosscheck.rs` passes
 - [ ] Original codecs: existing roundtrip / bit-exact tests pass
 - [ ] SIMD-vs-scalar equivalence proptests for each vectorised kernel
-- [ ] Relevant fuzz target run >= 60s after touching any parser
+- [ ] Relevant fuzz target run >= 60s after touching any parser — attempted
+  2026-10-03: `cargo +nightly fuzz run` cannot link on this box (the installed
+  nightly's sysroot is missing `librustc-nightly_rt.asan.a`; `--sanitizer none`
+  still links it). CI's scheduled `fuzz.yml` workflow is the coverage path;
+  local runs need a nightly reinstall first
 - [ ] CI nightly/manual bench job uploads the report
 
 ## Open questions

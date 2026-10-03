@@ -434,7 +434,7 @@ fn derive_poc_type1(
         expected_pic_order_cnt + d0
     };
 
-    if std::env::var_os("KINETIX_POC1_DBG").is_some() {
+    if crate::dbg_env::var_os("KINETIX_POC1_DBG").is_some() {
         eprintln!(
             "POC1-DBG frame_num={frame_num} is_ref={is_reference} is_idr={is_idr} d0={d0} \
              cycle_len={cycle_len} abs_frame_num={abs_frame_num} \
@@ -1251,7 +1251,9 @@ pub fn modify_ref_pic_list(
 /// when `KINETIX_BINTRACE` is set. Used to diff our RefPicList0/L1 contents
 /// against ffmpeg's reference selection for the c_p8x8 row-2 investigation.
 pub(crate) fn trace_ref_list(name: &str, list: &[DpbEntry], ctx: PicNumContext) {
-    if std::env::var("KINETIX_BINTRACE").is_err() && std::env::var("KINETIX_DBG_REFLIST").is_err() {
+    if crate::dbg_env::var("KINETIX_BINTRACE").is_err()
+        && crate::dbg_env::var("KINETIX_DBG_REFLIST").is_err()
+    {
         return;
     }
     eprintln!("REFLIST {name} len={}", list.len());
@@ -1796,7 +1798,7 @@ pub fn build_field_ref_list_l0(
     ctx: PicNumContext,
 ) -> Option<Vec<FieldRef>> {
     let num_active = num_ref_idx_l0_active.max(1);
-    if std::env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
+    if crate::dbg_env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
         eprintln!(
             "BUILD_FIELD_REF_L0: current_bottom={} num_ref_idx_l0_active={} dpb_entries={}",
             current_bottom,
@@ -1804,7 +1806,7 @@ pub fn build_field_ref_list_l0(
             dpb.iter().count()
         );
     }
-    if std::env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
+    if crate::dbg_env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
         for (i, e) in dpb.iter().enumerate() {
             eprintln!(
                 "  DPB[{}]: frame_num={} field_pic={} bottom={} poc={} short={} long={}",
@@ -1900,7 +1902,7 @@ pub fn build_field_ref_list_l0(
         }
     }
 
-    if std::env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
+    if crate::dbg_env::var_os("KINETIX_DUMP_FIELD_REF").is_some() {
         for (i, f) in ordered.iter().enumerate() {
             eprintln!(
                 "  FIELD-L0[{i}]: bottom={} is_frame={} poc={}",

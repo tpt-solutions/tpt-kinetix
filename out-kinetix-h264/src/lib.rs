@@ -31,6 +31,7 @@
 pub mod bitreader;
 pub mod cabac_tables;
 pub mod cavlc_tables;
+pub mod dbg_env;
 pub mod deblock;
 pub mod decoder;
 pub mod entropy;

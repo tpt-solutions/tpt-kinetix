@@ -583,7 +583,12 @@ fn add_residual(
     for (k, &c) in src.iter().enumerate().take(n * n) {
         coeffs[k] = dequant(c, qp as u8);
     }
-    inverse_2d_with_scratch(&coeffs[..n * n], n, residual, tscratch);
+    inverse_2d_with_scratch(
+        &coeffs[..n * n],
+        n,
+        &mut residual[..n * n],
+        &mut tscratch[..n * n],
+    );
     for r in 0..b {
         for c in 0..b {
             let px = x0 + c;
@@ -1115,7 +1120,7 @@ fn encode_residual_into(
     for i in 0..n {
         residual[i] = orig[i] - pred[i];
     }
-    transform_2d(&residual[..n], b, transformed);
+    transform_2d(&residual[..n], b, &mut transformed[..n]);
     out.clear();
     out.reserve(n);
     let mut last = 0;
@@ -1147,7 +1152,7 @@ fn apply_reconstruct_into(
     for (k, &c) in coeffs.iter().enumerate().take(n) {
         full[k] = dequant(c, qp);
     }
-    inverse_2d_with_scratch(&full[..n], b, back, tscratch);
+    inverse_2d_with_scratch(&full[..n], b, &mut back[..n], &mut tscratch[..n]);
     for i in 0..n {
         out[i] = (pred[i] + back[i]).clamp(0, 255);
     }

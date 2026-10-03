@@ -354,7 +354,7 @@ fn amvd_sum(
         }
     };
 
-    if std::env::var("KINETIX_AMVD").is_ok() {
+    if crate::dbg_env::var("KINETIX_AMVD").is_ok() {
         let decode_addr =
             2 * ((mb_y as usize / 2) * mb_cols as usize + mb_x as usize) + (mb_y as usize & 1);
         let lcell = if bx > 0 {
@@ -716,7 +716,7 @@ pub(crate) fn cabac_cbp_neighbors(
         .map(|i| grid[i].cbp_word)
         .unwrap_or(CABAC_CBP_UNAVAILABLE);
 
-    if std::env::var("KINETIX_BINTRACE").is_ok() {
+    if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
         eprintln!(
             "CBPNB mb=({mb_x},{mb_y}) left_top={left_top_idx:?} left_bottom={left_bottom_idx:?} left={left:#06x} top={top_idx:?}={top:#06x}"
         );
@@ -767,7 +767,7 @@ pub(crate) fn cabac_cbp_neighbors_inter(
     // pair above), so we use the wholesale copy with the inter sentinel.
     let top = top_idx.map(|i| grid[i].cbp_word).unwrap_or(inter_sentinel);
 
-    if std::env::var("KINETIX_BINTRACE").is_ok() {
+    if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
         eprintln!(
             "CBPNB-INTER mb=({mb_x},{mb_y}) left_top={left_top_idx:?} left_bottom={left_bottom_idx:?} left={left:#06x} top={top_idx:?}={top:#06x}"
         );

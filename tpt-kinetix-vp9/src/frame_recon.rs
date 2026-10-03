@@ -47,6 +47,10 @@ impl<'a> TileDecoder<'a> {
         let is32 = tx == 3;
 
         // Luma: merge contexts once, decode every transform block, splat once.
+        // NOTE: the above entropy grid is deliberately NOT gated at tile top
+        // rows — the grid doubles as intra-block context storage (a block's
+        // upper transform blocks write the cells its lower blocks read), and
+        // libvpx zeroes it per tile, so the values our reads see match.
         if tx > 0 {
             merge_nnz(&mut self.state.above_y_nnz, col * 2, end_x, step);
             merge_nnz(&mut self.left.y_nnz, row7 * 2, end_y, step);
@@ -87,6 +91,21 @@ impl<'a> TileDecoder<'a> {
                     [i32::from(qmul_y[0]), i32::from(qmul_y[1])],
                     &mut self.scratch_y[n * 16..n * 16 + n_coeffs],
                 );
+                if std::env::var_os("VP9PT").is_some() {
+                    let tt = if intra && tx < 3 {
+                        INTRA_TXFM_TYPE[self.b.mode[mode_idx]]
+                    } else {
+                        0
+                    };
+                    let coefs: Vec<String> = self.scratch_y[n * 16..n * 16 + 16]
+                        .iter()
+                        .map(|c| c.to_string())
+                        .collect();
+                    eprintln!(
+                        "COEF row={row} col={col} x={x} y={y} tx={tx} tt={tt} eob={eob} raster0..15={}",
+                        coefs.join(",")
+                    );
+                }
                 total |= eob != 0;
                 self.eob_y[n] = eob as u16;
                 self.state.above_y_nnz[col * 2 + x] = u8::from(eob != 0);
@@ -203,6 +222,15 @@ impl<'a> TileDecoder<'a> {
                 );
                 let off = (row * 8 + y * 4) * stride + col * 8 + x * 4;
                 intra_predict(mode, &edges, &mut self.state.frame.y, off, stride);
+                if std::env::var_os("VP9PT").is_some() {
+                    eprintln!(
+                        "KEDGE row={row} col={col} x={x} y={y} ht={} hl={} t0={} t1={} t2={} t3={} t4={} l0={} l1={} l2={} l3={}",
+                        usize::from(row > 0 || y > 0),
+                        usize::from(col > self.tile_col_start || x > 0),
+                        edges.top[0], edges.top[1], edges.top[2], edges.top[3], edges.top[4],
+                        edges.left[0], edges.left[1], edges.left[2], edges.left[3]
+                    );
+                }
                 if trace {
                     eprintln!(
                         "EDGE hr={} above={} {} {} {} {} {} {} {} {} {}",

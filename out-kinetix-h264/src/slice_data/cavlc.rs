@@ -90,7 +90,7 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
                 field_flags[grid_idx + mb_cols as usize] = Some(cur_pair_field);
             }
         }
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             eprintln!(
                 "CAVLC-TRC mb{mb_idx} px={mb_x} py={mb_y} field={cur_pair_field} bitpos={}",
                 reader.bit_position()
@@ -106,7 +106,7 @@ pub fn parse_i_slice<T: crate::trace::DecodeTracer>(
         );
 
         let mb_type = reader.read_ue().ok_or(SliceDataError::Eof("mb_type"))?;
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             eprintln!("CAVLC-TRC mb{mb_idx} mb_type={mb_type}");
         }
         let (mb, this_nz, this_pred_ctx, new_qp) = parse_intra_macroblock(
@@ -884,7 +884,7 @@ pub fn parse_p_slice_range<T: crate::trace::DecodeTracer>(
 
         if mb_skip_run == -1 {
             let run = reader.read_ue().ok_or(SliceDataError::Eof("mb_skip_run"))?;
-            if std::env::var("KINETIX_BINTRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!(
                     "CAVLC-P mb_idx={mb_idx} read mb_skip_run={run} (bit_pos={})",
                     reader.bit_position()
@@ -1123,7 +1123,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
             motion.mvd_l0.push((mx, my));
         }
     }
-    if std::env::var("KINETIX_BINTRACE").is_ok() && motion.ref_idx_l0.iter().any(|&r| r > 0) {
+    if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() && motion.ref_idx_l0.iter().any(|&r| r > 0) {
         eprintln!(
             "REFIDX_GT0 mb=({mb_x},{mb_y}) ref_idx_l0={:?}",
             motion.ref_idx_l0
@@ -1174,7 +1174,7 @@ fn parse_p_macroblock<T: crate::trace::DecodeTracer>(
     mb.qp = qp;
 
     // Triage (#32bz): per-MB parse dump for the independent walker diff.
-    if std::env::var_os("KINETIX_PARSE_DUMP").is_some() && mb_y < 2 && mb_x < 6 {
+    if crate::dbg_env::var_os("KINETIX_PARSE_DUMP").is_some() && mb_y < 2 && mb_x < 6 {
         let tcs: usize = mb
             .luma_coeffs
             .iter()
@@ -1875,10 +1875,13 @@ pub fn raster_of_8x8_sub(blk8: usize, sub: usize) -> usize {
 /// **zigzag** scan order (length `max_coeff`) and the TotalCoeff for nC context.
 pub fn parse_cavlc_block(r: &mut BitReader, n_c: i32, max_coeff: usize) -> R<([i16; 16], u8, u8)> {
     let mut out = [0i16; 16];
-    let bt = std::env::var("KINETIX_CAVLC_BITTRACE")
+    let bt = crate::dbg_env::var("KINETIX_CAVLC_BITTRACE")
         .ok()
         .and_then(|v| v.parse::<i32>().ok());
-    let trace_all = std::env::var("KINETIX_CAVLC_BITTRACE").ok().as_deref() == Some("all");
+    let trace_all = crate::dbg_env::var("KINETIX_CAVLC_BITTRACE")
+        .ok()
+        .as_deref()
+        == Some("all");
     if bt == Some(n_c) || trace_all {
         eprintln!(
             "CAVLCBIT nC={n_c} start={} bits_next3={:03b}",

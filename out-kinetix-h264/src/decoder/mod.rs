@@ -320,7 +320,7 @@ impl H264Decoder {
         // Debug override (sessions #32j/#32k): force the plain frame-convention
         // deblock pass, to bisect whether a divergence originates in the
         // orchestrator or the shared rules.
-        if std::env::var("KINETIX_MBAFF_DEBLOCK_PLAIN").as_deref() == Ok("1") {
+        if crate::dbg_env::var("KINETIX_MBAFF_DEBLOCK_PLAIN").as_deref() == Ok("1") {
             return None;
         }
         if !mbaff_frame {
@@ -514,6 +514,7 @@ impl H264Decoder {
     /// NAL units are extracted from Annex B byte-stream format.
     /// Slice-level parallelism is applied via `rayon` at the macroblock-row boundary.
     pub fn decode(&mut self, packet: &Packet) -> Result<Option<VideoFrame>, KinetixError> {
+        crate::dbg_env::refresh();
         self.decode_impl(packet, &mut NoopTracer)
     }
 
@@ -527,6 +528,7 @@ impl H264Decoder {
         packet: &Packet,
         tracer: &mut T,
     ) -> Result<Option<VideoFrame>, KinetixError> {
+        crate::dbg_env::refresh();
         self.decode_impl(packet, tracer)
     }
 
@@ -577,7 +579,7 @@ impl H264Decoder {
             }
         }
         self.reorder_buf.push((poc, frame));
-        if std::env::var_os("KINETIX_REORDER_DBG").is_some() {
+        if crate::dbg_env::var_os("KINETIX_REORDER_DBG").is_some() {
             eprintln!(
                 "REORDER-DBG push poc={poc} buf_len={} bufpocs={:?}",
                 self.reorder_buf.len(),
@@ -638,7 +640,7 @@ impl H264Decoder {
         let mut interlaced_frame_emitted = false;
 
         for nal in &nal_units {
-            if std::env::var("KINETIX_BINTRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!(
                     "NAL_LOOP type={:?} ref_idc={} rbsp_len={}",
                     nal.nal_unit_type,
@@ -665,7 +667,7 @@ impl H264Decoder {
                                 .map(|s| &s.scaling);
                             match PicParameterSet::parse(&nal.rbsp, sps_scaling) {
                                 Ok(pps) => {
-                                    if std::env::var_os("KINETIX_PPS_DBG").is_some() {
+                                    if crate::dbg_env::var_os("KINETIX_PPS_DBG").is_some() {
                                         eprintln!(
                                             "PPS-DBG id={} sps_id={} cabac={} nsg1={} nri_l0={} nri_l1={} wpf={} wbi={} qp={} cip={} t8x8={}",
                                             pps.pic_parameter_set_id,
@@ -821,7 +823,7 @@ impl H264Decoder {
                                 self.pending_poc,
                                 self.pending_is_idr || std::mem::take(&mut self.pending_mmco5),
                             );
-                            if std::env::var("KINETIX_BINTRACE").is_ok() {
+                            if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                                 eprintln!("REORDER_PUSH[i-slice] poc={poc} is_idr={is_idr}");
                             }
                             if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
@@ -881,7 +883,7 @@ impl H264Decoder {
                             self.pending_poc,
                             self.pending_is_idr || std::mem::take(&mut self.pending_mmco5),
                         );
-                        if std::env::var("KINETIX_BINTRACE").is_ok() {
+                        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                             eprintln!("REORDER_PUSH[p/b-slice] poc={poc} is_idr={is_idr}");
                         }
                         if let Some(ready) = self.reorder_push(poc, frame, is_idr) {
@@ -1155,7 +1157,7 @@ impl H264Decoder {
         // Frame-coded picture: tag the deblock trace so it is distinguishable
         // from the field pictures' `P`/`B` tags (see `set_deblock_pic_tag`).
         crate::deblock::set_deblock_pic_tag("FRAME");
-        if let Ok(want) = std::env::var("KINETIX_DUMP_PREDEBLOCK_POC") {
+        if let Ok(want) = crate::dbg_env::var("KINETIX_DUMP_PREDEBLOCK_POC") {
             if want.parse::<i64>().ok() == Some(_poc) {
                 let p = format!("predeblock_poc{_poc}.gray");
                 eprintln!("PREDEBLOCK(ms) poc={_poc} -> {p}");
@@ -1359,7 +1361,7 @@ impl H264Decoder {
         // SPS set, so this is always the correct merged set.
         let scaling = pps.map(|p| &p.scaling).unwrap_or(&sps.scaling);
 
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             eprintln!(
                 "TRY_REAL_SLICE first_mb={} frame_num={} slice_type={:?}",
                 header.first_mb_in_slice, header.frame_num, header.slice_type
@@ -1772,7 +1774,7 @@ impl H264Decoder {
         ) {
             Ok(v) => v,
             Err(e) => {
-                if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+                if crate::dbg_env::var("KINETIX_PAFF_DBG").is_ok() {
                     eprintln!("CAVLC I parse failed: {e}");
                 }
                 let _ = e;
@@ -2244,7 +2246,7 @@ impl H264Decoder {
         ) {
             Ok(v) => v,
             Err(e) => {
-                if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+                if crate::dbg_env::var("KINETIX_PAFF_DBG").is_ok() {
                     eprintln!(
                         "CAVLC P parse err (first_mb={}): {e}",
                         header.first_mb_in_slice
@@ -2349,7 +2351,7 @@ impl H264Decoder {
             return Ok(Some(frame));
         }
         self.suppress_frame = true;
-        if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+        if crate::dbg_env::var("KINETIX_PAFF_DBG").is_ok() {
             eprintln!("CAVLC P short parse: {end_mb}/{total_mbs} MBs");
         }
         if let Some(ef) = extra_frame {
@@ -2499,7 +2501,7 @@ impl H264Decoder {
             }
             return Ok(None);
         };
-        if std::env::var_os("KINETIX_DBG_REFLIST").is_some() {
+        if crate::dbg_env::var_os("KINETIX_DBG_REFLIST").is_some() {
             eprintln!(
                 "DBG_REFLIST B(ms) cur_poc={current_poc} frame_num={} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} rplr_l0={:?} rplr_l1={:?} mmco={:?} dpb={:?} l0_poc={:?} l1_poc={:?}",
                 header.frame_num,
@@ -2621,7 +2623,7 @@ impl H264Decoder {
             }
         };
 
-        if std::env::var_os("KINETIX_B_MB_DBG").is_some() {
+        if crate::dbg_env::var_os("KINETIX_B_MB_DBG").is_some() {
             eprintln!(
                 "B-HDR-DBG frame_num={} poc={current_poc} qp={slice_qp} idc={} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} direct_spatial={} disable_deblock_idc={}",
                 header.frame_num,
@@ -2847,7 +2849,7 @@ impl H264Decoder {
                     // follows.
                     self.poc_state.reset_after_mmco5();
                     self.pending_mmco5 = true;
-                    if std::env::var_os("KINETIX_MMCO5_DBG").is_some() {
+                    if crate::dbg_env::var_os("KINETIX_MMCO5_DBG").is_some() {
                         eprintln!("MMCO5 fired: frame_num={}", header.frame_num);
                     }
                 }
@@ -2946,7 +2948,7 @@ impl H264Decoder {
         ) {
             Ok(h) => h,
             Err(e) => {
-                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                     eprintln!("DECODE_SLICE header parse failed: {e:?}");
                 }
                 return self.emit_skip_frame(nal.nal_unit_type, width, height, packet);
@@ -2957,7 +2959,7 @@ impl H264Decoder {
         self.pending_is_idr = matches!(nal.nal_unit_type, NalUnitType::IdrSlice);
         self.pending_poc = self.display_poc(&sps, &header, nal);
 
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             eprintln!(
                 "SLICE_START first_mb={} frame_num={} idr={} slice_type={:?} poc={}",
                 header.first_mb_in_slice,
@@ -3122,7 +3124,7 @@ impl H264Decoder {
                 + header.slice_qp_delta;
             // Session #28 debug: force a candidate SliceQpY to test whether the
             // CABAC context initialisation QP is what diverges from ffmpeg.
-            if let Ok(q) = std::env::var("KINETIX_FORCE_SLICE_QP") {
+            if let Ok(q) = crate::dbg_env::var("KINETIX_FORCE_SLICE_QP") {
                 if let Ok(q) = q.parse::<i32>() {
                     eprintln!("FORCING slice_qp {slice_qp} -> {q}");
                     slice_qp = q;
@@ -3141,7 +3143,7 @@ impl H264Decoder {
                 header.field_pic_flag,
                 header.bottom_field_flag,
             );
-            if std::env::var_os("KINETIX_P_HDR_DBG").is_some() {
+            if crate::dbg_env::var_os("KINETIX_P_HDR_DBG").is_some() {
                 eprintln!(
                     "P-HDR-DBG frame_num={} field_pic={} qp={} idc={} nref_l0={} t8x8={} wpf={} disable_deblock_idc={} ref_pic_list_mod={:?}",
                     header.frame_num,
@@ -3167,7 +3169,7 @@ impl H264Decoder {
                     .iter()
                     .map(|e| e.mc_frame.as_ref().unwrap_or(&e.frame).clone())
                     .collect();
-                if let Ok(path) = std::env::var("KINETIX_DUMP_REFLIST0") {
+                if let Ok(path) = crate::dbg_env::var("KINETIX_DUMP_REFLIST0") {
                     if let Some(f) = ref_frames.first() {
                         let path = format!("{path}.fn{}", header.frame_num);
                         std::fs::write(&path, &f.data).ok();
@@ -3188,7 +3190,7 @@ impl H264Decoder {
                 let p_result = if entropy_coding_mode_flag {
                     reader.byte_align();
                     let cabac_data = reader.remaining_bytes();
-                    if let Ok(path) = std::env::var("KINETIX_DUMP_P_PATH") {
+                    if let Ok(path) = crate::dbg_env::var("KINETIX_DUMP_P_PATH") {
                         let _ = std::fs::write(&path, cabac_data);
                         let meta = format!(
                             "qp={slice_qp} idc={} nl0={num_ref_idx_l0_active} t8={}",
@@ -3242,7 +3244,7 @@ impl H264Decoder {
                         if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
                             self.scaffold_fallback = true;
                         }
-                        if std::env::var_os("KINETIX_P_MB_DBG").is_some() {
+                        if crate::dbg_env::var_os("KINETIX_P_MB_DBG").is_some() {
                             for (i, mb) in parsed.macroblocks.iter().enumerate().take(24) {
                                 let cells = parsed.mv_store.cells_of(i);
                                 eprintln!(
@@ -3321,7 +3323,7 @@ impl H264Decoder {
                             &weighted_pred,
                             tracer,
                         );
-                        if let Ok(path) = std::env::var("KINETIX_DUMP_PREDEBLOCK") {
+                        if let Ok(path) = crate::dbg_env::var("KINETIX_DUMP_PREDEBLOCK") {
                             let path = format!("{path}.fn{}", header.frame_num);
                             std::fs::write(&path, &recon.luma).ok();
                             eprintln!(
@@ -3488,7 +3490,7 @@ impl H264Decoder {
         // todo-h264.md's #32ak session note for what implementing the real
         // thing needs.
         let is_b_slice = header.slice_type == crate::slice::SliceType::B;
-        if is_b_slice && std::env::var("KINETIX_DBG_DIRECT_MODE").is_ok() {
+        if is_b_slice && crate::dbg_env::var("KINETIX_DBG_DIRECT_MODE").is_ok() {
             eprintln!(
                 "DBG B slice direct_spatial_mv_pred_flag={} nl0={} nl1={}",
                 header.direct_spatial_mv_pred_flag,
@@ -3501,7 +3503,7 @@ impl H264Decoder {
                 + pps.as_ref().map(|p| p.pic_init_qp_minus26).unwrap_or(0)
                 + header.slice_qp_delta;
             // Session #28 debug: see the P-slice twin of this override.
-            if let Ok(q) = std::env::var("KINETIX_FORCE_SLICE_QP_B") {
+            if let Ok(q) = crate::dbg_env::var("KINETIX_FORCE_SLICE_QP_B") {
                 if let Ok(q) = q.parse::<i32>() {
                     eprintln!("FORCING B slice_qp {slice_qp} -> {q}");
                     slice_qp = q;
@@ -3552,7 +3554,7 @@ impl H264Decoder {
                 &header.ref_pic_list_modification_l1,
             );
 
-            if std::env::var_os("KINETIX_DBG_REFLIST").is_some() {
+            if crate::dbg_env::var_os("KINETIX_DBG_REFLIST").is_some() {
                 eprintln!(
                     "DBG_REFLIST B-slice cur_poc={current_poc} frame_num={} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} rplr_l0={:?} rplr_l1={:?} mmco={:?} dpb_pocs={:?}",
                     header.frame_num,
@@ -3630,7 +3632,7 @@ impl H264Decoder {
                 let b_result = if entropy_coding_mode_flag {
                     reader.byte_align();
                     let cabac_data = reader.remaining_bytes();
-                    if let Ok(path) = std::env::var("KINETIX_DUMP_B_PATH") {
+                    if let Ok(path) = crate::dbg_env::var("KINETIX_DUMP_B_PATH") {
                         let _ = std::fs::write(&path, cabac_data);
                         let meta = format!(
                             "qp={slice_qp} idc={} nl0={num_ref_idx_l0_active} nl1={num_ref_idx_l1_active} t8={}",
@@ -3686,7 +3688,7 @@ impl H264Decoder {
                         if parsed.decoded_mb_count < (mb_cols * mb_rows) as usize {
                             self.scaffold_fallback = true;
                         }
-                        if std::env::var_os("KINETIX_B_MB_DBG").is_some() {
+                        if crate::dbg_env::var_os("KINETIX_B_MB_DBG").is_some() {
                             eprintln!(
                                 "B-HDR-DBG(legacy) frame_num={} poc={current_poc} qp={slice_qp} idc={} entropy_cabac={entropy_coding_mode_flag} nri_l0={num_ref_idx_l0_active} nri_l1={num_ref_idx_l1_active} direct_spatial={} disable_deblock_idc={} decoded_mb_count={} of {}",
                                 header.frame_num,
@@ -3870,7 +3872,7 @@ impl H264Decoder {
                             }
                         }
 
-                        if let Ok(path) = std::env::var("KINETIX_DUMP_PREDEBLOCK") {
+                        if let Ok(path) = crate::dbg_env::var("KINETIX_DUMP_PREDEBLOCK") {
                             let p = format!("{path}.{}", self.frame_count + 1);
                             eprintln!("PREDEBLOCK dump -> {p}");
                             let _ = std::fs::write(&p, &recon.luma);
@@ -3916,16 +3918,16 @@ impl H264Decoder {
                         return Ok(frame);
                     }
                     Err(e) => {
-                        if std::env::var_os("KINETIX_DUMP_B_PATH").is_some() {
+                        if crate::dbg_env::var_os("KINETIX_DUMP_B_PATH").is_some() {
                             eprintln!("B CABAC parse error: {e:?}");
                         }
                         // Fall through to the skip scaffold.
                     }
                 }
-            } else if std::env::var_os("KINETIX_DUMP_B_PATH").is_some() {
+            } else if crate::dbg_env::var_os("KINETIX_DUMP_B_PATH").is_some() {
                 eprintln!("B PATH: ref list build failed");
             }
-        } else if std::env::var_os("KINETIX_DUMP_B_PATH").is_some() {
+        } else if crate::dbg_env::var_os("KINETIX_DUMP_B_PATH").is_some() {
             eprintln!("B PATH: not entropy_coding_mode or missing refs");
         }
 

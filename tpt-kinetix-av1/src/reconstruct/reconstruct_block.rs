@@ -344,19 +344,38 @@ pub(super) fn reconstruct_tx_block(
     }
 
     let pix_max = (1i32 << bit_depth) - 1;
-    for dy in 0..tx_h {
-        let sy = px_y + dy;
-        for dx in 0..tx_w {
-            let sx = px_x + dx;
-            let val = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, pix_max) as Px;
-            if sy >= plane_h || sx >= plane_w {
-                if let Some(over) = bd.overhang.as_deref_mut() {
-                    over.push((sx, sy, val));
+    // Fast path: the whole block lands inside the plane, so each row is a
+    // straight `pred + residual -> clamp -> store` over contiguous slices and
+    // can go through the SIMD kernel. This is the overwhelmingly common case
+    // (only the right/bottom frame edges take the scalar overhang path below).
+    // Bit-identical to the scalar loop; see `crate::simd`'s oracle proptests.
+    let rows_in_bounds = px_y + tx_h <= plane_h;
+    let full_width_in_bounds = px_x + tx_w <= plane_w;
+    if rows_in_bounds && full_width_in_bounds {
+        for dy in 0..tx_h {
+            let sy = px_y + dy;
+            let base = sy * stride + px_x;
+            let row = (dy * tx_w)..(dy * tx_w + tx_w);
+            let Some(dst_row) = samples.get_mut(base..base + tx_w) else {
+                break;
+            };
+            crate::simd::add_residual_row(&pred[row], &residual[row], dst_row, pix_max);
+        }
+    } else {
+        for dy in 0..tx_h {
+            let sy = px_y + dy;
+            for dx in 0..tx_w {
+                let sx = px_x + dx;
+                let val = (pred[dy * tx_w + dx] + residual[dy * tx_w + dx]).clamp(0, pix_max) as Px;
+                if sy >= plane_h || sx >= plane_w {
+                    if let Some(over) = bd.overhang.as_deref_mut() {
+                        over.push((sx, sy, val));
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if let Some(slot) = samples.get_mut(sy * stride + sx) {
-                *slot = val;
+                if let Some(slot) = samples.get_mut(sy * stride + sx) {
+                    *slot = val;
+                }
             }
         }
     }

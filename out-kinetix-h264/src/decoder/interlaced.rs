@@ -75,7 +75,7 @@ fn parse_i_slice_cabac_single<T: DecodeTracer>(
 /// PAFF/MBAFF decode-path trace, silent unless `KINETIX_PAFF_DBG` is set.
 macro_rules! paff_dbg {
     ($($arg:tt)*) => {
-        if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+        if crate::dbg_env::var("KINETIX_PAFF_DBG").is_ok() {
             eprintln!($($arg)*);
         }
     };
@@ -205,7 +205,7 @@ impl H264Decoder {
             header.first_mb_in_slice
         );
         // Triage (#32bz): verify the header ctx vs data_bit_offset.
-        if std::env::var_os("KINETIX_HDR_DBG").is_some() {
+        if crate::dbg_env::var_os("KINETIX_HDR_DBG").is_some() {
             eprintln!(
                 "HDR-DBG ctx: log2_mfn={} log2_poc={} fmo={} data_bit_offset={} frame_num={} poc_lsb={:?} qp_delta={} nref_minus1={} deb={}",
                 ctx.log2_max_frame_num_minus4,
@@ -222,7 +222,7 @@ impl H264Decoder {
         // MBAFF frames (SPS enables `mb_adaptive_frame_field_flag`, slice is a frame
         // picture) are handled per macroblock pair below (Phase G.4). PAFF frame
         // pictures remain unsupported and fall back.
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             eprintln!(
                 "MBAFF_DISPATCH mb_adaptive={} field_pic={} slice_type={:?}",
                 mb_adaptive, header.field_pic_flag, header.slice_type,
@@ -333,7 +333,7 @@ impl H264Decoder {
                 }
             };
 
-            if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+            if crate::dbg_env::var("KINETIX_PAFF_DBG").is_ok() {
                 for (i, mb) in parsed.macroblocks.iter().enumerate() {
                     eprintln!(
                         "PAFF_IFIELD_MB[{i}] type={:?} t8x8={} cbp={} pm8={:?}",
@@ -664,7 +664,7 @@ impl H264Decoder {
             }
         }
 
-        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+        if let Ok(path) = crate::dbg_env::var("KINETIX_FIELD_BUF_OUT") {
             let stride = recon.luma_stride;
             std::fs::write(
                 format!("{path}_pre_poc{poc}_bottom{bottom_field_flag}.gray"),
@@ -714,7 +714,7 @@ impl H264Decoder {
 
         // Triage (#32bz): KINETIX_NO_DEBLOCK skips the field deblock pass so
         // pre-deblock recon can be compared against the reference directly.
-        if std::env::var_os("KINETIX_NO_DEBLOCK").is_none() {
+        if crate::dbg_env::var_os("KINETIX_NO_DEBLOCK").is_none() {
             for (row_idx, row_info) in mb_info.iter().enumerate() {
                 for (col_idx, cur) in row_info.iter().enumerate() {
                     let left = if col_idx > 0 {
@@ -756,7 +756,7 @@ impl H264Decoder {
         // half-height field frame, store it in the DPB, and pair it with its
         // complementary field (emitting the interleaved frame when complete).
         let field_height = (recon.luma.len() / recon.luma_stride) as u32;
-        if std::env::var("KINETIX_PAFF_DBG").is_ok() {
+        if crate::dbg_env::var("KINETIX_PAFF_DBG").is_ok() {
             let sum: u64 = recon.luma.iter().map(|&v| v as u64).sum();
             let mean = sum / recon.luma.len() as u64;
             let nconst = recon.luma.iter().filter(|&&v| v == 128).count();
@@ -769,7 +769,7 @@ impl H264Decoder {
         data.extend(recon.chroma_cb);
         data.extend(recon.chroma_cr);
 
-        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+        if let Ok(path) = crate::dbg_env::var("KINETIX_FIELD_BUF_OUT") {
             let stride = recon.luma_stride;
             std::fs::write(
                 format!("{path}_post_poc{poc}_bottom{bottom_field_flag}.gray"),
@@ -931,7 +931,7 @@ impl H264Decoder {
     ) -> Result<InterlacedOutcome, KinetixError> {
         use crate::slice::SliceType;
 
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             eprintln!(
                 "MBAFF_MBAFF_ENTRY frame_num={} slice_type={:?} first_mb={}",
                 header.frame_num, header.slice_type, header.first_mb_in_slice,
@@ -951,7 +951,7 @@ impl H264Decoder {
         let mb_rows = coded_height / 16;
 
         if !matches!(header.slice_type, SliceType::I | SliceType::Si) {
-            if std::env::var("KINETIX_BINTRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!(
                     "MBAFF_INTER_PATH frame_num={} slice_type={:?}",
                     header.frame_num, header.slice_type
@@ -962,7 +962,7 @@ impl H264Decoder {
             // frame-coded path (the field-MC gate in reconstruct.rs stays).
 
             let num_ref_idx_l0_active = header.num_ref_idx_l0_active_minus1 + 1;
-            if std::env::var("KINETIX_BINTRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!(
                     "MBAFF inter frame_num={} slice_type={:?} nal_ref_idc={} num_ref_idx_l0_active={} dpb_len={}",
                     header.frame_num, header.slice_type, nal.nal_ref_idc, num_ref_idx_l0_active, self.dpb.len(),
@@ -995,7 +995,7 @@ impl H264Decoder {
                     &mut scratch,
                 )
                 .unwrap_or(0);
-                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                     eprintln!(
                         "POC_DERIVE frame_num={} slice_type={:?} nal_ref_idc={} is_idr={} poc={} poc_state_before=(prev_top={},prev_bottom={},prev_fn={})",
                         header.frame_num, header.slice_type, nal.nal_ref_idc, is_idr, poc,
@@ -1006,7 +1006,7 @@ impl H264Decoder {
             };
 
             let ref_list_l0 = if header.slice_type == SliceType::P {
-                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                     eprintln!(
                         "MBAFF P frame_num={} nal_ref_idc={} current_poc={} num_ref_idx_l0_active={}",
                         header.frame_num, nal.nal_ref_idc, current_poc, num_ref_idx_l0_active,
@@ -1056,7 +1056,7 @@ impl H264Decoder {
                     pic_num_ctx,
                     &header.ref_pic_list_modification_l1,
                 );
-                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                     eprintln!(
                         "MBAFF_B_REFLIST frame_num={} l0_len={} l1_len={} dpb_len={}",
                         header.frame_num,
@@ -1304,7 +1304,7 @@ impl H264Decoder {
                 None,
             );
 
-            if std::env::var("KINETIX_BINTRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!(
                     "MBAFF_STORE frame_num={} slice_type={:?} nal_ref_idc={} dpb_after={}",
                     header.frame_num,
@@ -1520,7 +1520,7 @@ impl H264Decoder {
         // Triage (#32bz): save the raw RBSP + header fields of a chosen
         // P-field slice (KINETIX_DUMP_PSLICE_NAL=path, frame 1 top, first_mb 0)
         // for the independent Python syntax walker.
-        if let Ok(path) = std::env::var("KINETIX_DUMP_PSLICE_NAL") {
+        if let Ok(path) = crate::dbg_env::var("KINETIX_DUMP_PSLICE_NAL") {
             if header.first_mb_in_slice == 0 && header.frame_num == 1 && !header.bottom_field_flag {
                 std::fs::write(&path, &nal.rbsp).unwrap();
                 eprintln!(
@@ -1597,7 +1597,7 @@ impl H264Decoder {
 
         let mut reader = crate::bitreader::BitReader::new(&nal.rbsp);
         reader.seek_to_bit(header.data_bit_offset);
-        if std::env::var_os("KINETIX_CAVLC_BITTRACE").is_some() {
+        if crate::dbg_env::var_os("KINETIX_CAVLC_BITTRACE").is_some() {
             let mut bits = String::new();
             for k in -64i32..192 {
                 let bitpos_i = header.data_bit_offset as i32 + k;
@@ -1648,7 +1648,7 @@ impl H264Decoder {
                 }
             };
 
-            if let Some(idx) = std::env::var("KINETIX_PFIELD_MB_DBG")
+            if let Some(idx) = crate::dbg_env::var("KINETIX_PFIELD_MB_DBG")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|&idx| idx < parsed.macroblocks.len())
@@ -1725,7 +1725,7 @@ impl H264Decoder {
                 beta_offset_div2: header.slice_beta_offset_div2,
                 chroma_qp_index_offset,
             };
-            if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+            if let Ok(path) = crate::dbg_env::var("KINETIX_FIELD_BUF_OUT") {
                 let poc = {
                     let mut scratch = self.poc_state.clone();
                     crate::ref_pic::derive_pic_order_cnt(
@@ -1762,7 +1762,7 @@ impl H264Decoder {
                 deblock_params,
                 None,
             );
-            if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+            if let Ok(path) = crate::dbg_env::var("KINETIX_FIELD_BUF_OUT") {
                 let poc = {
                     let mut scratch = self.poc_state.clone();
                     crate::ref_pic::derive_pic_order_cnt(
@@ -1954,7 +1954,7 @@ impl H264Decoder {
                 }
                 return Ok(InterlacedOutcome::Fallback);
             }
-            if let Some(idx) = std::env::var("KINETIX_PFIELD_MB_DBG")
+            if let Some(idx) = crate::dbg_env::var("KINETIX_PFIELD_MB_DBG")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
             {
@@ -2014,7 +2014,7 @@ impl H264Decoder {
                     for row in grid.chunks(4) {
                         eprintln!("    {}", row.join(" "));
                     }
-                    if std::env::var_os("KINETIX_PFIELD_FINAL_MV_DBG").is_some() {
+                    if crate::dbg_env::var_os("KINETIX_PFIELD_FINAL_MV_DBG").is_some() {
                         eprintln!(
                             "PFIELD_FINAL_MV frame_num={} poc={} idx={idx} bottom={} grid={:?}",
                             header.frame_num, acc.poc, header.bottom_field_flag, grid
@@ -2026,7 +2026,9 @@ impl H264Decoder {
 
         // Motion-compensate THIS slice's range into the shared half-height
         // field buffer, using this slice's own field reference list.
-        if std::env::var_os("KINETIX_PFIELD_REF_DBG").is_some() && header.first_mb_in_slice == 0 {
+        if crate::dbg_env::var_os("KINETIX_PFIELD_REF_DBG").is_some()
+            && header.first_mb_in_slice == 0
+        {
             paff_dbg!(
                 "PFIELD_REF frame_num={} bottom={} poc={} refs={:?}",
                 header.frame_num,
@@ -2340,7 +2342,7 @@ impl H264Decoder {
             }
         };
 
-        if std::env::var_os("KINETIX_B_FIELD_MB_DBG").is_some() {
+        if crate::dbg_env::var_os("KINETIX_B_FIELD_MB_DBG").is_some() {
             let n = parsed.macroblocks.len().min(45);
             for (idx, mb) in parsed.macroblocks.iter().enumerate().take(n) {
                 let cells = parsed
@@ -2415,7 +2417,7 @@ impl H264Decoder {
             beta_offset_div2: header.slice_beta_offset_div2,
             chroma_qp_index_offset,
         };
-        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+        if let Ok(path) = crate::dbg_env::var("KINETIX_FIELD_BUF_OUT") {
             std::fs::write(
                 format!(
                     "{path}_bpre_poc{current_poc}_bottom{}.gray",
@@ -2447,7 +2449,7 @@ impl H264Decoder {
             bs_ref_ids,
         );
         #[cfg(debug_assertions)]
-        if let Ok(path) = std::env::var("KINETIX_FIELD_BUF_OUT") {
+        if let Ok(path) = crate::dbg_env::var("KINETIX_FIELD_BUF_OUT") {
             std::fs::write(
                 format!(
                     "{path}_bpost_poc{current_poc}_bottom{}.gray",

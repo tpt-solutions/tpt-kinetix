@@ -35,7 +35,7 @@ thread_local! {
 pub(crate) fn bin_trace_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("KINETIX_BINTRACE").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| crate::dbg_env::var("KINETIX_BINTRACE").is_ok_and(|v| v == "1"))
 }
 
 fn trace_bin(

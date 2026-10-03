@@ -56,6 +56,7 @@ pub mod inter;
 pub mod loop_filter;
 pub mod obu;
 pub mod reconstruct;
+mod simd;
 mod superres;
 
 /// One decoded sample. 16 bits wide so a single reconstruction path serves 8-,

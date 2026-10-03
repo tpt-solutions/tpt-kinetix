@@ -701,7 +701,7 @@ pub fn deblock_luma_mb(
     top: Option<&DeblockMbInfo>,
     p: DeblockParams,
 ) {
-    let trace = std::env::var("KINETIX_BINTRACE").is_ok();
+    let trace = crate::dbg_env::var("KINETIX_BINTRACE").is_ok();
     // Field-path bS/alpha/beta/tc0 trace. The `KINETIX_DBG_BS` gate used by
     // `deblock_frame_mbaff`'s dispatcher is never reached by a plain PAFF/PAFF
     // field picture, which deblocks through this function instead, so a
@@ -709,17 +709,19 @@ pub fn deblock_luma_mb(
     // the derived strengths. `KINETIX_DBG_FIELD_BS=1` (or any value without a
     // comma) prints every edge of every macroblock; set it to `"mb_x,mb_y"` to
     // restrict to one macroblock.
-    let fbs_trace = std::env::var("KINETIX_DBG_FIELD_BS").ok().and_then(|s| {
-        let (a, b) = s.trim().split_once(',')?;
-        Some((
-            a.trim().parse().unwrap_or(usize::MAX),
-            b.trim().parse().unwrap_or(usize::MAX),
-        ))
-    });
+    let fbs_trace = crate::dbg_env::var("KINETIX_DBG_FIELD_BS")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.trim().split_once(',')?;
+            Some((
+                a.trim().parse().unwrap_or(usize::MAX),
+                b.trim().parse().unwrap_or(usize::MAX),
+            ))
+        });
     // `fbs_trace == None` with the variable SET means "every macroblock";
     // `Some((x, y))` restricts the trace to that one macroblock. With the
     // variable UNSET `fbs_on` is false and nothing is printed.
-    let fbs_on = std::env::var("KINETIX_DBG_FIELD_BS").is_ok();
+    let fbs_on = crate::dbg_env::var("KINETIX_DBG_FIELD_BS").is_ok();
     let want = |x: usize, y: usize| {
         fbs_on
             && match fbs_trace {
@@ -738,7 +740,7 @@ pub fn deblock_luma_mb(
     // oracle (`ITU_EXT_REF`) this makes "our bS derivation is suspect" a
     // decidable question: force candidate values and see which reproduces the
     // reference. `dir`/`ei` match the `deblock_luma_edge` arguments.
-    let force_bs = std::env::var("KINETIX_FORCE_BS").ok().and_then(|s| {
+    let force_bs = crate::dbg_env::var("KINETIX_FORCE_BS").ok().and_then(|s| {
         let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
         // 5 = one shared value, 8 = four per-segment values.
         if parts.len() == 5 || parts.len() == 8 {
@@ -756,7 +758,7 @@ pub fn deblock_luma_mb(
     // that a per-segment bS sweep cannot converge on (forcing bS only ever
     // moves tC within its table row). Sweeping this distinguishes "wrong QP"
     // from "wrong bS" definitively.
-    let force_qp = std::env::var("KINETIX_FORCE_QP").ok().and_then(|s| {
+    let force_qp = crate::dbg_env::var("KINETIX_FORCE_QP").ok().and_then(|s| {
         let parts: Vec<i32> = s
             .split(',')
             .filter_map(|v| v.trim().parse::<i32>().ok())
@@ -789,7 +791,7 @@ pub fn deblock_luma_mb(
     };
     // Debug override (session #27+): skip filtering entirely so the caller can
     // compare pre-deblock reconstruction against `ffmpeg -skip_loop_filter all`.
-    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
+    if crate::dbg_env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
         return;
     }
     // §8.7.2 `disable_deblocking_filter_idc == 2`: disable filtering across
@@ -994,7 +996,7 @@ pub fn deblock_chroma_mb(
     let cqp = |qpy: i32| crate::reconstruct::chroma_qp(qpy, p.chroma_qp_index_offset);
 
     // Debug override (see `deblock_luma_mb`).
-    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
+    if crate::dbg_env::var("KINETIX_SKIP_DEBLOCK").is_ok() {
         return;
     }
 
@@ -1009,14 +1011,16 @@ pub fn deblock_chroma_mb(
     // Until this existed, chroma was the single largest *unexamined* component
     // of a residual whose every luma-side value has since been verified
     // correct against ffmpeg.
-    let force_bs_c = std::env::var("KINETIX_FORCE_BS_C").ok().and_then(|s| {
-        let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-        if parts.len() == 5 || parts.len() == 8 {
-            Some(parts)
-        } else {
-            None
-        }
-    });
+    let force_bs_c = crate::dbg_env::var("KINETIX_FORCE_BS_C")
+        .ok()
+        .and_then(|s| {
+            let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            if parts.len() == 5 || parts.len() == 8 {
+                Some(parts)
+            } else {
+                None
+            }
+        });
     let forced_c = |x: usize, y: usize, dir_v: usize, ei: usize, bs: &mut [u8; 4]| {
         if let Some(p) = &force_bs_c {
             if p[0] == x && p[1] == y && p[2] == dir_v && p[3] == ei {
@@ -1026,7 +1030,7 @@ pub fn deblock_chroma_mb(
                 static CALLS: std::sync::atomic::AtomicUsize =
                     std::sync::atomic::AtomicUsize::new(0);
                 let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let nth = std::env::var("KINETIX_FORCE_BS_C_NTH")
+                let nth = crate::dbg_env::var("KINETIX_FORCE_BS_C_NTH")
                     .ok()
                     .and_then(|v| v.trim().parse::<usize>().ok());
                 if nth.is_some_and(|n| n != call) {
@@ -1094,7 +1098,7 @@ pub fn deblock_chroma_mb(
         field_horiz_boundary_clamp(&mut bs, cur.field);
         let qpc = (cqp(cur.qp) + cqp(t.qp) + 1) >> 1;
         forced_c(mb_x, mb_y, 1, 0, &mut bs);
-        if let Ok(v) = std::env::var("KINETIX_DBG_CHROMA_MB") {
+        if let Ok(v) = crate::dbg_env::var("KINETIX_DBG_CHROMA_MB") {
             if v.trim() == format!("{mb_x},{mb_y}") {
                 eprintln!(
                     "CTOP pic={} MB({mb_x},{mb_y}) bs={bs:?} qp={}/{} qpc={qpc} fld={}/{}",
@@ -1382,7 +1386,7 @@ pub fn deblock_first_vertical_edge_mcaff(
     left_bottom: &DeblockMbInfo,
     p: DeblockParams,
 ) {
-    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
+    if crate::dbg_env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
         return;
     }
     let cur_field = cur.field;
@@ -1579,7 +1583,7 @@ pub fn deblock_fieldcoded_above_boundary_mcaff(
     member_index: usize,
     p: DeblockParams,
 ) {
-    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
+    if crate::dbg_env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
         return;
     }
     let bs = fieldcoded_above_boundary_bs(cur, above_member);
@@ -1968,10 +1972,12 @@ fn filter_mbaff_mb(
     let cx = mb_x * 8;
     // Session #32m bisect: skip exactly one edge identified by
     // KINETIX_DBG_SKIP_EDGE="mb_x,mb_y,dir,ei" (dir 0=V/1=H, ei 0=boundary).
-    let skip_edge = std::env::var("KINETIX_DBG_SKIP_EDGE").ok().and_then(|s| {
-        let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-        (parts.len() == 4).then_some((parts[0], parts[1], parts[2], parts[3]))
-    });
+    let skip_edge = crate::dbg_env::var("KINETIX_DBG_SKIP_EDGE")
+        .ok()
+        .and_then(|s| {
+            let parts: Vec<usize> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            (parts.len() == 4).then_some((parts[0], parts[1], parts[2], parts[3]))
+        });
 
     // ---- Neighbour indices (ffmpeg h264_slice.c `fill_filter_caches`,
     // lines 2422–2437 @master) ------------------------------------------
@@ -2010,7 +2016,7 @@ fn filter_mbaff_mb(
 
     // ---- Vertical direction (dir = 0) ----
     let mut first_v_done = false;
-    let dbg_no_mixedge = std::env::var("KINETIX_DBG_NO_MIXEDGE").is_ok();
+    let dbg_no_mixedge = crate::dbg_env::var("KINETIX_DBG_NO_MIXEDGE").is_ok();
     if has_left && !dbg_no_mixedge {
         let lt = &infos[ltop_i];
         let lb = &infos[lbot_i];
@@ -2033,7 +2039,7 @@ fn filter_mbaff_mb(
             first_v_done = true;
         }
     }
-    let dbg_no_vbound = std::env::var("KINETIX_DBG_NO_VBOUND").is_ok();
+    let dbg_no_vbound = crate::dbg_env::var("KINETIX_DBG_NO_VBOUND").is_ok();
     if has_left && !first_v_done && !dbg_no_vbound {
         // Per-segment left neighbour: luma rows 0–7 take LTOP, rows 8–15
         // take LBOT (the two differ once a mismatch shift is in effect).
@@ -2057,7 +2063,7 @@ fn filter_mbaff_mb(
                 mvy,
             );
         }
-        if std::env::var("KINETIX_DBG_BS").is_ok() {
+        if crate::dbg_env::var("KINETIX_DBG_BS").is_ok() {
             eprintln!(
                 "BSV mb=({mb_x},{mb_y}) bs={bs:?} curf={} curty={:?} ltop_i={ltop_i} ltopf={} ltopnz34711={:?} lbot_i={lbot_i} lbotf={} lbotnz1115={:?}",
                 cur.field,
@@ -2075,7 +2081,7 @@ fn filter_mbaff_mb(
             deblock_chroma_edge_stepped(cb, cr, chroma_stride, cx, cy0, cstep, true, 0, bs, p, qpc);
         }
     }
-    let dbg_no_vint = std::env::var("KINETIX_DBG_NO_VINT").is_ok();
+    let dbg_no_vint = crate::dbg_env::var("KINETIX_DBG_NO_VINT").is_ok();
     for ei in 1..=3usize {
         if dbg_no_vint {
             break;
@@ -2090,7 +2096,7 @@ fn filter_mbaff_mb(
         let p_blocks = [ei - 1, 4 + ei - 1, 8 + ei - 1, 12 + ei - 1];
         let q_blocks = [ei, 4 + ei, 8 + ei, 12 + ei];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
-        if std::env::var("KINETIX_DBG_BS").is_ok() && bs.iter().any(|&b| b != 0) {
+        if crate::dbg_env::var("KINETIX_DBG_BS").is_ok() && bs.iter().any(|&b| b != 0) {
             eprintln!(
                 "BSV-INT mb=({mb_x},{mb_y}) ei={ei} bs={bs:?} curf={} curty={:?}",
                 cur.field, cur.mb_type,
@@ -2122,8 +2128,8 @@ fn filter_mbaff_mb(
     }
 
     // ---- Horizontal direction (dir = 1) ----
-    let dbg_no_fcabove = std::env::var("KINETIX_DBG_NO_FIELDCODED_ABOVE").is_ok();
-    let dbg_no_hbound = std::env::var("KINETIX_DBG_NO_HBOUND").is_ok();
+    let dbg_no_fcabove = crate::dbg_env::var("KINETIX_DBG_NO_FIELDCODED_ABOVE").is_ok();
+    let dbg_no_hbound = crate::dbg_env::var("KINETIX_DBG_NO_HBOUND").is_ok();
     if has_top_mb && !dbg_no_hbound {
         let top = &infos[top_i];
         if !dbg_no_fcabove && (mb_y & 1) == 0 && !cur.field && top.field {
@@ -2173,7 +2179,7 @@ fn filter_mbaff_mb(
             } else {
                 derive_bs_segments(top, cur, true, [12, 13, 14, 15], [0, 1, 2, 3], mvy)
             };
-            if std::env::var("KINETIX_DBG_BS").is_ok() {
+            if crate::dbg_env::var("KINETIX_DBG_BS").is_ok() {
                 eprintln!(
                     "BSH mb=({mb_x},{mb_y}) bs={bs:?} curf={} curty={:?} top_i={top_i} topf={} topty={:?}",
                     cur.field,
@@ -2202,7 +2208,7 @@ fn filter_mbaff_mb(
             }
         }
     }
-    let dbg_no_hint = std::env::var("KINETIX_DBG_NO_HINT").is_ok();
+    let dbg_no_hint = crate::dbg_env::var("KINETIX_DBG_NO_HINT").is_ok();
     for ei in 1..=3usize {
         if dbg_no_hint {
             break;
@@ -2219,7 +2225,7 @@ fn filter_mbaff_mb(
         ];
         let q_blocks = [ei * 4, ei * 4 + 1, ei * 4 + 2, ei * 4 + 3];
         let bs = derive_bs_segments(cur, cur, false, p_blocks, q_blocks, mvy);
-        if std::env::var("KINETIX_DBG_BS").is_ok() && bs.iter().any(|&b| b != 0) {
+        if crate::dbg_env::var("KINETIX_DBG_BS").is_ok() && bs.iter().any(|&b| b != 0) {
             eprintln!(
                 "BSH-INT mb=({mb_x},{mb_y}) ei={ei} bs={bs:?} curf={}, curty={:?}",
                 cur.field, cur.mb_type,
@@ -2282,7 +2288,7 @@ pub fn deblock_frame_mbaff(
     infos: &[DeblockMbInfo],
     p: DeblockParams,
 ) {
-    if std::env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
+    if crate::dbg_env::var("KINETIX_SKIP_DEBLOCK").is_ok() || p.disable_idc == 1 {
         return;
     }
     debug_assert_eq!(infos.len(), mb_cols * mb_rows);

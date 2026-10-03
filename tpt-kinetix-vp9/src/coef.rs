@@ -55,8 +55,12 @@ pub fn decode_coeffs_b(
         bc.read_bool(p)
     }
 
+    let pt = std::env::var_os("VP9PT").is_some();
     'outer: loop {
         // EOB branch
+        if pt {
+            eprintln!("PTE c={i} band={band} ctx={nnz}");
+        }
         let eob = rd(bc, tp[0]);
         let b = bin(band, nnz);
         counts_eob[b][usize::from(eob)] += 1;
@@ -75,6 +79,9 @@ pub fn decode_coeffs_b(
                     band_left = i32::from(band_counts.get(band).copied().unwrap_or(1));
                 }
                 cache[scan[i] as usize] = 0;
+                if pt {
+                    eprintln!("PTV c={i} cv=0");
+                }
                 i += 1;
                 if i == n_coeffs {
                     break 'outer; // invalid: blocks must end with EOB
@@ -164,6 +171,9 @@ pub fn decode_coeffs_b(
                 }
             }
             cache[rc] = cache_val;
+            if pt {
+                eprintln!("PTV c={i} cv={cache_val}");
+            }
 
             band_left -= 1;
             if band_left == 0 {
@@ -171,6 +181,11 @@ pub fn decode_coeffs_b(
                 band_left = i32::from(band_counts.get(band).copied().unwrap_or(1));
             }
 
+            if pt {
+                let q0 = qmul[usize::from(i != 0)];
+                let v = if is_tx32x32 { (val * q0) / 2 } else { val * q0 };
+                eprintln!("PTVV c={i} v={v}");
+            }
             let sign = rd(bc, 128);
             let q = qmul[usize::from(i != 0)];
             let signed_val = if sign { -(val * q) } else { val * q };

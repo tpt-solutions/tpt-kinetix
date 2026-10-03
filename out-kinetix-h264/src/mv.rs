@@ -443,7 +443,7 @@ fn neighbor_cell(
     if (0..16).contains(&x_n) && y_n >= 0 {
         let blk = (y_n as usize / 4) * 4 + x_n as usize / 4;
         let c = cur[blk];
-        if std::env::var("KINETIX_MVPCAND").is_ok() {
+        if crate::dbg_env::var("KINETIX_MVPCAND").is_ok() {
             let decode_addr = if store.mbaff_frame() {
                 let g = mb_idx;
                 2 * ((g / mb_width / 2) * mb_width + g % mb_width) + (g / mb_width) % 2
@@ -523,7 +523,7 @@ fn neighbor_cell(
     }
     let resolved = resolve_aff_neighbour(store, mb_idx, mb_width, x_n, y_n, slice_id);
     if resolved.is_none() {
-        if std::env::var("KINETIX_MVPCAND").is_ok() {
+        if crate::dbg_env::var("KINETIX_MVPCAND").is_ok() {
             eprintln!(
                 "KXCAND {} mb={} cur=({},{}) UNAVAIL",
                 role, mb_idx, x_n, y_n
@@ -537,7 +537,7 @@ fn neighbor_cell(
     } else {
         store.cell(addr, blk)
     };
-    if std::env::var("KINETIX_MVPCAND").is_ok() {
+    if crate::dbg_env::var("KINETIX_MVPCAND").is_ok() {
         let decode_addr = {
             let g = addr as isize;
             let c = mb_width as isize;
@@ -625,7 +625,7 @@ fn neighbor_above_right(
         let cur_8x8 = (py_off / 8) * 2 + px_off / 8;
         let tgt_8x8 = ((py_off - 4) / 8) * 2 + right_col / 8;
         if tgt_8x8 > cur_8x8 {
-            if std::env::var("KINETIX_MVPCAND").is_ok() {
+            if crate::dbg_env::var("KINETIX_MVPCAND").is_ok() {
                 eprintln!(
                     "KXCAND UR mb={} cur=({},{}) UNAVAIL",
                     mb_idx,
@@ -897,7 +897,7 @@ pub(crate) fn predict_mv(
 
     // Session #30 diagnostic (todo-h264.md): MVP input/output trace for the
     // c_p8x8 investigation. Gated on KINETIX_BINTRACE like the other parsers.
-    if std::env::var("KINETIX_BINTRACE").is_ok() {
+    if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
         let fmt = |n: &Option<MvNeighbor>| match n {
             None => "None".to_string(),
             Some(n) => format!("Some(mv=({},{}) ri={})", n.mv[0], n.mv[1], n.ref_idx),
@@ -941,7 +941,7 @@ pub(crate) fn predict_mv_sub(
 
     // Session #31 diagnostic (todo-h264.md): P_8x8 sub-partition MVP trace,
     // same format as predict_mv's, gated on KINETIX_BINTRACE.
-    if std::env::var("KINETIX_BINTRACE").is_ok() {
+    if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
         let fmt = |n: &Option<MvNeighbor>| match n {
             None => "None".to_string(),
             Some(n) => format!("Some(mv=({},{}) ri={})", n.mv[0], n.mv[1], n.ref_idx),
@@ -1040,7 +1040,7 @@ pub(crate) fn predict_mv_l1(
     }
 
     let pred = median_pred(a, b, c, ref_idx);
-    if std::env::var("KINETIX_BINTRACE").is_ok() {
+    if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
         let fmt = |n: &Option<MvNeighbor>| match n {
             None => "None".to_string(),
             Some(n) => format!("Some(mv=({},{}) ri={})", n.mv[0], n.mv[1], n.ref_idx),
@@ -1253,7 +1253,7 @@ pub(crate) fn predict_slice_mvs_ex(
             predict_inter_macroblock(store, &mut cur, grid_idx, cols, slice_id, mb)?;
         }
         store.commit(grid_idx, cur, slice_id);
-        if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_MBAFF_TRACE").is_ok() {
             eprintln!(
                 "MVP-COMMIT g{} field={} [{}]",
                 grid_idx,

@@ -446,7 +446,7 @@ pub fn reconstruct_intra_frame<T: DecodeTracer>(
         for mb_x in 0..mb_cols {
             let idx = (mb_y * mb_cols + mb_x) as usize;
             let mb = &macroblocks[idx];
-            if std::env::var("KINETIX_IFIELD_MB_DBG").is_ok_and(|v| {
+            if crate::dbg_env::var("KINETIX_IFIELD_MB_DBG").is_ok_and(|v| {
                 let mut it = v.split(',');
                 it.next().and_then(|x| x.parse::<u32>().ok()) == Some(mb_x)
                     && it.next().and_then(|y| y.parse::<u32>().ok()) == Some(mb_y)
@@ -578,7 +578,7 @@ pub fn reconstruct_mbaff_intra_frame<T: DecodeTracer>(
     let mut cr = vec![0u8; chroma_stride * (height as usize / 2)];
 
     let total = (mb_cols * mb_rows) as usize;
-    let dbg_field = std::env::var_os("KINETIX_DBG_MBAFF_FIELD").is_some();
+    let dbg_field = crate::dbg_env::var_os("KINETIX_DBG_MBAFF_FIELD").is_some();
     for pair_row in 0..(mb_rows as usize / 2) {
         if dbg_field {
             let row: String = (0..mb_cols)
@@ -1407,7 +1407,7 @@ pub fn reconstruct_inter_frame<T: DecodeTracer>(
 /// set `KINETIX_MBAFF_FIELD_MC=0` to opt out and fall back to the progressive
 /// (frame-convention) reconstruction for field-coded MBs.
 fn mbaff_field_mc_enabled() -> bool {
-    std::env::var("KINETIX_MBAFF_FIELD_MC").as_deref() != Ok("0")
+    crate::dbg_env::var("KINETIX_MBAFF_FIELD_MC").as_deref() != Ok("0")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1497,7 +1497,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                     // Field macroblock inside the MBAFF frame pair: motion
                     // compensation runs in field coordinates against the
                     // parity plane; output rows land at stride-2 spacing.
-                    if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+                    if crate::dbg_env::var("KINETIX_MBAFF_TRACE").is_ok() {
                         eprintln!("MBAFF-FIELD-INTER f{dbg_frame} ({mb_x},{mb_y})");
                     }
                     reconstruct_mbaff_inter_luma(
@@ -1564,7 +1564,7 @@ pub fn reconstruct_inter_frame_ex<T: DecodeTracer>(
                     // slice: reconstruct at the pair's parity line with
                     // doubled vertical step and the field scan tables —
                     // identical geometry to `reconstruct_mbaff_intra_frame`.
-                    if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+                    if crate::dbg_env::var("KINETIX_MBAFF_TRACE").is_ok() {
                         eprintln!("MBAFF-FIELD-INTRA ({mb_x},{mb_y})");
                     }
                     let parity = (mb_y & 1) as usize;
@@ -2048,7 +2048,7 @@ fn reconstruct_mbaff_inter_luma<T: DecodeTracer>(
         .cells_of(idx)
         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
 
-    if std::env::var("KINETIX_MBAFF_TRACE").is_ok() {
+    if crate::dbg_env::var("KINETIX_MBAFF_TRACE").is_ok() {
         eprintln!(
             "MBAFF-CELLS ({mb_x},{mb_y}) field={} coeffs=[{}]",
             mb.mb_field_flag,
@@ -3056,7 +3056,7 @@ pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
         .collect();
 
     // Triage (#32bz): per-range histogram of committed cell ref_idx values.
-    let tally = std::env::var_os("KINETIX_REF_TALLY").is_some();
+    let tally = crate::dbg_env::var_os("KINETIX_REF_TALLY").is_some();
     let mut ri_hist: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
     let (mut nskip, mut ncoeff, mut ninter) = (0usize, 0usize, 0usize);
     let (mut mv_sum, mut mv_max) = (0u64, i32::MIN);
@@ -3100,7 +3100,7 @@ pub fn reconstruct_inter_field_frame_range<T: DecodeTracer>(
 
     // Triage (#32bz): full-field MB-type map, printed when this call covers
     // the last slice range of the field (end_mb == field MB count).
-    if std::env::var_os("KINETIX_MB_MAP").is_some() && end_mb == macroblocks.len() {
+    if crate::dbg_env::var_os("KINETIX_MB_MAP").is_some() && end_mb == macroblocks.len() {
         eprintln!("OURMAP bottom={current_bottom}");
         let rows = macroblocks.len() / mb_cols as usize;
         for my in 0..rows {
@@ -3704,7 +3704,7 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
     let grid = mv_store
         .cells_of(idx)
         .unwrap_or([crate::mv::MvCell::INTRA; 16]);
-    if std::env::var_os("KINETIX_MB_GRID").is_some() && mb_y < 2 && mb_x < 2 {
+    if crate::dbg_env::var_os("KINETIX_MB_GRID").is_some() && mb_y < 2 && mb_x < 2 {
         eprintln!(
             "GRID-PAFF ({mb_x},{mb_y}) idx={idx}: {:?}",
             grid.iter().map(|c| (c.mv, c.ref_idx)).collect::<Vec<_>>()
@@ -3719,7 +3719,7 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         let ref_idx = cell.ref_idx.max(0) as usize;
         // Triage (#32bz): force every inter cell onto RefPicList0[0] to test
         // whether multi-reference divergence comes from ref_idx > 0 entries.
-        let ref_idx = if std::env::var_os("KINETIX_CLAMP_REF0").is_some() {
+        let ref_idx = if crate::dbg_env::var_os("KINETIX_CLAMP_REF0").is_some() {
             0
         } else {
             ref_idx
@@ -3727,7 +3727,8 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         let mut pred = [0u8; 16];
         if let Some(plane_ref) = ref_luma.get(ref_idx).or_else(|| ref_luma.last()) {
             let plane_w = plane_ref.len() / luma_h_of(plane_ref, stride);
-            if std::env::var_os("KINETIX_FIELD_REF_DBG").is_some() && idx == 148 && block == 1 {
+            if crate::dbg_env::var_os("KINETIX_FIELD_REF_DBG").is_some() && idx == 148 && block == 1
+            {
                 let h = luma_h_of(plane_ref, stride);
                 eprintln!(
                     "FIELDREF148: plane {}x{} cols2-9 rows0-5: {:?} mv=({},{})",
@@ -3759,7 +3760,7 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
         }
         let pred = combine_weighted(weighted, true, false, ref_idx, 0, &pred, &[0u8; 16], None);
 
-        if std::env::var_os("KINETIX_FIELD_PRED_DBG").is_some() && idx == 0 {
+        if crate::dbg_env::var_os("KINETIX_FIELD_PRED_DBG").is_some() && idx == 0 {
             eprintln!(
                 "FIELDPRED mb0 blk{block} mv=({},{}) pred={pred:?}",
                 cell.mv[0], cell.mv[1]
@@ -3802,7 +3803,7 @@ fn reconstruct_field_inter_luma<T: DecodeTracer>(
                 }
             }
         }
-        if std::env::var_os("KINETIX_FIELD_PRED_DBG").is_some() && idx == 0 && block == 8 {
+        if crate::dbg_env::var_os("KINETIX_FIELD_PRED_DBG").is_some() && idx == 0 && block == 8 {
             eprintln!(
                 "FIELDPRED-WRITE blk8 res0row={:?} plane_after[(8,0)]={} plane.len={} stride={}",
                 &res[..4],
@@ -3879,7 +3880,7 @@ fn reconstruct_field_inter_chroma<T: DecodeTracer>(
             let qbase = (block / 2) * 8 + (block % 2) * 2;
             let ref_idx = grid[qbase].ref_idx.max(0) as usize;
             // Same triage clamp as the luma path (KINETIX_CLAMP_REF0).
-            let ref_idx = if std::env::var_os("KINETIX_CLAMP_REF0").is_some() {
+            let ref_idx = if crate::dbg_env::var_os("KINETIX_CLAMP_REF0").is_some() {
                 0
             } else {
                 ref_idx
@@ -4019,7 +4020,7 @@ pub fn reconstruct_b_frame<T: DecodeTracer>(
                         | MbType::B8x16
                         | MbType::BB8x8
                 );
-            if std::env::var_os("KINETIX_BINTRACE").is_some() {
+            if crate::dbg_env::var_os("KINETIX_BINTRACE").is_some() {
                 eprintln!(
                     "BRECON MB({mb_x},{mb_y}) type={:?} motion={} skip={} -> {}",
                     mb.mb_type,
@@ -4674,7 +4675,7 @@ fn reconstruct_inter_luma<T: DecodeTracer>(
         );
 
         let res = dequant_idct_4x4(&mb.luma_coeffs[block], mb.qp, None, 3, scaling);
-        if let Ok(spec) = std::env::var("KINETIX_DBG_BLOCK4") {
+        if let Ok(spec) = crate::dbg_env::var("KINETIX_DBG_BLOCK4") {
             let mut parts = spec.split(',');
             let want = (
                 parts.next().and_then(|s| s.parse::<u32>().ok()),

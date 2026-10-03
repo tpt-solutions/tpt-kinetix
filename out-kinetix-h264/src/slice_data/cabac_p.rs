@@ -102,7 +102,7 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
                 let pred_mode =
                     mpm_pred_mode_8x8(pred_ctx_grid, mb_x, mb_y, mb_cols, &modes, i8, nctx, false);
                 let final_mode = ctxs.intra4x4.decode(dec, pred_mode);
-                if let Ok(spec) = std::env::var("KINETIX_DBG_MPM8") {
+                if let Ok(spec) = crate::dbg_env::var("KINETIX_DBG_MPM8") {
                     if let Some((sx, sy)) = spec.split_once(',') {
                         if sx.parse::<u32>() == Ok(mb_x) && sy.parse::<u32>() == Ok(mb_y) {
                             eprintln!(
@@ -208,7 +208,7 @@ pub(crate) fn parse_intra_macroblock_cabac<T: crate::trace::DecodeTracer>(
             // undetected by `high8x8_i` because that fixture's 8×8 blocks are
             // DC-dominant, where the permutation is near-identity). Mirrors the
             // inter path in `cabac_b.rs`.
-            if let Ok(spec) = std::env::var("KINETIX_DBG_COEFF8") {
+            if let Ok(spec) = crate::dbg_env::var("KINETIX_DBG_COEFF8") {
                 let mut parts = spec.split(',');
                 let want = (
                     parts.next().and_then(|s| s.parse::<u32>().ok()),
@@ -565,7 +565,7 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
                         above_pair_top,
                         &field_flags,
                     );
-                    if std::env::var("KINETIX_FFLAG").is_ok() {
+                    if crate::dbg_env::var("KINETIX_FFLAG").is_ok() {
                         eprintln!(
                             "KXINF mb={} left={:?} lval={:?} above={:?} aval={:?} -> {}",
                             mb_idx,
@@ -676,7 +676,7 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
             } else {
                 false
             };
-            if std::env::var("KINETIX_FFLAG").is_ok() {
+            if crate::dbg_env::var("KINETIX_FFLAG").is_ok() {
                 eprintln!(
                     "KXFF mb={} a={} b={} inc={} field_pending_top={}",
                     2 * ((mb_y as usize / 2) * mb_cols as usize + mb_x as usize)
@@ -721,7 +721,7 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
         }
         let (r1, o1) = dec.debug_state();
         if is_skip {
-            if std::env::var("KINETIX_BINTRACE").is_ok() {
+            if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                 eprintln!("MB{mb_idx} ({mb_x},{mb_y}) SKIP  cabac={r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
             }
             let mut mb = Macroblock::new_skip();
@@ -797,7 +797,7 @@ pub fn parse_p_slice_cabac_range<T: crate::trace::DecodeTracer>(
             }
             continue;
         }
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             eprintln!("MB{mb_idx} ({mb_x},{mb_y}) CODED skip_flag: {r0:#06x}/{o0:#010x} -> {r1:#06x}/{o1:#010x}");
         }
 

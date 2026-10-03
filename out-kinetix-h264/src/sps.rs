@@ -167,7 +167,7 @@ impl SeqParameterSet {
             return Err(anyhow!("invalid level_idc 0"));
         }
 
-        if std::env::var_os("KINETIX_SPS_DBG").is_some() {
+        if crate::dbg_env::var_os("KINETIX_SPS_DBG").is_some() {
             eprintln!(
                 "SPS-DBG id={} log2_mfn4={} poc_type={} log2_poc4={} nref={} w={} h={} fmo={} aff={} d8={} crop={}",
                 seq_parameter_set_id,

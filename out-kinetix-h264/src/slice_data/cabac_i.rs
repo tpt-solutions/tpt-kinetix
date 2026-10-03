@@ -50,7 +50,7 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
     cabac_ctx: &mut [MbCabacCtx],
     slice_id_grid: &mut [u16],
 ) -> R<usize> {
-    if std::env::var("KINETIX_DUMP_PAYLOAD").is_ok() {
+    if crate::dbg_env::var("KINETIX_DUMP_PAYLOAD").is_ok() {
         if let Some(path) = std::env::temp_dir()
             .join("dbg_mbaff_i1_payload.bin")
             .to_str()
@@ -137,7 +137,7 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
             // Session #32c experiment: KINETIX_NO_FIELD_BINS=1 skips the
             // mb_field_decoding_flag reads entirely, to test whether x264
             // actually emitted them for this stream.
-            if std::env::var("KINETIX_NO_FIELD_BINS").is_err() {
+            if crate::dbg_env::var("KINETIX_NO_FIELD_BINS").is_err() {
                 let left_field = if mb_x > 0 {
                     let left_idx = (mb_y * mb_cols + mb_x - 1) as usize;
                     let left_mb = &macroblocks[left_idx];
@@ -161,7 +161,7 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
                     false
                 };
                 cur_pair_field = ctxs.mb_field.decode(&mut dec, left_field, top_field);
-                if std::env::var("KINETIX_BINTRACE").is_ok() {
+                if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
                     eprintln!(
                         "MBAFF pair at grid row {} col {mb_x}: mb_field_decoding_flag={cur_pair_field}",
                         2 * ((mb_idx >> 1) / mb_cols as usize)
@@ -264,7 +264,7 @@ pub fn parse_i_slice_cabac<T: crate::trace::DecodeTracer>(
         let (mb, this_nz, this_pred_ctx, this_cabac_ctx, new_qp, dqp_nonzero) = parse_result?;
         qp = new_qp;
         prev_dqp_nonzero = dqp_nonzero;
-        if std::env::var("KINETIX_BINTRACE").is_ok() {
+        if crate::dbg_env::var("KINETIX_BINTRACE").is_ok() {
             let mut modes = [0u8; 16];
             for (i, m) in mb.pred_modes_4x4.iter().enumerate() {
                 modes[i] = *m as u8;
