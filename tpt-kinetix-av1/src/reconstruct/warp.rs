@@ -458,6 +458,171 @@ const WARPED_FILTERS: [[i8; 8]; 193] = [
     [0, 0, 0, 0, 2, 127, -1, 0],
 ];
 
+/// `WARPED_FILTERS` widened to `i32` so a filter row is one 256-bit load.
+const WARPED_FILTERS_I32: [[i32; 8]; 193] = {
+    let mut t = [[0i32; 8]; 193];
+    let mut i = 0;
+    while i < 193 {
+        let mut k = 0;
+        while k < 8 {
+            t[i][k] = WARPED_FILTERS[i][k] as i32;
+            k += 1;
+        }
+        i += 1;
+    }
+    t
+};
+
+/// Sum the eight lanes of each of eight vectors: result lane `n` is
+/// `sum(v[n])`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum8x8(v: &[std::arch::x86_64::__m256i; 8]) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let h01 = _mm256_hadd_epi32(v[0], v[1]);
+    let h23 = _mm256_hadd_epi32(v[2], v[3]);
+    let h45 = _mm256_hadd_epi32(v[4], v[5]);
+    let h67 = _mm256_hadd_epi32(v[6], v[7]);
+    let g0 = _mm256_hadd_epi32(h01, h23);
+    let g1 = _mm256_hadd_epi32(h45, h67);
+    // Each `g` holds the low-half sums in lane 0 and high-half sums in lane 1.
+    let t0 = _mm256_add_epi32(g0, _mm256_permute2x128_si256(g0, g0, 0x01));
+    let t1 = _mm256_add_epi32(g1, _mm256_permute2x128_si256(g1, g1, 0x01));
+    _mm256_permute2x128_si256(t0, t1, 0x20)
+}
+
+/// Filter-table index for each of eight phases (`clamp(64 + ((p + 512) >> 10))`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn warp_filter_idx(phases: std::arch::x86_64::__m256i) -> [i32; 8] {
+    use std::arch::x86_64::*;
+    let i = _mm256_add_epi32(
+        _mm256_srai_epi32(_mm256_add_epi32(phases, _mm256_set1_epi32(512)), 10),
+        _mm256_set1_epi32(64),
+    );
+    let i = _mm256_min_epi32(
+        _mm256_max_epi32(i, _mm256_setzero_si256()),
+        _mm256_set1_epi32(192),
+    );
+    let mut out = [0i32; 8];
+    _mm256_storeu_si256(out.as_mut_ptr().cast(), i);
+    out
+}
+
+/// AVX2 core of an 8x8 warp block: the horizontal pass over the 15x15 `patch`
+/// (rounded by `7 - ib`) followed by the vertical pass, returning the *raw*
+/// vertical sums (the caller applies its own final rounding/clamp). Each output
+/// pixel has its own 8-tap filter, so a pixel is one coefficient-row load times
+/// eight samples, reduced across lanes.
+///
+/// # Safety
+/// AVX2 must be available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn warp_core_avx2(
+    patch: &[[i32; 15]; 15],
+    alpha: i32,
+    beta: i32,
+    gamma: i32,
+    delta: i32,
+    mx0: i32,
+    my0: i32,
+    ib: u32,
+) -> [[i32; 8]; 8] {
+    use std::arch::x86_64::*;
+    let lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    let a_mul = _mm256_mullo_epi32(lane, _mm256_set1_epi32(alpha));
+    let g_mul = _mm256_mullo_epi32(lane, _mm256_set1_epi32(gamma));
+    let h_rnd = _mm256_set1_epi32((1 << (7 - ib)) >> 1);
+    let h_cnt = _mm_cvtsi32_si128((7 - ib) as i32);
+    // Horizontal-pass output, transposed: `mid_t[xx][yy]`.
+    let mut mid_t = [[0i32; 15]; 8];
+    let mut mx_row = mx0;
+    for yy in 0..15 {
+        let idx = warp_filter_idx(_mm256_add_epi32(_mm256_set1_epi32(mx_row), a_mul));
+        let mut prod = [_mm256_setzero_si256(); 8];
+        for xx in 0..8 {
+            let c = _mm256_loadu_si256(WARPED_FILTERS_I32[idx[xx] as usize].as_ptr().cast());
+            let sv = _mm256_loadu_si256(patch[yy].as_ptr().add(xx).cast());
+            prod[xx] = _mm256_mullo_epi32(c, sv);
+        }
+        let r = _mm256_sra_epi32(_mm256_add_epi32(hsum8x8(&prod), h_rnd), h_cnt);
+        let mut tmp = [0i32; 8];
+        _mm256_storeu_si256(tmp.as_mut_ptr().cast(), r);
+        for xx in 0..8 {
+            mid_t[xx][yy] = tmp[xx];
+        }
+        mx_row += beta;
+    }
+    let mut out = [[0i32; 8]; 8];
+    let mut my_row = my0;
+    for (yy, orow) in out.iter_mut().enumerate() {
+        let idx = warp_filter_idx(_mm256_add_epi32(_mm256_set1_epi32(my_row), g_mul));
+        let mut prod = [_mm256_setzero_si256(); 8];
+        for xx in 0..8 {
+            let c = _mm256_loadu_si256(WARPED_FILTERS_I32[idx[xx] as usize].as_ptr().cast());
+            let sv = _mm256_loadu_si256(mid_t[xx].as_ptr().add(yy).cast());
+            prod[xx] = _mm256_mullo_epi32(c, sv);
+        }
+        _mm256_storeu_si256(orow.as_mut_ptr().cast(), hsum8x8(&prod));
+        my_row += delta;
+    }
+    out
+}
+
+/// Scalar reference for [`warp_core_avx2`] (test oracle; mirrors the passes in
+/// [`warp_affine_8x8`] exactly).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn warp_core_scalar(
+    patch: &[[i32; 15]; 15],
+    alpha: i32,
+    beta: i32,
+    gamma: i32,
+    delta: i32,
+    mx0: i32,
+    my0: i32,
+    ib: u32,
+) -> [[i32; 8]; 8] {
+    let filter_row = |phase: i32| -> &'static [i8; 8] {
+        &WARPED_FILTERS[(64 + ((phase + 512) >> 10)).clamp(0, 192) as usize]
+    };
+    let mut mid = [[0i32; 8]; 15];
+    let mut mx_row = mx0;
+    for (yy, row) in mid.iter_mut().enumerate() {
+        let mut tmx = mx_row;
+        for (xx, out) in row.iter_mut().enumerate() {
+            let f = filter_row(tmx);
+            let mut s = 0i32;
+            for (k, &c) in f.iter().enumerate() {
+                s += c as i32 * patch[yy][xx + k];
+            }
+            *out = (s + ((1 << (7 - ib)) >> 1)) >> (7 - ib);
+            tmx += alpha;
+        }
+        mx_row += beta;
+    }
+    let mut out = [[0i32; 8]; 8];
+    let mut my_row = my0;
+    for (yy, orow) in out.iter_mut().enumerate() {
+        let mut tmy = my_row;
+        for (xx, o) in orow.iter_mut().enumerate() {
+            let f = filter_row(tmy);
+            let mut s = 0i32;
+            for (k, &c) in f.iter().enumerate() {
+                s += c as i32 * mid[yy + k][xx];
+            }
+            *o = s;
+            tmy += gamma;
+        }
+        my_row += delta;
+    }
+    out
+}
+
 /// The 15x15 reference window a warped 8x8 block's two passes read
 /// (`(dx-3 ..= dx+11, dy-3 ..= dy+11)`), edge-clamped once per sample here so the
 /// filter loops index it directly instead of clamping every tap (960 taps per
@@ -552,6 +717,18 @@ fn warp_affine_8x8(
     }
     let dbg_n = crate::debug_frame_seq::current();
     let patch = gather_warp_patch(refp, ref_stride, ref_w, ref_h, dx, dy);
+    #[cfg(target_arch = "x86_64")]
+    if !dbg_px && crate::simd::level() == crate::simd::Level::Avx2 {
+        // SAFETY: AVX2 detected.
+        let sums = unsafe { warp_core_avx2(&patch, alpha, beta, gamma, delta, mx0, my0, ib) };
+        for (yy, srow) in sums.iter().enumerate() {
+            for (xx, &sv) in srow.iter().enumerate() {
+                dest[(dest_y + yy) * dest_stride + (dest_x + xx)] =
+                    ((sv + ((1 << (7 + ib)) >> 1)) >> (7 + ib)).clamp(0, pix_max) as Px;
+            }
+        }
+        return;
+    }
     let mut mid = [[0i32; 8]; 15];
     let mut mx_row = mx0;
     for (yy, row) in mid.iter_mut().enumerate() {
@@ -713,6 +890,17 @@ fn warp_affine_8x8_prep(
         &WARPED_FILTERS[idx as usize]
     };
     let patch = gather_warp_patch(refp, ref_stride, ref_w, ref_h, dx, dy);
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::level() == crate::simd::Level::Avx2 {
+        // SAFETY: AVX2 detected.
+        let sums = unsafe { warp_core_avx2(&patch, alpha, beta, gamma, delta, mx0, my0, ib) };
+        for (yy, srow) in sums.iter().enumerate() {
+            for (xx, &sv) in srow.iter().enumerate() {
+                dest[(dest_y + yy) * dest_stride + (dest_x + xx)] = (sv + 64) >> 7;
+            }
+        }
+        return;
+    }
     let mut mid = [[0i32; 8]; 15];
     let mut mx_row = mx0;
     for (yy, row) in mid.iter_mut().enumerate() {
@@ -810,6 +998,40 @@ pub(super) fn block_warp_prep(
 
 #[cfg(test)]
 mod tests {
+    mod warp_simd {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// The AVX2 warp core equals the scalar oracle for arbitrary
+            /// patches, shear parameters and phases (incl. out-of-range phases
+            /// that exercise the index clamp).
+            #[test]
+            fn prop_warp_core_matches_scalar(
+                patch_flat in prop::collection::vec(0i32..1024, 225),
+                alpha in -4000i32..4000,
+                beta in -4000i32..4000,
+                gamma in -4000i32..4000,
+                delta in -4000i32..4000,
+                mx0 in -80000i32..80000,
+                my0 in -80000i32..80000,
+                ten_bit in any::<bool>(),
+            ) {
+                let ib = if ten_bit { 2 } else { 4 };
+                let mut patch = [[0i32; 15]; 15];
+                for (i, v) in patch_flat.iter().enumerate() {
+                    patch[i / 15][i % 15] = *v;
+                }
+                if crate::simd::level() == crate::simd::Level::Avx2 {
+                    let want = warp_core_scalar(&patch, alpha, beta, gamma, delta, mx0, my0, ib);
+                    // SAFETY: AVX2 detected just above.
+                    let got = unsafe { warp_core_avx2(&patch, alpha, beta, gamma, delta, mx0, my0, ib) };
+                    prop_assert_eq!(got, want);
+                }
+            }
+        }
+    }
+
     use super::*;
     use crate::inter::Mv;
 
