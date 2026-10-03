@@ -6,9 +6,9 @@ use tpt_kinetix_core::stream::StreamInfo;
 
 use super::boxes::SampleEntry;
 use super::boxes::{
-    parse_box_header, parse_co64, parse_ctts, parse_hdlr, parse_mdhd, parse_mvhd, parse_stco,
-    parse_stsc, parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, CttsBox, MdhdBox,
-    StscBox, StssBox, StszBox, SttsBox, TkhdBox,
+    parse_box_header, parse_co64, parse_ctts, parse_elst, parse_hdlr, parse_mdhd, parse_mvhd,
+    parse_stco, parse_stsc, parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, CttsBox,
+    MdhdBox, StscBox, StssBox, StszBox, SttsBox, TkhdBox,
 };
 use super::config::parse_sample_entry;
 
@@ -40,6 +40,9 @@ pub struct Mp4Track {
     pub stsc: StscBox,
     /// Composition-time offsets (`pts - dts`); empty when the track has no `ctts`.
     pub ctts: CttsBox,
+    /// Media time at which presentation starts, from the first non-empty edit
+    /// of the track's `elst` (`None` when the track has no edit list).
+    pub edit_media_time: Option<i64>,
     /// Codec configuration record (`avcC`, `hvcC`, `av1C`, `vpcC`, AAC
     /// `AudioSpecificConfig`, `dOps`, …); empty when the entry has none.
     pub extradata: Vec<u8>,
@@ -65,6 +68,7 @@ impl Mp4Track {
         s.sample_rate = self.sample_rate;
         s.bits_per_sample = self.bits_per_sample;
         s.extradata = self.extradata.clone();
+        s.edit_media_time = self.edit_media_time;
         s
     }
 
@@ -134,11 +138,24 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
     let mut ctts = CttsBox::default();
     let mut codec: Option<CodecId> = None;
     let mut first_entry: Option<SampleEntry> = None;
+    let mut edit_media_time: Option<i64> = None;
 
     for (box_type, payload) in walk_boxes(trak_payload) {
         match &box_type {
             b"tkhd" => {
                 tkhd = parse_tkhd(payload).ok().map(|(_, v)| v);
+            }
+            b"edts" => {
+                for (edts_type, edts_payload) in walk_boxes(payload) {
+                    if &edts_type == b"elst" {
+                        if let Ok((_, entries)) = parse_elst(edts_payload) {
+                            edit_media_time = entries
+                                .iter()
+                                .find(|e| e.media_time >= 0)
+                                .map(|e| e.media_time);
+                        }
+                    }
+                }
             }
             b"mdia" => {
                 // Walk mdia children
@@ -256,6 +273,7 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
         chunk_offsets,
         stsc,
         ctts,
+        edit_media_time,
         extradata: entry_cfg.extradata,
         channels: entry_cfg.channels,
         sample_rate: entry_cfg.sample_rate,

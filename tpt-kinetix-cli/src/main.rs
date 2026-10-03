@@ -1,5 +1,7 @@
 //! `tpt-kinetix` — command-line interface for the TPT Kinetix media engine.
 
+mod remux;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,6 +28,19 @@ enum Commands {
     Probe {
         /// Input file path (MP4/ISO-BMFF or MPEG-TS).
         input: PathBuf,
+    },
+    /// Copy an MP4's streams into a new MP4 without decoding (like `ffmpeg -c copy`).
+    ///
+    /// Video and audio are passed through bit-for-bit, including audio codecs
+    /// Kinetix cannot decode. The input may be a file or an `http(s)://` URL.
+    Remux {
+        /// Input MP4 (path or http(s) URL).
+        input: String,
+        /// Output MP4 path.
+        output: PathBuf,
+        /// Move the index (`moov`) to the front so the file plays while downloading.
+        #[arg(long)]
+        faststart: bool,
     },
     /// Transcode a media file (VP9 MP4 → AV1).
     Transcode {
@@ -103,6 +118,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Probe { input } => probe(&input),
+        Commands::Remux {
+            input,
+            output,
+            faststart,
+        } => remux::remux(&input, &output, faststart),
         Commands::Transcode {
             input,
             output,

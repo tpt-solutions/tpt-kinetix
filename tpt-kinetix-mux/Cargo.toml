@@ -19,6 +19,7 @@ tpt-kinetix-core = { workspace = true }
 [dev-dependencies]
 tpt-kinetix-demux = { workspace = true }
 criterion = { workspace = true }
+proptest = "1.5"
 
 [[bench]]
 name = "mp4_mux"

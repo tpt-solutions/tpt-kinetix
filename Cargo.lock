@@ -1593,6 +1593,7 @@ dependencies = [
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
+ "tpt-kinetix-mux",
  "tpt-kinetix-pipeline",
  "tpt-kinetix-stream",
  "tpt-kinetix-vision",
@@ -1679,6 +1680,7 @@ name = "tpt-kinetix-mux"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "proptest",
  "thiserror",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",

@@ -54,7 +54,7 @@ Known/qualitative, to be measured before claiming:
   `fs::read` in CLI/examples. Test with a >RAM synthetic sparse file and an HTTP-range mock.
 - [~] **M2 — Codec-agnostic tracks.** *(MP4 done 2026-10-04: `core::StreamInfo`, `Mp4Reader::streams()`; MKV and TS still to do.)* Packets carry `codec id + extradata` for H.264, AV1,
   VP9, **AAC/Opus/MP3 as opaque passthrough** (no decoder). Demux MP4/MKV/TS multi-track.
-- [ ] **M3 — Streaming muxer.** `Write`-based MP4 muxer: multi-track, faststart, edit lists,
+- [~] **M3 — Streaming muxer.** *(progressive multi-track MP4 + faststart + `remux` done 2026-10-04; fragmented MP4/CMAF still open.)* `Write`-based MP4 muxer: multi-track, faststart, edit lists,
   and **fragmented MP4 / CMAF**. Remux (`tpt-kinetix remux in out`) round-trips vs
   `ffprobe`/`ffmpeg -c copy` byte-for-semantics.
 - [ ] **M4 — Packaging.** HLS with fMP4 segments + DASH (on top of M3), live sliding window,
@@ -119,3 +119,22 @@ Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range se
 * `probe` prints audio layout and config sizes.
 * Still to do for M2: Matroska (`CodecPrivate` → extradata, multi-track, lacing, Cues, EBML-void/unknown sizes),
   MPEG-TS (PMT descriptors -> StreamInfo; AAC ADTS -> AudioSpecificConfig), stream-info from fragmented MP4.
+
+### M3 progress (2026-10-04) — progressive MP4 writer, faststart, `remux`
+
+* `tpt-kinetix-mux`: `Mp4Writer<W: Write + Seek>` (multi-track passthrough; media written in ~0.5 s chunks, sample
+  tables buffered, `moov` at end; 64-bit `mdat`, `stco`/`co64` chosen by size; edit lists keep AAC priming and
+  B-frame composition delay; late-starting tracks get an empty edit), `faststart()` (one streaming pass, patches
+  `stco`/`co64`, works on any MP4), sample-entry writers for H.264/H.265/AV1/VP9/AAC/MP3/Opus/FLAC/AC-3/E-AC-3
+  from `StreamInfo`. `Mp4Reader::read_packet_timed()` supplies sample durations (the writer takes a hint for
+  each stream's last sample); `Packet` itself is unchanged (it is built in ~200 places).
+* CLI: `tpt-kinetix remux <in|url> <out> [--faststart]`.
+* Verified on ffmpeg-made files (H.264 w/ B-frames, AV1, H.265, VP9 with AAC/Opus/AC-3/E-AC-3/MP3/FLAC): ffmpeg
+  decodes every output with zero errors, and `ffprobe -show_packets` (stream, pts, dts, duration, size, flags) is
+  **identical** to the source for all packets; stream and format durations match. Tests: `tests/writer_roundtrip.rs`
+  (round-trips, co64, faststart idempotence, bad input, rescaling, proptest, ffmpeg interop).
+* Speed (this machine, warm cache, process start included): 85 MB remux ~100 ms vs `ffmpeg -c copy` ~160 ms;
+  with faststart ~150 ms vs ~190 ms. 2.2 GB runs are disk-bound (17-48 s for both, high variance): not a
+  differentiator, as expected.
+* Not yet: fragmented MP4 / CMAF (needed for M4), MKV/TS/WebM output, `udta`/metadata/chapters/subtitles copy,
+  non-MP4 inputs for `remux`, `Write`-only (non-seekable) progressive output.

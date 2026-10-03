@@ -14,6 +14,15 @@ pub enum MuxError {
     /// A configuration value was invalid (e.g. zero timescale).
     #[error("invalid muxer configuration: {0}")]
     InvalidConfig(String),
+    /// The stream or codec cannot be written to this container.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+    /// Packet timestamps were out of order or out of range.
+    #[error("invalid timestamps: {0}")]
+    InvalidTimestamps(String),
+    /// The output could not be written.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Configuration for [`Mp4Muxer`].

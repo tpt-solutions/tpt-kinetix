@@ -357,6 +357,46 @@ pub fn parse_ctts(input: &[u8]) -> IResult<&[u8], CttsBox> {
 }
 
 // ---------------------------------------------------------------------------
+// elst
+// ---------------------------------------------------------------------------
+
+/// One entry of an `elst` (edit list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElstEntry {
+    /// Duration of the edit in movie-timescale ticks.
+    pub segment_duration: u64,
+    /// Start of the edit in media-timescale ticks, or `-1` for an empty edit.
+    pub media_time: i64,
+}
+
+/// Parses the payload of an `elst` box (versions 0 and 1).
+pub fn parse_elst(input: &[u8]) -> IResult<&[u8], Vec<ElstEntry>> {
+    let (input, version) = be_u8(input)?;
+    let (input, _flags) = take(3usize)(input)?;
+    let (mut input, entry_count) = be_u32(input)?;
+    // `entry_count` is untrusted: never size an allocation from it.
+    let mut out = Vec::with_capacity((entry_count as usize).min(16));
+    for _ in 0..entry_count {
+        let (i, segment_duration, media_time) = if version == 1 {
+            let (i, d) = be_u64(input)?;
+            let (i, m) = be_u64(i)?;
+            (i, d, m as i64)
+        } else {
+            let (i, d) = be_u32(input)?;
+            let (i, m) = be_u32(i)?;
+            (i, u64::from(d), i64::from(m as i32))
+        };
+        let (i, _rate) = be_u32(i)?; // media_rate_integer + fraction
+        input = i;
+        out.push(ElstEntry {
+            segment_duration,
+            media_time,
+        });
+    }
+    Ok((input, out))
+}
+
+// ---------------------------------------------------------------------------
 // stss
 // ---------------------------------------------------------------------------
 

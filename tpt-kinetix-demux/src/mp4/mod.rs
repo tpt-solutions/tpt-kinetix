@@ -13,10 +13,10 @@ pub mod container;
 pub mod reader;
 
 pub use boxes::{
-    parse_box_header, parse_ctts, parse_ftyp, parse_mdhd, parse_mvhd, parse_stco, parse_stsc,
-    parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, BoxHeader, Co64Box, CttsBox,
-    CttsEntry, FtypBox, MdhdBox, MvhdBox, SampleEntry, StcoBox, StscBox, StscEntry, StsdBox,
-    StssBox, StszBox, SttsBox, SttsEntry, TkhdBox,
+    parse_box_header, parse_ctts, parse_elst, parse_ftyp, parse_mdhd, parse_mvhd, parse_stco,
+    parse_stsc, parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, BoxHeader, Co64Box,
+    CttsBox, CttsEntry, ElstEntry, FtypBox, MdhdBox, MvhdBox, SampleEntry, StcoBox, StscBox,
+    StscEntry, StsdBox, StssBox, StszBox, SttsBox, SttsEntry, TkhdBox,
 };
 pub use config::{parse_sample_entry, SampleEntryConfig};
 pub use container::{parse_moov_payload, parse_mp4, Mp4Track};

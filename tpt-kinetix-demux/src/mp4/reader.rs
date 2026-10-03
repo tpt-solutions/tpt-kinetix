@@ -46,6 +46,8 @@ pub struct SampleRef {
     pub dts: u64,
     /// `pts - dts` in track timescale ticks (from `ctts`; 0 when absent).
     pub cts_offset: i32,
+    /// Sample duration in track timescale ticks (from `stts`).
+    pub duration: u32,
     /// Whether this is a sync (key-frame) sample.
     pub is_key: bool,
 }
@@ -123,11 +125,22 @@ impl<S: ReadAt> Mp4Reader<S> {
     }
 }
 
-impl<S: ReadAt> Demuxer for Mp4Reader<S> {
-    /// Returns the next packet in decode-time order across all tracks.
-    fn read_packet(&mut self) -> Result<Option<Packet>, KinetixError> {
-        // The track whose next sample has the smallest DTS (cross-multiplied so
-        // different timescales compare exactly); ties go to the lower track.
+impl<S: ReadAt> Mp4Reader<S> {
+    /// Like [`Demuxer::read_packet`], but also returns the sample's duration in
+    /// its track's timescale ticks. A muxer needs it for the last sample of a
+    /// track, whose duration cannot be inferred from a successor.
+    pub fn read_packet_timed(&mut self) -> Result<Option<(Packet, u32)>, KinetixError> {
+        let Some(ti) = self.next_track() else {
+            return Ok(None);
+        };
+        let s = self.index[ti][self.cursor[ti]];
+        let packet = self.take_packet(ti)?;
+        Ok(Some((packet, s.duration)))
+    }
+
+    /// The track whose next sample has the smallest DTS (cross-multiplied so
+    /// different timescales compare exactly); ties go to the lower track.
+    fn next_track(&self) -> Option<usize> {
         let mut best: Option<(usize, u128, u128)> = None;
         for (ti, idx) in self.index.iter().enumerate() {
             let Some(s) = idx.get(self.cursor[ti]) else {
@@ -142,21 +155,32 @@ impl<S: ReadAt> Demuxer for Mp4Reader<S> {
                 best = Some((ti, u128::from(s.dts), ts));
             }
         }
-        let Some((ti, _, _)) = best else {
-            return Ok(None);
-        };
+        best.map(|(ti, _, _)| ti)
+    }
+
+    fn take_packet(&mut self, ti: usize) -> Result<Packet, KinetixError> {
         let s = self.index[ti][self.cursor[ti]];
         let data = self.read_sample(&s)?;
         self.cursor[ti] += 1;
         let time_base = (1, self.tracks[ti].timescale);
         let dts = s.dts as i64;
-        Ok(Some(Packet {
+        Ok(Packet {
             pts: Timestamp::new(dts + i64::from(s.cts_offset), time_base),
             dts: Timestamp::new(dts, time_base),
             data,
             stream_index: ti as u32,
             is_key_frame: s.is_key,
-        }))
+        })
+    }
+}
+
+impl<S: ReadAt> Demuxer for Mp4Reader<S> {
+    /// Returns the next packet in decode-time order across all tracks.
+    fn read_packet(&mut self) -> Result<Option<Packet>, KinetixError> {
+        match self.next_track() {
+            Some(ti) => self.take_packet(ti).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Seeks every track to the closest sync sample at or before `target_pts_ms`.
@@ -312,14 +336,16 @@ fn build_index(track: &Mp4Track) -> Result<Vec<SampleRef>> {
                 break 'chunks;
             }
             let size = size_of(i);
+            let duration = deltas.next();
             out.push(SampleRef {
                 offset: off,
                 size,
                 dts,
                 cts_offset: offsets.next(),
+                duration,
                 is_key: is_key[i],
             });
-            dts = dts.saturating_add(u64::from(deltas.next()));
+            dts = dts.saturating_add(u64::from(duration));
             off = off.saturating_add(u64::from(size));
         }
     }

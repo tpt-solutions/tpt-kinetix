@@ -50,6 +50,11 @@ pub struct StreamInfo {
     ///
     /// Empty when the stream has none (or the container did not provide one).
     pub extradata: Vec<u8>,
+    /// Media time (in `timescale` ticks) at which presentation starts, from the
+    /// container's edit list: AAC encoder priming (typically 1024) or a video
+    /// composition delay. `None` when the container has no edit list; a muxer
+    /// then derives it from the first sample's composition offset.
+    pub edit_media_time: Option<i64>,
 }
 
 impl StreamInfo {
@@ -67,6 +72,7 @@ impl StreamInfo {
             sample_rate: 0,
             bits_per_sample: 0,
             extradata: Vec::new(),
+            edit_media_time: None,
         }
     }
 
