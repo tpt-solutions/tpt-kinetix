@@ -229,6 +229,115 @@ unsafe fn add_residual_row_sse41(
     add_residual_row_tail(pred, residual, dst, i, n, pix_max);
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Motion-compensation 8-tap filter rows (inter.rs)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Horizontal 8-tap row: `dst[x] = (sum_t k[t] * src[x + t] + rnd) >> shift`.
+///
+/// `src.len()` must be at least `dst.len() + 7`. All arithmetic wraps, as the
+/// plain scalar loop it replaces does in release builds; real inputs (samples
+/// < 2^12, taps < 2^8) never come near overflow.
+#[inline]
+pub(crate) fn filter_h_row(src: &[i32], dst: &mut [i32], k: &[i32; 8], rnd: i32, shift: u32) {
+    assert!(src.len() >= dst.len() + 7);
+    #[cfg(target_arch = "x86_64")]
+    if level() == Level::Avx2 {
+        // SAFETY: `Level::Avx2` implies AVX2 was detected; `src` is long
+        // enough for every 8-lane load (checked above).
+        unsafe { filter_h_row_avx2(src, dst, k, rnd, shift) };
+        return;
+    }
+    filter_h_row_scalar(src, dst, 0, k, rnd, shift);
+}
+
+/// Reference oracle for [`filter_h_row`], starting at output index `from`.
+#[inline]
+fn filter_h_row_scalar(
+    src: &[i32],
+    dst: &mut [i32],
+    from: usize,
+    k: &[i32; 8],
+    rnd: i32,
+    shift: u32,
+) {
+    for (x, d) in dst.iter_mut().enumerate().skip(from) {
+        let w = &src[x..x + 8];
+        let mut s = 0i32;
+        for t in 0..8 {
+            s = s.wrapping_add(w[t].wrapping_mul(k[t]));
+        }
+        *d = s.wrapping_add(rnd) >> shift;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn filter_h_row_avx2(src: &[i32], dst: &mut [i32], k: &[i32; 8], rnd: i32, shift: u32) {
+    use std::arch::x86_64::*;
+    let kv: [__m256i; 8] = std::array::from_fn(|t| _mm256_set1_epi32(k[t]));
+    let rndv = _mm256_set1_epi32(rnd);
+    let cnt = _mm_cvtsi32_si128(shift as i32);
+    let n = dst.len();
+    let mut x = 0usize;
+    while x + 8 <= n {
+        let mut acc = rndv;
+        for (t, kt) in kv.iter().enumerate() {
+            let v = _mm256_loadu_si256(src.as_ptr().add(x + t).cast());
+            acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(v, *kt));
+        }
+        acc = _mm256_sra_epi32(acc, cnt);
+        _mm256_storeu_si256(dst.as_mut_ptr().add(x).cast(), acc);
+        x += 8;
+    }
+    filter_h_row_scalar(src, dst, x, k, rnd, shift);
+}
+
+/// Vertical 8-tap row: `dst[x] = sum_i k[i] * rows[i][x]` (unrounded; the
+/// caller applies its own rounding/shift/clamp). Every row must be at least
+/// `dst.len()` long.
+#[inline]
+pub(crate) fn filter_v_row(rows: &[&[i32]; 8], dst: &mut [i32], k: &[i32; 8]) {
+    assert!(rows.iter().all(|r| r.len() >= dst.len()));
+    #[cfg(target_arch = "x86_64")]
+    if level() == Level::Avx2 {
+        // SAFETY: AVX2 detected; row lengths checked above.
+        unsafe { filter_v_row_avx2(rows, dst, k) };
+        return;
+    }
+    filter_v_row_scalar(rows, dst, 0, k);
+}
+
+#[inline]
+fn filter_v_row_scalar(rows: &[&[i32]; 8], dst: &mut [i32], from: usize, k: &[i32; 8]) {
+    for (x, d) in dst.iter_mut().enumerate().skip(from) {
+        let mut s = 0i32;
+        for i in 0..8 {
+            s = s.wrapping_add(rows[i][x].wrapping_mul(k[i]));
+        }
+        *d = s;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn filter_v_row_avx2(rows: &[&[i32]; 8], dst: &mut [i32], k: &[i32; 8]) {
+    use std::arch::x86_64::*;
+    let kv: [__m256i; 8] = std::array::from_fn(|i| _mm256_set1_epi32(k[i]));
+    let n = dst.len();
+    let mut x = 0usize;
+    while x + 8 <= n {
+        let mut acc = _mm256_setzero_si256();
+        for (i, ki) in kv.iter().enumerate() {
+            let v = _mm256_loadu_si256(rows[i].as_ptr().add(x).cast());
+            acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(v, *ki));
+        }
+        _mm256_storeu_si256(dst.as_mut_ptr().add(x).cast(), acc);
+        x += 8;
+    }
+    filter_v_row_scalar(rows, dst, x, k);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +409,38 @@ mod tests {
             pix_max in 1i32..=65535,
         ) {
             assert_matches_oracle(&pred, &residual, pix_max, 0xA5A5);
+        }
+    }
+
+    proptest! {
+        /// MC filter-row kernels match their scalar oracles for every width.
+        #[test]
+        fn prop_filter_h_row_matches_scalar(
+            src in prop::collection::vec(-4096i32..4096, 7..80),
+            k in prop::array::uniform8(-128i32..128),
+            rnd in -64i32..64,
+            shift in 0u32..8,
+        ) {
+            let n = src.len() - 7;
+            let mut want = vec![0i32; n];
+            filter_h_row_scalar(&src, &mut want, 0, &k, rnd, shift);
+            let mut got = vec![0i32; n];
+            filter_h_row(&src, &mut got, &k, rnd, shift);
+            prop_assert_eq!(got, want);
+        }
+
+        #[test]
+        fn prop_filter_v_row_matches_scalar(
+            data in prop::collection::vec(-65536i32..65536, 8 * 40),
+            k in prop::array::uniform8(-128i32..128),
+            n in 0usize..=40,
+        ) {
+            let rows: [&[i32]; 8] = std::array::from_fn(|i| &data[i * 40..(i + 1) * 40]);
+            let mut want = vec![0i32; n];
+            filter_v_row_scalar(&rows, &mut want, 0, &k);
+            let mut got = vec![0i32; n];
+            filter_v_row(&rows, &mut got, &k);
+            prop_assert_eq!(got, want);
         }
     }
 

@@ -279,48 +279,33 @@ fn filter_rows_h(
     let pw = bw + 7;
     let mut out = take_buf(bw * rows);
     for ty in 0..rows {
-        let src = &patch[ty * pw..(ty + 1) * pw];
-        let dst = &mut out[ty * bw..(ty + 1) * bw];
-        for (x, d) in dst.iter_mut().enumerate() {
-            let w = &src[x..x + 8];
-            let s = w[0] * k[0]
-                + w[1] * k[1]
-                + w[2] * k[2]
-                + w[3] * k[3]
-                + w[4] * k[4]
-                + w[5] * k[5]
-                + w[6] * k[6]
-                + w[7] * k[7];
-            *d = (s + rnd) >> shift;
-        }
+        crate::simd::filter_h_row(
+            &patch[ty * pw..(ty + 1) * pw],
+            &mut out[ty * bw..(ty + 1) * bw],
+            k,
+            rnd,
+            shift,
+        );
     }
     out
 }
 
 /// 8-tap vertical pass: output row `y` combines rows `y..y + 8` of `src`
-/// (`bw` wide) and is mapped through `f(sum)`.
+/// (`bw` wide); `f(y, sums)` receives that row's raw (unrounded) sums.
 fn filter_rows_v(
     src: &[i32],
     bw: usize,
     bh: usize,
     k: &[i32; 8],
-    mut f: impl FnMut(i32, usize, usize),
+    mut f: impl FnMut(usize, &[i32]),
 ) {
+    let mut sums = take_buf(bw);
     for y in 0..bh {
         let r: [&[i32]; 8] = std::array::from_fn(|i| &src[(y + i) * bw..(y + i + 1) * bw]);
-        #[allow(clippy::needless_range_loop)] // `x` indexes eight row slices at once
-        for x in 0..bw {
-            let s = r[0][x] * k[0]
-                + r[1][x] * k[1]
-                + r[2][x] * k[2]
-                + r[3][x] * k[3]
-                + r[4][x] * k[4]
-                + r[5][x] * k[5]
-                + r[6][x] * k[6]
-                + r[7][x] * k[7];
-            f(s, y, x);
-        }
+        crate::simd::filter_v_row(&r, &mut sums, k);
+        f(y, &sums);
     }
+    put_buf(sums);
 }
 
 /// Motion-compensate a `bw`×`bh` luma/chroma block at tile-local pixel
@@ -478,8 +463,13 @@ pub fn motion_compensate(
             bw,
             bh + 7,
         );
-        filter_rows_v(&patch, bw, bh, &kh, |s, y, x| {
-            dest[y * dest_stride + x] = ((s + 32) >> 6).clamp(0, pix_max) as Px;
+        filter_rows_v(&patch, bw, bh, &kh, |y, sums| {
+            for (d, &s) in dest[y * dest_stride..y * dest_stride + bw]
+                .iter_mut()
+                .zip(sums)
+            {
+                *d = ((s + 32) >> 6).clamp(0, pix_max) as Px;
+            }
         });
         put_buf(patch);
         return;
@@ -509,8 +499,13 @@ pub fn motion_compensate(
 
     // Vertical pass from `tmp` (already offset by 3 rows) into `dest`. `dest`
     // is the destination *block* buffer (stride `dest_stride`, sized `bw`x`bh`).
-    filter_rows_v(&tmp, bw, bh, &kh, |s, y, x| {
-        dest[y * dest_stride + x] = ((s + (1 << (5 + ib))) >> (6 + ib)).clamp(0, pix_max) as Px;
+    filter_rows_v(&tmp, bw, bh, &kh, |y, sums| {
+        for (d, &s) in dest[y * dest_stride..y * dest_stride + bw]
+            .iter_mut()
+            .zip(sums)
+        {
+            *d = ((s + (1 << (5 + ib))) >> (6 + ib)).clamp(0, pix_max) as Px;
+        }
     });
     put_buf(tmp);
 }
@@ -559,8 +554,10 @@ pub fn motion_compensate_prep(
     let tmp = filter_rows_h(&patch, bw, ext_h, &kw, (1 << (6 - ib)) >> 1, 6 - ib);
     put_buf(patch);
     let mut out = vec![0i32; bw * bh];
-    filter_rows_v(&tmp, bw, bh, &kh, |s, y, x| {
-        out[y * bw + x] = (s + 32) >> 6;
+    filter_rows_v(&tmp, bw, bh, &kh, |y, sums| {
+        for (d, &s) in out[y * bw..(y + 1) * bw].iter_mut().zip(sums) {
+            *d = (s + 32) >> 6;
+        }
     });
     put_buf(tmp);
     out
