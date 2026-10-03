@@ -312,6 +312,51 @@ pub fn parse_stts(input: &[u8]) -> IResult<&[u8], SttsBox> {
 }
 
 // ---------------------------------------------------------------------------
+// ctts
+// ---------------------------------------------------------------------------
+
+/// One run in the `ctts` (composition time offset) table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CttsEntry {
+    pub sample_count: u32,
+    /// `pts - dts` in track timescale ticks. Version 0 stores an unsigned
+    /// value, version 1 a signed one; both are widened to `i32` here.
+    pub sample_offset: i32,
+}
+
+/// `ctts` (Composition Time to Sample) box.
+#[derive(Debug, Clone, Default)]
+pub struct CttsBox {
+    pub entries: Vec<CttsEntry>,
+}
+
+/// Parses the payload of a `ctts` box.
+pub fn parse_ctts(input: &[u8]) -> IResult<&[u8], CttsBox> {
+    let (input, _version) = be_u8(input)?;
+    let (input, _flags) = take(3usize)(input)?;
+    let (input, entry_count) = be_u32(input)?;
+    let (input, entries) = count(
+        |i| {
+            let (i, sc) = be_u32(i)?;
+            let (i, off) = be_u32(i)?;
+            Ok((
+                i,
+                CttsEntry {
+                    sample_count: sc,
+                    // v0 offsets are unsigned but always fit i32 in practice;
+                    // reinterpreting as signed also handles v1 (and the
+                    // widespread v0 files that store negative offsets).
+                    sample_offset: off as i32,
+                },
+            ))
+        },
+        entry_count as usize,
+    )
+    .parse(input)?;
+    Ok((input, CttsBox { entries }))
+}
+
+// ---------------------------------------------------------------------------
 // stss
 // ---------------------------------------------------------------------------
 
@@ -488,7 +533,8 @@ pub fn parse_stsd(input: &[u8]) -> IResult<&[u8], StsdBox> {
     let (input, _flags) = take(3usize)(input)?;
     let (mut input, entry_count) = be_u32(input)?;
 
-    let mut entries = Vec::with_capacity(entry_count as usize);
+    // `entry_count` is attacker-controlled: never size an allocation from it.
+    let mut entries = Vec::with_capacity((entry_count as usize).min(16));
     for _ in 0..entry_count {
         // Each entry is a box: [size u32][type 4] then payload.
         let (after_hdr, hdr) = parse_box_header(input)?;

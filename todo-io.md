@@ -49,7 +49,7 @@ Known/qualitative, to be measured before claiming:
 
 ## Milestones
 
-- [ ] **M1 — Streaming demux.** `Demuxer` over `Read + Seek` (and an async/ranged source
+- [~] **M1 — Streaming demux.** *(MP4 done 2026-10-04: `ReadAt` source trait + `Mp4Reader`; CLI `probe` no longer loads the file; TS and MKV still take a whole buffer; HTTP-range source + fragmented MP4 still open.)* `Demuxer` over `Read + Seek` (and an async/ranged source
   trait); MP4 reads `moov` without loading `mdat`; samples are read on demand. Replace every
   `fs::read` in CLI/examples. Test with a >RAM synthetic sparse file and an HTTP-range mock.
 - [ ] **M2 — Codec-agnostic tracks.** Packets carry `codec id + extradata` for H.264, AV1,
@@ -68,3 +68,19 @@ Known/qualitative, to be measured before claiming:
 
 Beating ffmpeg/dav1d at codec decode speed; new codec work; transcoding as a headline
 feature. (Existing decoders stay and keep their conformance tests.)
+
+### M1 progress (2026-10-04)
+
+* `tpt-kinetix-demux`: `source::ReadAt` (positional reads; impls for memory, `File`, any `Read+Seek`, plus a
+  `CountingSource` for I/O assertions) and `mp4::Mp4Reader` — hops top-level box headers, reads only `moov`,
+  builds the sample index once (O(samples)), serves each packet with one positional read.
+* Fixed on the way: the old demuxer was O(n^2) per file (stsc/stss rescans per sample), ignored `ctts`
+  (so `pts == dts` on B-frame streams), read tracks sequentially instead of by decode time, and
+  `parse_stsd` allocated from an attacker-controlled `entry_count`.
+* Hostile-input limits: moov <= 256 MiB, <= 16 Mi samples/track, bounded top-level scan, sample bytes
+  allocated only after an in-file bounds check. Proptest + new `fuzz_mp4_reader` target.
+* Measured (1080p, 85 MB / 2.2 GB MP4, this machine): `tpt-kinetix probe` 27 ms / 32 ms (was 61 ms and
+  would have read all 2.2 GB); `ffprobe -show_streams` 90 ms / 59 ms. Open of the 21 MB test file reads < 4 KiB.
+* Remaining for M1: streaming TS (`TsDemuxer` still takes a `Vec`), MKV, an HTTP-range `ReadAt`
+  (probe an S3 object in ~2 requests), fragmented MP4 (`moof`) input, `Mp4Demuxer` callers in
+  pipeline/CLI transcode that still `fs::read` (`stage.rs`, `main.rs`).

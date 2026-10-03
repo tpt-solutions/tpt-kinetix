@@ -4,9 +4,9 @@ use anyhow::{anyhow, Result};
 use tpt_kinetix_core::codec::{media_type_from_handler, CodecId, MediaType};
 
 use super::boxes::{
-    parse_box_header, parse_co64, parse_hdlr, parse_mdhd, parse_mvhd, parse_stco, parse_stsc,
-    parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, MdhdBox, StscBox, StssBox, StszBox,
-    SttsBox, TkhdBox,
+    parse_box_header, parse_co64, parse_ctts, parse_hdlr, parse_mdhd, parse_mvhd, parse_stco,
+    parse_stsc, parse_stsd, parse_stss, parse_stsz, parse_stts, parse_tkhd, CttsBox, MdhdBox,
+    StscBox, StssBox, StszBox, SttsBox, TkhdBox,
 };
 
 /// A fully-parsed MP4 track, including its complete sample table.
@@ -35,6 +35,8 @@ pub struct Mp4Track {
     pub chunk_offsets: Vec<u64>,
     /// Sample-to-chunk mapping.
     pub stsc: StscBox,
+    /// Composition-time offsets (`pts - dts`); empty when the track has no `ctts`.
+    pub ctts: CttsBox,
 }
 
 impl Mp4Track {
@@ -101,6 +103,7 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
     let mut stsz: Option<StszBox> = None;
     let mut chunk_offsets: Option<Vec<u64>> = None;
     let mut stsc: Option<StscBox> = None;
+    let mut ctts = CttsBox::default();
     let mut codec: Option<CodecId> = None;
 
     for (box_type, payload) in walk_boxes(trak_payload) {
@@ -129,6 +132,11 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
                                             b"stts" => {
                                                 stts =
                                                     parse_stts(stbl_payload).ok().map(|(_, v)| v);
+                                            }
+                                            b"ctts" => {
+                                                if let Ok((_, c)) = parse_ctts(stbl_payload) {
+                                                    ctts = c;
+                                                }
                                             }
                                             b"stss" => {
                                                 stss =
@@ -199,6 +207,7 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
         stsz,
         chunk_offsets,
         stsc,
+        ctts,
     })
 }
 
@@ -206,40 +215,34 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/// Parses the *payload* of a `moov` box (everything after its header) into
+/// tracks. Malformed tracks are skipped, matching [`parse_mp4`].
+pub fn parse_moov_payload(payload: &[u8]) -> Vec<Mp4Track> {
+    let mut tracks = Vec::new();
+    for (moov_type, moov_payload) in walk_boxes(payload) {
+        match &moov_type {
+            b"mvhd" => {
+                // Parsed but unused: timescale is taken per-track from `mdhd`.
+                let _ = parse_mvhd(moov_payload);
+            }
+            b"trak" => {
+                if let Ok(track) = parse_trak(moov_payload) {
+                    tracks.push(track);
+                }
+            }
+            _ => {}
+        }
+    }
+    tracks
+}
+
 /// Parses an MP4 file from raw bytes and returns all tracks found in `moov`.
 pub fn parse_mp4(data: &[u8]) -> Result<Vec<Mp4Track>> {
     // Walk top-level boxes looking for moov.
-    let mut tracks = Vec::new();
-    let mut found_moov = false;
-
     for (box_type, payload) in walk_boxes(data) {
         if &box_type == b"moov" {
-            found_moov = true;
-            // Walk moov children for mvhd and trak boxes.
-            for (moov_type, moov_payload) in walk_boxes(payload) {
-                match &moov_type {
-                    b"mvhd" => {
-                        // Parse but currently we propagate timescale per-track via mdhd.
-                        let _ = parse_mvhd(moov_payload);
-                    }
-                    b"trak" => {
-                        match parse_trak(moov_payload) {
-                            Ok(track) => tracks.push(track),
-                            Err(_) => {
-                                // Skip malformed tracks; caller gets whatever parsed cleanly.
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            break; // Only one moov box expected.
+            return Ok(parse_moov_payload(payload)); // Only one moov box expected.
         }
     }
-
-    if !found_moov {
-        return Err(anyhow!("no moov box found in MP4 data"));
-    }
-
-    Ok(tracks)
+    Err(anyhow!("no moov box found in MP4 data"))
 }

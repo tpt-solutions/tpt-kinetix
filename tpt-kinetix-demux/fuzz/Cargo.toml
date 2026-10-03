@@ -44,3 +44,9 @@ serde = { version = "1.0", features = ["derive"] }
 [profile.release]
 debug = 1
 opt-level = 3
+
+[[bin]]
+name = "fuzz_mp4_reader"
+path = "fuzz_targets/fuzz_mp4_reader.rs"
+test = false
+doc = false

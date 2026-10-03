@@ -142,14 +142,28 @@ async fn main() -> Result<()> {
 /// implemented today (unlike `transcode`/`stream`). The container format is
 /// sniffed: MPEG-TS (0x47 sync at the 188-byte packet pitch) or MP4.
 fn probe(input: &std::path::Path) -> Result<()> {
-    let data = std::fs::read(input)
+    use tpt_kinetix_demux::ReadAt;
+
+    let file = std::fs::File::open(input)
+        .with_context(|| format!("failed to open input file: {}", input.display()))?;
+
+    // Sniff the container from the first two TS packets' worth of bytes only.
+    let len = file.len()?;
+    let mut head = vec![0u8; len.min(376) as usize];
+    file.read_at(0, &mut head)
         .with_context(|| format!("failed to read input file: {}", input.display()))?;
 
-    if looks_like_mpeg_ts(&data) {
+    if looks_like_mpeg_ts(&head) {
+        // The TS demuxer still takes a whole buffer (streaming TS is tracked in
+        // `todo-io.md`, M1); MP4 below never loads the file.
+        let data = std::fs::read(input)
+            .with_context(|| format!("failed to read input file: {}", input.display()))?;
         return probe_ts(input, data);
     }
 
-    let demuxer = tpt_kinetix_demux::Mp4Demuxer::new(data)
+    // MP4: reads the top-level box headers and the `moov` index, nothing else,
+    // so probing a multi-gigabyte file costs kilobytes of I/O.
+    let demuxer = tpt_kinetix_demux::Mp4Reader::open(file)
         .with_context(|| format!("failed to parse MP4 container: {}", input.display()))?;
 
     let tracks = demuxer.tracks();

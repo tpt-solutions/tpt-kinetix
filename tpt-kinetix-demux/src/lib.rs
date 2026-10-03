@@ -7,15 +7,21 @@
 //!
 //! All demuxers implement the [`Demuxer`] trait, allowing them to be used
 //! interchangeably in the pipeline.
+//!
+//! For files, prefer [`Mp4Reader`] over a [`ReadAt`] source ([`std::fs::File`],
+//! a memory buffer, or — in future — an HTTP range backend): it never loads
+//! the whole file. See [`source`].
 
 pub mod mkv;
 pub mod mp4;
+pub mod source;
 pub mod ts;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
 pub use mkv::MkvDemuxer;
-pub use mp4::Mp4Demuxer;
+pub use mp4::{Mp4Demuxer, Mp4Reader};
+pub use source::{CountingSource, ReadAt, SeekSource};
 use tpt_kinetix_core::{error::KinetixError, packet::Packet};
 pub use ts::TsDemuxer;
 
