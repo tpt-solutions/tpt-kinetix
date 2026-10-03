@@ -57,7 +57,7 @@ Known/qualitative, to be measured before claiming:
 - [x] **M3 — Streaming muxer.** *(done 2026-10-04: progressive multi-track MP4, faststart, fragmented MP4/CMAF writer, `remux`; see "M3 progress" below. Non-MP4 outputs and metadata copy remain.)* `Write`-based MP4 muxer: multi-track, faststart, edit lists,
   and **fragmented MP4 / CMAF**. Remux (`tpt-kinetix remux in out`) round-trips vs
   `ffprobe`/`ffmpeg -c copy` byte-for-semantics.
-- [ ] **M4 — Packaging.** HLS with fMP4 segments + DASH (on top of M3), live sliding window,
+- [~] **M4 — Packaging.** *(VOD just-in-time HLS-fMP4 + DASH done 2026-10-04 (`tpt-kinetix-package`, CLI `package`/`serve`); live sliding window, low-latency parts, RTMP/SRT ingest with audio still open.)* HLS with fMP4 segments + DASH (on top of M3), live sliding window,
   low-latency parts; RTMP/SRT ingest -> package, audio included.
 - [ ] **M5 — Probe service.** `probe --json` matching ffprobe's field names for the common
   cases; HTTP-range remote probing; WASM build kept working.
@@ -156,3 +156,28 @@ Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range se
   mutation proptest on fragmented files, ffmpeg decode + packet count).
 * Next (M4): segmenter that cuts at key frames and names/indexes segments; HLS (fMP4) playlists, DASH MPD, live
   sliding window; RTMP -> fMP4 including audio.
+
+### M4 progress (2026-10-04) — just-in-time packaging, async index, edge story
+
+* **Async index.** `demux::AsyncReadAt` (+ `Blocking` adapter, `block_on`) and `Mp4Index::load`: the same
+  loader serves native sync files (`Mp4Reader::open`), HTTP range sources, and any future/`fetch`-backed source
+  (WASM Workers/browsers). Proven with a source that really suspends on every read.
+* **`tpt-kinetix-package`** (compiles to `wasm32-unknown-unknown`): `Packager` loads only the MP4 index, plans
+  key-frame-aligned segments (lead = first video track; other tracks cut at the same instant), and produces on
+  demand: HLS master + per-track media playlists (fMP4, `EXT-X-MAP`, separate audio rendition group, RFC 6381
+  `CODECS`, `RESOLUTION`, `FRAME-RATE`, peak/average `BANDWIDTH`), a static DASH MPD (`SegmentTimeline`, presentation-
+  time based), init segments, and `moof`+`mdat` segments built from ranged reads of just that segment's samples
+  (nearby reads coalesced; `max_read_gap`). Codec strings for H.264/H.265/AV1/VP9/AAC/MP3/Opus/FLAC/AC-3/E-AC-3.
+* **CLI:** `tpt-kinetix package in out/ [--segment-seconds N]` (static tree) and `tpt-kinetix serve in
+  [--port N]` (JIT HTTP, CORS enabled, std-only), input a file or an `http(s)://` URL.
+* **Verification (ffmpeg as the oracle):** 12 s H.264(B-frames)+AAC file, 3 s segments; ffmpeg pulling
+  `master.m3u8` from `serve` decodes **300/300 video and 563/563 audio frames with frame-MD5s identical to decoding
+  the source**; video timestamps identical too (audio shifted by the AAC priming because ffmpeg ignores edit lists
+  in fragmented input; the init segment keeps the `elst`). DASH: ffmpeg's own `-f dash` output read through
+  ffmpeg's DASH demuxer shows the same +/-1-3 frame quirk (301/560), so the DASH frame counts are a demuxer
+  behaviour, not our MPD; DASH is covered structurally (balanced XML, timeline durations sum to track length).
+* Tests: 10 in `tests/package.rs` (plan invariants, init+segments reassemble to the source, independent segments
+  with own sequence numbers, document structure, read coalescing, suspending source, proptest, ffmpeg HLS identity).
+* Next: WASM bindings (wasm-bindgen, JS range callback), live/sliding-window + low-latency HLS, RTMP/SRT ingest
+  with audio, DASH validation with a real client (dash.js / Shaka), multi-bitrate ladders need transcoding (out of
+  scope; passthrough only).

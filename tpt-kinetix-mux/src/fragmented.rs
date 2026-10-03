@@ -93,6 +93,13 @@ impl FragmentWriter {
         })
     }
 
+    /// Starts fragment sequence numbers at `n` instead of 1 (so independently
+    /// generated segments of one presentation carry their own numbers).
+    pub fn starting_sequence(mut self, n: u32) -> Self {
+        self.sequence = n.max(1);
+        self
+    }
+
     /// The initialization segment (`ftyp` + `moov`).
     pub fn init_segment(&self) -> Vec<u8> {
         let mut ftyp = Vec::new();

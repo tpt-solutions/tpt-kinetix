@@ -26,6 +26,7 @@ tokio = { version = "1.38", features = ["full"] }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true, features = ["http"] }
 tpt-kinetix-mux = { workspace = true }
+tpt-kinetix-package = { workspace = true }
 tpt-kinetix-vp9 = { workspace = true, optional = true }
 tpt-kinetix-av1 = { workspace = true }
 tpt-kinetix-vision = { workspace = true }

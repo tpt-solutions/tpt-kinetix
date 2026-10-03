@@ -1,0 +1,22 @@
+[package]
+name = "tpt-kinetix-package"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Just-in-time HLS and DASH packaging of MP4 files for the TPT Kinetix media engine"
+keywords = ["hls", "dash", "cmaf", "fmp4", "packager"]
+categories = ["multimedia", "web-programming"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-package"
+
+[dependencies]
+thiserror = { workspace = true }
+tpt-kinetix-core = { workspace = true }
+tpt-kinetix-demux = { workspace = true }
+tpt-kinetix-mux = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.5"

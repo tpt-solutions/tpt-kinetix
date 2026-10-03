@@ -1594,6 +1594,7 @@ dependencies = [
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
  "tpt-kinetix-mux",
+ "tpt-kinetix-package",
  "tpt-kinetix-pipeline",
  "tpt-kinetix-stream",
  "tpt-kinetix-vision",
@@ -1684,6 +1685,17 @@ dependencies = [
  "thiserror",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
+]
+
+[[package]]
+name = "tpt-kinetix-package"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror",
+ "tpt-kinetix-core",
+ "tpt-kinetix-demux",
+ "tpt-kinetix-mux",
 ]
 
 [[package]]

@@ -141,6 +141,80 @@ impl<R: Read + Seek> ReadAt for SeekSource<R> {
     }
 }
 
+/// Asynchronous counterpart of [`ReadAt`], for runtimes where I/O cannot block:
+/// a Cloudflare Worker or browser `fetch`, an async HTTP client, a tokio file.
+///
+/// Demuxing logic is written once against this trait; synchronous sources are
+/// adapted with [`Blocking`] (their futures are always ready, so they complete
+/// on the first poll), which is how [`ReadAt`] callers reuse the same code via
+/// [`block_on`].
+///
+/// The futures are not required to be `Send`: WebAssembly is single-threaded,
+/// and multi-threaded servers can run the sync API on a blocking pool.
+#[allow(async_fn_in_trait)]
+pub trait AsyncReadAt {
+    /// Total length of the source in bytes.
+    async fn len(&self) -> io::Result<u64>;
+
+    /// Fills `buf` with the bytes at `offset .. offset + buf.len()`, or fails
+    /// with [`io::ErrorKind::UnexpectedEof`].
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+
+    /// Returns `true` when the source is empty.
+    async fn is_empty(&self) -> io::Result<bool> {
+        Ok(self.len().await? == 0)
+    }
+}
+
+impl<T: AsyncReadAt + ?Sized> AsyncReadAt for &T {
+    async fn len(&self) -> io::Result<u64> {
+        (**self).len().await
+    }
+
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        (**self).read_at(offset, buf).await
+    }
+}
+
+/// Adapts a synchronous [`ReadAt`] to [`AsyncReadAt`] (futures complete immediately).
+pub struct Blocking<S>(pub S);
+
+impl<S: ReadAt> AsyncReadAt for Blocking<S> {
+    async fn len(&self) -> io::Result<u64> {
+        self.0.len()
+    }
+
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.0.read_at(offset, buf)
+    }
+}
+
+/// Runs a future that never suspends (every await point is immediately ready,
+/// as with [`Blocking`] sources) to completion on the current thread.
+///
+/// # Panics
+/// If the future returns `Pending`: use a real executor for genuinely
+/// asynchronous sources.
+pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+    fn noop_raw() -> RawWaker {
+        fn clone(_: *const ()) -> RawWaker {
+            noop_raw()
+        }
+        fn noop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+    // SAFETY: the vtable functions do nothing and the data pointer is never used.
+    let waker = unsafe { Waker::from_raw(noop_raw()) };
+    let mut cx = Context::from_waker(&waker);
+    let mut f = std::pin::pin!(f);
+    match f.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("block_on: the future suspended; use an async executor instead"),
+    }
+}
+
 /// Wraps a source and counts the I/O it serves, so tests and benchmarks can
 /// assert that a demuxer only touches the bytes it needs.
 pub struct CountingSource<S> {
@@ -232,6 +306,24 @@ mod tests {
         assert_eq!(b, [0, 1, 2, 3]);
         assert!(f.read_at(254, &mut b).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blocking_adapter_and_block_on() {
+        let data: Vec<u8> = (0..32).collect();
+        let src = Blocking(&data);
+        let v = block_on(async {
+            let len = AsyncReadAt::len(&src).await.unwrap();
+            let mut b = [0u8; 4];
+            AsyncReadAt::read_at(&src, 10, &mut b).await.unwrap();
+            (len, b)
+        });
+        assert_eq!(v, (32, [10, 11, 12, 13]));
+        let bad = block_on(async {
+            let mut b = [0u8; 4];
+            AsyncReadAt::read_at(&src, 30, &mut b).await
+        });
+        assert!(bad.is_err());
     }
 
     #[test]

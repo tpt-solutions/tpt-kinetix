@@ -27,7 +27,8 @@ use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp
 
 use super::container::{parse_moov_payload, Mp4Track};
 use super::fragment::{is_fragmented, parse_moof, parse_trex_list};
-use crate::{source::ReadAt, Demuxer};
+use crate::source::{block_on, AsyncReadAt, Blocking, ReadAt};
+use crate::Demuxer;
 
 /// Largest `moov` payload [`Mp4Reader`] will read (256 MiB).
 pub const MAX_MOOV_BYTES: u64 = 256 << 20;
@@ -55,22 +56,25 @@ pub struct SampleRef {
     pub is_key: bool,
 }
 
-/// A streaming MP4 demuxer over a positional byte source.
-pub struct Mp4Reader<S: ReadAt> {
-    source: S,
+/// The parsed index of an MP4: its tracks and a flat sample table per track.
+///
+/// Loading reads only the box headers, `moov` and (for fragmented files) the
+/// `moof` boxes, through an [`AsyncReadAt`], so it works the same over a local
+/// file, an HTTP range backend, or a `fetch` callback in WebAssembly. Samples
+/// are then read on demand with [`Mp4Index::read_sample_async`].
+pub struct Mp4Index {
     len: u64,
-    tracks: Vec<Mp4Track>,
-    index: Vec<Vec<SampleRef>>,
-    cursor: Vec<usize>,
+    pub(crate) tracks: Vec<Mp4Track>,
+    pub(crate) index: Vec<Vec<SampleRef>>,
 }
 
-impl<S: ReadAt> Mp4Reader<S> {
-    /// Opens `source`, reading only the box headers and the `moov` index.
-    pub fn open(source: S) -> Result<Self> {
-        let len = source.len()?;
-        let (payload_off, payload_len) = find_moov(&source, len)?;
+impl Mp4Index {
+    /// Loads the index from `source`.
+    pub async fn load<S: AsyncReadAt>(source: &S) -> Result<Self> {
+        let len = source.len().await?;
+        let (payload_off, payload_len) = find_moov(source, len).await?;
         let mut payload = vec![0u8; payload_len as usize];
-        source.read_at(payload_off, &mut payload)?;
+        source.read_at(payload_off, &mut payload).await?;
         let tracks = parse_moov_payload(&payload);
         let fragmented = is_fragmented(&payload);
         let trex = parse_trex_list(&payload);
@@ -83,20 +87,18 @@ impl<S: ReadAt> Mp4Reader<S> {
                 .iter()
                 .map(|v| v.last().map_or(0, |s| s.dts + u64::from(s.duration)))
                 .collect();
-            for (start, hlen, size) in scan_moofs(&source, len)? {
+            for (start, hlen, size) in scan_moofs(source, len).await? {
                 let mut moof = vec![0u8; (size - hlen) as usize];
-                source.read_at(start + hlen, &mut moof)?;
+                source.read_at(start + hlen, &mut moof).await?;
                 parse_moof(start, &moof, &trex, &tracks, &mut next_dts, &mut index)?;
             }
         }
-        let cursor = vec![0; tracks.len()];
-        Ok(Self {
-            source,
-            len,
-            tracks,
-            index,
-            cursor,
-        })
+        Ok(Self { len, tracks, index })
+    }
+
+    /// Length of the file the index was loaded from.
+    pub fn file_len(&self) -> u64 {
+        self.len
     }
 
     /// The parsed tracks.
@@ -105,14 +107,14 @@ impl<S: ReadAt> Mp4Reader<S> {
     }
 
     /// Codec-agnostic descriptions of every track, indexed like the packets'
-    /// `stream_index`.
+    /// `stream_index`. For fragmented files (whose `mdhd` has no duration) the
+    /// duration is derived from the indexed samples.
     pub fn streams(&self) -> Vec<tpt_kinetix_core::stream::StreamInfo> {
         self.tracks
             .iter()
             .enumerate()
             .map(|(i, t)| {
                 let mut s = t.stream_info(i as u32);
-                // Fragmented files carry no `mdhd` duration: derive it.
                 if s.duration == 0 {
                     if let Some(last) = self.index[i].last() {
                         s.duration = last.dts + u64::from(last.duration);
@@ -133,19 +135,98 @@ impl<S: ReadAt> Mp4Reader<S> {
         self.index.get(track).map_or(&[], Vec::as_slice)
     }
 
-    /// Reads the bytes of one sample.
-    pub fn read_sample(&self, s: &SampleRef) -> Result<Vec<u8>, KinetixError> {
-        let end = s
-            .offset
+    /// Per track, the index of the closest sync sample at or before
+    /// `target_pts_ms`.
+    pub fn locate(&self, target_pts_ms: i64) -> Vec<usize> {
+        self.index
+            .iter()
+            .enumerate()
+            .map(|(ti, idx)| {
+                let ticks = (i128::from(target_pts_ms) * i128::from(self.tracks[ti].timescale)
+                    / 1000)
+                    .clamp(0, i128::from(u64::MAX)) as u64;
+                let mut sample = idx.partition_point(|s| s.dts <= ticks).saturating_sub(1);
+                while sample > 0 && !idx[sample].is_key {
+                    sample -= 1;
+                }
+                sample
+            })
+            .collect()
+    }
+
+    fn check_sample(&self, s: &SampleRef) -> Result<(), KinetixError> {
+        s.offset
             .checked_add(u64::from(s.size))
             .filter(|&e| e <= self.len)
+            .map(|_| ())
             .ok_or_else(|| {
                 KinetixError::Parse(format!(
                     "sample at {}+{} exceeds file size {}",
                     s.offset, s.size, self.len
                 ))
-            })?;
-        debug_assert!(end <= self.len);
+            })
+    }
+
+    /// Reads the bytes of one sample from `source`.
+    pub async fn read_sample_async<S: AsyncReadAt>(
+        &self,
+        source: &S,
+        s: &SampleRef,
+    ) -> Result<Vec<u8>, KinetixError> {
+        self.check_sample(s)?;
+        let mut data = vec![0u8; s.size as usize];
+        source.read_at(s.offset, &mut data).await?;
+        Ok(data)
+    }
+}
+
+/// A streaming MP4 demuxer over a positional byte source.
+pub struct Mp4Reader<S: ReadAt> {
+    source: S,
+    idx: Mp4Index,
+    cursor: Vec<usize>,
+}
+
+impl<S: ReadAt> Mp4Reader<S> {
+    /// Opens `source`, reading only the box headers and the `moov` index.
+    pub fn open(source: S) -> Result<Self> {
+        let idx = block_on(Mp4Index::load(&Blocking(&source)))?;
+        let cursor = vec![0; idx.tracks.len()];
+        Ok(Self {
+            source,
+            idx,
+            cursor,
+        })
+    }
+
+    /// The loaded index.
+    pub fn index(&self) -> &Mp4Index {
+        &self.idx
+    }
+
+    /// The parsed tracks.
+    pub fn tracks(&self) -> &[Mp4Track] {
+        self.idx.tracks()
+    }
+
+    /// Codec-agnostic descriptions of every track (see [`Mp4Index::streams`]).
+    pub fn streams(&self) -> Vec<tpt_kinetix_core::stream::StreamInfo> {
+        self.idx.streams()
+    }
+
+    /// Number of samples in track `track` (counts fragment samples too).
+    pub fn sample_count(&self, track: usize) -> usize {
+        self.idx.sample_count(track)
+    }
+
+    /// The flat sample index of track `track` (in decode order).
+    pub fn samples(&self, track: usize) -> &[SampleRef] {
+        self.idx.samples(track)
+    }
+
+    /// Reads the bytes of one sample.
+    pub fn read_sample(&self, s: &SampleRef) -> Result<Vec<u8>, KinetixError> {
+        self.idx.check_sample(s)?;
         let mut data = vec![0u8; s.size as usize];
         self.source.read_at(s.offset, &mut data)?;
         Ok(data)
@@ -155,9 +236,7 @@ impl<S: ReadAt> Mp4Reader<S> {
     pub fn into_source(self) -> S {
         self.source
     }
-}
 
-impl<S: ReadAt> Mp4Reader<S> {
     /// Like [`Demuxer::read_packet`], but also returns the sample's duration in
     /// its track's timescale ticks. A muxer needs it for the last sample of a
     /// track, whose duration cannot be inferred from a successor.
@@ -165,7 +244,7 @@ impl<S: ReadAt> Mp4Reader<S> {
         let Some(ti) = self.next_track() else {
             return Ok(None);
         };
-        let s = self.index[ti][self.cursor[ti]];
+        let s = self.idx.index[ti][self.cursor[ti]];
         let packet = self.take_packet(ti)?;
         Ok(Some((packet, s.duration)))
     }
@@ -174,11 +253,11 @@ impl<S: ReadAt> Mp4Reader<S> {
     /// different timescales compare exactly); ties go to the lower track.
     fn next_track(&self) -> Option<usize> {
         let mut best: Option<(usize, u128, u128)> = None;
-        for (ti, idx) in self.index.iter().enumerate() {
+        for (ti, idx) in self.idx.index.iter().enumerate() {
             let Some(s) = idx.get(self.cursor[ti]) else {
                 continue;
             };
-            let ts = u128::from(self.tracks[ti].timescale.max(1));
+            let ts = u128::from(self.idx.tracks[ti].timescale.max(1));
             let better = match best {
                 None => true,
                 Some((_, bdts, bts)) => u128::from(s.dts) * bts < bdts * ts,
@@ -191,10 +270,10 @@ impl<S: ReadAt> Mp4Reader<S> {
     }
 
     fn take_packet(&mut self, ti: usize) -> Result<Packet, KinetixError> {
-        let s = self.index[ti][self.cursor[ti]];
+        let s = self.idx.index[ti][self.cursor[ti]];
         let data = self.read_sample(&s)?;
         self.cursor[ti] += 1;
-        let time_base = (1, self.tracks[ti].timescale);
+        let time_base = (1, self.idx.tracks[ti].timescale);
         let dts = s.dts as i64;
         Ok(Packet {
             pts: Timestamp::new(dts + i64::from(s.cts_offset), time_base),
@@ -217,21 +296,13 @@ impl<S: ReadAt> Demuxer for Mp4Reader<S> {
 
     /// Seeks every track to the closest sync sample at or before `target_pts_ms`.
     fn seek(&mut self, target_pts_ms: i64) -> Result<(), KinetixError> {
-        for (ti, idx) in self.index.iter().enumerate() {
-            let ticks = (i128::from(target_pts_ms) * i128::from(self.tracks[ti].timescale) / 1000)
-                .clamp(0, i128::from(u64::MAX)) as u64;
-            let mut sample = idx.partition_point(|s| s.dts <= ticks).saturating_sub(1);
-            while sample > 0 && !idx[sample].is_key {
-                sample -= 1;
-            }
-            self.cursor[ti] = sample;
-        }
+        self.cursor = self.idx.locate(target_pts_ms);
         Ok(())
     }
 }
 
 /// Locates the `moov` payload: returns `(payload_offset, payload_len)`.
-fn find_moov<S: ReadAt>(source: &S, len: u64) -> Result<(u64, u64)> {
+async fn find_moov<S: AsyncReadAt>(source: &S, len: u64) -> Result<(u64, u64)> {
     let mut pos = 0u64;
     for _ in 0..MAX_TOP_LEVEL_BOXES {
         if pos + 8 > len {
@@ -239,7 +310,7 @@ fn find_moov<S: ReadAt>(source: &S, len: u64) -> Result<(u64, u64)> {
         }
         let mut hdr = [0u8; 16];
         let want = (len - pos).min(16) as usize;
-        source.read_at(pos, &mut hdr[..want])?;
+        source.read_at(pos, &mut hdr[..want]).await?;
         let size32 = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
         let kind = [hdr[4], hdr[5], hdr[6], hdr[7]];
         let (hlen, size) = match size32 {
@@ -275,7 +346,7 @@ fn find_moov<S: ReadAt>(source: &S, len: u64) -> Result<(u64, u64)> {
 }
 
 /// Locates every top-level `moof`: `(box_offset, header_len, box_size)`.
-fn scan_moofs<S: ReadAt>(source: &S, len: u64) -> Result<Vec<(u64, u64, u64)>> {
+async fn scan_moofs<S: AsyncReadAt>(source: &S, len: u64) -> Result<Vec<(u64, u64, u64)>> {
     let mut out = Vec::new();
     let mut pos = 0u64;
     for _ in 0..MAX_TOP_LEVEL_BOXES {
@@ -284,7 +355,7 @@ fn scan_moofs<S: ReadAt>(source: &S, len: u64) -> Result<Vec<(u64, u64, u64)>> {
         }
         let mut hdr = [0u8; 16];
         let want = (len - pos).min(16) as usize;
-        source.read_at(pos, &mut hdr[..want])?;
+        source.read_at(pos, &mut hdr[..want]).await?;
         let size32 = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
         let kind = [hdr[4], hdr[5], hdr[6], hdr[7]];
         let (hlen, size) = match size32 {
@@ -446,11 +517,11 @@ mod tests {
         let mut data = vec![0, 0, 0, 4];
         data.extend_from_slice(b"free");
         data.extend_from_slice(&[0; 8]);
-        assert!(find_moov(&data, data.len() as u64).is_err());
+        assert!(block_on(find_moov(&Blocking(&data), data.len() as u64)).is_err());
         // no moov at all
         let mut ok = vec![0, 0, 0, 16];
         ok.extend_from_slice(b"free");
         ok.extend_from_slice(&[0; 8]);
-        assert!(find_moov(&ok, ok.len() as u64).is_err());
+        assert!(block_on(find_moov(&Blocking(&ok), ok.len() as u64)).is_err());
     }
 }

@@ -1,5 +1,6 @@
 //! `tpt-kinetix` — command-line interface for the TPT Kinetix media engine.
 
+mod package;
 mod remux;
 
 use std::path::PathBuf;
@@ -48,6 +49,35 @@ enum Commands {
         /// Target fragment length in milliseconds (cut at the next video key frame).
         #[arg(long, default_value_t = 2000, requires = "fragmented")]
         fragment_ms: u32,
+    },
+    /// Package an MP4 into HLS (fMP4) and DASH: playlists, init and media segments.
+    ///
+    /// Reads only the MP4 index plus each segment's samples, so the input may
+    /// be a file or an `http(s)://` URL of any size. Tracks become separate
+    /// renditions (`master.m3u8`, `track-N.m3u8`, `init-N.mp4`, `seg-N-M.m4s`,
+    /// `manifest.mpd`).
+    Package {
+        /// Input MP4 (path or http(s) URL).
+        input: String,
+        /// Output directory.
+        output: PathBuf,
+        /// Target segment length in seconds (cut at the next video key frame).
+        #[arg(long, default_value_t = 6.0)]
+        segment_seconds: f64,
+    },
+    /// Serve an MP4 as HLS and DASH, packaged just in time (nothing is pre-processed).
+    Serve {
+        /// Input MP4 (path or http(s) URL).
+        input: String,
+        /// Port to listen on (0 picks a free one).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Target segment length in seconds.
+        #[arg(long, default_value_t = 6.0)]
+        segment_seconds: f64,
+        /// Listen on all interfaces instead of localhost only.
+        #[arg(long)]
+        public: bool,
     },
     /// Transcode a media file (VP9 MP4 → AV1).
     Transcode {
@@ -125,6 +155,17 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Probe { input } => probe(&input),
+        Commands::Package {
+            input,
+            output,
+            segment_seconds,
+        } => package::package(&input, &output, segment_seconds),
+        Commands::Serve {
+            input,
+            port,
+            segment_seconds,
+            public,
+        } => package::serve(&input, port, segment_seconds, public),
         Commands::Remux {
             input,
             output,

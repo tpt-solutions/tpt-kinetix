@@ -22,8 +22,8 @@ pub mod ts;
 pub mod wasm;
 
 pub use mkv::MkvDemuxer;
-pub use mp4::{Mp4Demuxer, Mp4Reader};
-pub use source::{CountingSource, ReadAt, SeekSource};
+pub use mp4::{Mp4Demuxer, Mp4Index, Mp4Reader};
+pub use source::{block_on, AsyncReadAt, Blocking, CountingSource, ReadAt, SeekSource};
 use tpt_kinetix_core::{error::KinetixError, packet::Packet};
 pub use ts::TsDemuxer;
 
