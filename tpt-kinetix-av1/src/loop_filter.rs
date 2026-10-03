@@ -1320,7 +1320,20 @@ fn deblock_plane(
                 let mut out = [0i32; DEBLOCK_TAPS_WINDOW];
                 let win = hi - lo;
                 let edge_off = edge - lo;
+                // `|p1 - p0| <= limit && |q1 - q0| <= limit` is necessary for
+                // `filterMask`, and a line it rejects is left exactly as it is, so
+                // such lines skip the gather / filter / write-back entirely.
+                let quick_limit = lp.limit << (fh.bit_depth as u32 - 8);
+                let quick_ok = edge >= 2 && edge + 1 < hi;
                 for y in y0..y0 + bh {
+                    if quick_ok {
+                        let b = y * stride + edge;
+                        let (p1, p0) = (plane[b - 2] as i32, plane[b - 1] as i32);
+                        let (q0, q1) = (plane[b] as i32, plane[b + 1] as i32);
+                        if (p1 - p0).abs() > quick_limit || (q1 - q0).abs() > quick_limit {
+                            continue;
+                        }
+                    }
                     for (k, x) in (lo..hi).enumerate() {
                         line[k] = plane[y * stride + x] as i32;
                     }
@@ -1514,7 +1527,23 @@ fn deblock_plane(
                 let mut out = [0i32; DEBLOCK_TAPS_WINDOW];
                 let win = hi - lo;
                 let edge_off = edge - lo;
+                // Same exact early-out as the vertical pass.
+                let quick_limit = lp.limit << (fh.bit_depth as u32 - 8);
+                let quick_ok = edge >= 2 && edge + 1 < hi;
                 for x in x0..x0 + bw {
+                    if quick_ok {
+                        let (p1, p0) = (
+                            plane[(edge - 2) * stride + x] as i32,
+                            plane[(edge - 1) * stride + x] as i32,
+                        );
+                        let (q0, q1) = (
+                            plane[edge * stride + x] as i32,
+                            plane[(edge + 1) * stride + x] as i32,
+                        );
+                        if (p1 - p0).abs() > quick_limit || (q1 - q0).abs() > quick_limit {
+                            continue;
+                        }
+                    }
                     for (k, y) in (lo..hi).enumerate() {
                         line[k] = plane[y * stride + x] as i32;
                     }
@@ -1680,8 +1709,200 @@ fn cdef_direction(
 }
 
 /// Apply the CDEF filter to a single 8×8 (luma) or 4×4 (chroma) block.
+///
+/// Dispatches to an AVX2 kernel for interior blocks (all taps inside `src`, so
+/// no per-tap bounds test) and otherwise runs [`cdef_filter_block_scalar`], which
+/// is the reference oracle the kernel is tested against.
 #[allow(clippy::too_many_arguments)]
 fn cdef_filter_block(
+    dst: &mut [Px],
+    dst_stride: usize,
+    src: &[Px],
+    src_stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    sub_x: usize,
+    sub_y: usize,
+    pri_str: i32,
+    sec_str: i32,
+    damping: i32,
+    dir: usize,
+    bit_depth: u32,
+) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::simd::level() == crate::simd::Level::Avx2
+        && (w == 8 || (w == 4 && h % 2 == 0))
+        && h > 0
+        && src_stride > 0
+        && y0 >= 2
+        && x0 >= 2
+        && y0 + h + 2 <= src.len().div_ceil(src_stride)
+        && x0 + w + 2 <= src_stride
+        && (y0 + h - 1) * dst_stride + x0 + w <= dst.len()
+        && dir < 8
+        && (0..32).contains(&damping)
+        && crate::dbg_env::var("KINETIX_AV1_DBG_CDEF67_44").is_err()
+    {
+        // SAFETY: AVX2 detected (`Level::Avx2`); every load/store the kernel
+        // performs lies inside `src`/`dst` by the bounds checked above.
+        unsafe {
+            cdef_filter_block_avx2(
+                dst, dst_stride, src, src_stride, x0, y0, w, h, pri_str, sec_str, damping, dir,
+                bit_depth,
+            );
+        }
+        return;
+    }
+    cdef_filter_block_scalar(
+        dst, dst_stride, src, src_stride, x0, y0, w, h, sub_x, sub_y, pri_str, sec_str, damping,
+        dir, bit_depth,
+    );
+}
+
+/// `constrain` (§7.15.3) on 8 lanes; `thr` is a non-zero threshold and `cnt`
+/// the matching `damping - FloorLog2(threshold)` (clamped at 0) shift.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn cdef_constrain_v(
+    diff: std::arch::x86_64::__m256i,
+    thr: std::arch::x86_64::__m256i,
+    cnt: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let a = _mm256_abs_epi32(diff);
+    let capped = _mm256_max_epi32(
+        _mm256_sub_epi32(thr, _mm256_srl_epi32(a, cnt)),
+        _mm256_setzero_si256(),
+    );
+    _mm256_sign_epi32(_mm256_min_epi32(a, capped), diff)
+}
+
+/// Load 8 samples as `i32` lanes: one row of 8 (`w == 8`) or two rows of 4
+/// (`w == 4`, the second row `stride` after the first).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn cdef_load(p: *const Px, stride: usize, w: usize) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let v = if w == 8 {
+        _mm_loadu_si128(p.cast())
+    } else {
+        _mm_unpacklo_epi64(
+            _mm_loadl_epi64(p.cast()),
+            _mm_loadl_epi64(p.add(stride).cast()),
+        )
+    };
+    _mm256_cvtepu16_epi32(v)
+}
+
+/// AVX2 form of [`cdef_filter_block_scalar`] for interior 8-wide (or two-row
+/// 4-wide) blocks. Bit-identical to it by construction and by proptest.
+///
+/// # Safety
+/// AVX2 must be available, `w` must be 8 (or 4 with even `h`), and every tap
+/// (`x0-2 ..= x0+w+1`, `y0-2 ..= y0+h+1`) and every output must lie inside
+/// `src` / `dst`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn cdef_filter_block_avx2(
+    dst: &mut [Px],
+    dst_stride: usize,
+    src: &[Px],
+    src_stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    pri_str: i32,
+    sec_str: i32,
+    damping: i32,
+    dir: usize,
+    bit_depth: u32,
+) {
+    use std::arch::x86_64::*;
+    let coeff_shift = bit_depth.saturating_sub(8);
+    let taps = ((pri_str >> coeff_shift) & 1) as usize;
+    let pri_on = pri_str != 0;
+    let sec_on = sec_str != 0;
+    let pri_thr = _mm256_set1_epi32(pri_str);
+    let sec_thr = _mm256_set1_epi32(sec_str);
+    let shift_for = |thr: i32| -> __m128i {
+        let sh = if thr == 0 {
+            0
+        } else {
+            (damping - floor_log2(thr as u32) as i32).max(0)
+        };
+        _mm_cvtsi32_si128(sh)
+    };
+    let pri_cnt = shift_for(pri_str);
+    let sec_cnt = shift_for(sec_str);
+    let sp = src.as_ptr();
+    let stride = src_stride as isize;
+    let rows_per_step = if w == 8 { 1 } else { 2 };
+    let mut i = 0usize;
+    while i < h {
+        let abs_y = (y0 + i) as isize;
+        let base = abs_y * stride + x0 as isize;
+        let x = cdef_load(sp.offset(base), src_stride, w);
+        let mut sum = _mm256_setzero_si256();
+        let mut mx = x;
+        let mut mn = x;
+        for k in 0..2 {
+            let ptap = _mm256_set1_epi32(CDEF_PRI_TAPS[taps][k]);
+            let stap = _mm256_set1_epi32(CDEF_SEC_TAPS[taps][k]);
+            for sign in [-1i32, 1] {
+                let dy = (CDEF_DIRECTIONS[dir][k][0] * sign) as isize;
+                let dx = (CDEF_DIRECTIONS[dir][k][1] * sign) as isize;
+                let p = cdef_load(sp.offset(base + dy * stride + dx), src_stride, w);
+                if pri_on {
+                    let c = cdef_constrain_v(_mm256_sub_epi32(p, x), pri_thr, pri_cnt);
+                    sum = _mm256_add_epi32(sum, _mm256_mullo_epi32(c, ptap));
+                }
+                mx = _mm256_max_epi32(mx, p);
+                mn = _mm256_min_epi32(mn, p);
+                for dir_off in [-2i32, 2] {
+                    let d = ((dir as i32 + dir_off) & 7) as usize;
+                    let dy2 = (CDEF_DIRECTIONS[d][k][0] * sign) as isize;
+                    let dx2 = (CDEF_DIRECTIONS[d][k][1] * sign) as isize;
+                    let sv = cdef_load(sp.offset(base + dy2 * stride + dx2), src_stride, w);
+                    if sec_on {
+                        let c = cdef_constrain_v(_mm256_sub_epi32(sv, x), sec_thr, sec_cnt);
+                        sum = _mm256_add_epi32(sum, _mm256_mullo_epi32(c, stap));
+                    }
+                    mx = _mm256_max_epi32(mx, sv);
+                    mn = _mm256_min_epi32(mn, sv);
+                }
+            }
+        }
+        // val = x + ((8 + sum - (sum < 0)) >> 4); out = clip3(val, min, max).
+        let adj = _mm256_add_epi32(
+            _mm256_add_epi32(sum, _mm256_set1_epi32(8)),
+            _mm256_srai_epi32(sum, 31),
+        );
+        let val = _mm256_add_epi32(x, _mm256_srai_epi32(adj, 4));
+        let out = _mm256_min_epi32(_mm256_max_epi32(val, mn), mx);
+        let packed = _mm256_packus_epi32(out, out);
+        let packed = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
+        let lo = _mm256_castsi256_si128(packed);
+        let dp = dst.as_mut_ptr().add((y0 + i) * dst_stride + x0);
+        if w == 8 {
+            _mm_storeu_si128(dp.cast(), lo);
+        } else {
+            _mm_storel_epi64(dp.cast(), lo);
+            _mm_storel_epi64(dp.add(dst_stride).cast(), _mm_srli_si128(lo, 8));
+        }
+        i += rows_per_step;
+    }
+}
+
+/// Reference (scalar) CDEF block filter: the oracle for the AVX2 kernel and the
+/// path for edge blocks, where taps outside `src` are skipped.
+#[allow(clippy::too_many_arguments)]
+fn cdef_filter_block_scalar(
     dst: &mut [Px],
     dst_stride: usize,
     src: &[Px],
@@ -1959,8 +2180,11 @@ fn wiener_filter_plane(
 /// `full_src`/`pw`/`ph`/`(ux0,uy0)`/`(uw,uh)`: see `wiener_filter_plane`'s
 /// doc comment — same full-plane-clamped-taps approach, for the same
 /// unit-local-clamping bug.
+/// The pre-optimisation per-cell-window implementation, kept as the oracle
+/// `prop_sgrproj_matches_reference` checks [`sgrproj_filter_plane`] against.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-fn sgrproj_filter_plane(
+fn sgrproj_filter_plane_reference(
     plane: &mut [Px],
     full_src: &[Px],
     pw: usize,
@@ -2130,6 +2354,247 @@ fn sgrproj_filter_plane(
                         b.trim().parse::<usize>().ok()?,
                     ))
                 });
+            if sgr_dbg == Some((ux0 + x, uy0 + y)) {
+                eprintln!(
+                    "SGR n={} ({},{}) sv={sv} t0={} t1={} xqd={xqd:?} w1={w1} correction={correction} set={set} uw={uw} uh={uh} ux0={ux0} uy0={uy0} seg=(uy0={uy0})",
+                    crate::debug_frame_seq::current(),
+                    ux0 + x,
+                    uy0 + y,
+                    t0[y * uw + x],
+                    t1[y * uw + x]
+                );
+            }
+            plane[(uy0 + y) * pw + (ux0 + x)] = (sv + correction).clamp(0, pix_max) as Px;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sgrproj_filter_plane(
+    plane: &mut [Px],
+    full_src: &[Px],
+    pw: usize,
+    ph: usize,
+    ux0: usize,
+    uy0: usize,
+    uw: usize,
+    uh: usize,
+    set: usize,
+    xqd: [i32; 2],
+    pix_max: i32,
+) {
+    // Margin around the unit: the A/B halo (`pad`, 1) plus the widest box radius
+    // (2). Every source sample either pass can read lives in this one
+    // edge-clamped window, so the clamp happens once per sample rather than once
+    // per tap of every cell's box.
+    const WIN_MARGIN: usize = 3;
+    let ww = uw + 2 * WIN_MARGIN;
+    let wh = uh + 2 * WIN_MARGIN;
+    let mut win = vec![0i32; ww * wh];
+    for (j, wrow) in win.chunks_exact_mut(ww).enumerate() {
+        let yi =
+            (uy0 as isize + j as isize - WIN_MARGIN as isize).clamp(0, ph as isize - 1) as usize;
+        let row = &full_src[yi * pw..yi * pw + pw];
+        let x_first = ux0 as isize - WIN_MARGIN as isize;
+        if x_first >= 0 && x_first as usize + ww <= pw {
+            for (d, &v) in wrow
+                .iter_mut()
+                .zip(&row[x_first as usize..x_first as usize + ww])
+            {
+                *d = v as i32;
+            }
+        } else {
+            for (i, d) in wrow.iter_mut().enumerate() {
+                *d = row[(x_first + i as isize).clamp(0, pw as isize - 1) as usize] as i32;
+            }
+        }
+    }
+    let src_at = |x: isize, y: isize| -> i32 {
+        // `x`/`y` are unit-relative and within the window margin.
+        win[(y + WIN_MARGIN as isize) as usize * ww + (x + WIN_MARGIN as isize) as usize]
+    };
+    // a_tab/b_tab need a 1-cell (3×3 pass) / 1-cell (5×5 pass, `yn = y+1`
+    // only looks forward) halo around the unit; padding by 1 on every side
+    // covers both passes uniformly.
+    let bd8 = 32 - (pix_max as u32).leading_zeros() - 8;
+    let pad = 1isize;
+    let aw = uw + 2 * pad as usize;
+    let ah = uh + 2 * pad as usize;
+    let a_idx = |x: isize, y: isize| -> usize { ((y + pad) as usize) * aw + (x + pad) as usize };
+
+    let compute_pass =
+        |r: i32, s: u32, n: i32, one_by_n: i32, pair_rows: bool, t: &mut Vec<i32>| {
+            // Build A (alpha*mean) and B (alpha) tables over the unit plus a
+            // 1-cell halo, reading real neighbouring-unit pixels (clamped
+            // only at the true plane edge) for the guided-filter's own
+            // radius-r window.
+            let mut a_tab = vec![0i32; aw * ah];
+            let mut b_tab = vec![0i32; aw * ah];
+            // Separable box sums over the window: a horizontal (2r+1)-tap pass
+            // per window row, then a vertical one per cell row. Integer adds, so
+            // identical to summing each cell's (2r+1)^2 window directly; each
+            // inner loop runs over a contiguous row and vectorises.
+            let r = r as usize;
+            let off = WIN_MARGIN - pad as usize; // window column of cell column 0, minus r
+            let mut hs = vec![0i32; aw * wh];
+            let mut hq = vec![0i32; aw * wh];
+            for j in 0..wh {
+                let wrow = &win[j * ww..(j + 1) * ww];
+                let hs_row = &mut hs[j * aw..(j + 1) * aw];
+                let hq_row = &mut hq[j * aw..(j + 1) * aw];
+                for dx in 0..=2 * r {
+                    let seg = &wrow[off - r + dx..off - r + dx + aw];
+                    for ((a, q), &v) in hs_row.iter_mut().zip(hq_row.iter_mut()).zip(seg) {
+                        *a += v;
+                        *q += v * v;
+                    }
+                }
+            }
+            let mut box_sum = vec![0i32; aw * ah];
+            let mut box_sq = vec![0i32; aw * ah];
+            for cy in 0..ah {
+                let sum_row = &mut box_sum[cy * aw..(cy + 1) * aw];
+                let sq_row = &mut box_sq[cy * aw..(cy + 1) * aw];
+                for dy in 0..=2 * r {
+                    let j = off - r + cy + dy;
+                    let hs_row = &hs[j * aw..(j + 1) * aw];
+                    let hq_row = &hq[j * aw..(j + 1) * aw];
+                    for ((a, q), (&hv, &hqv)) in sum_row
+                        .iter_mut()
+                        .zip(sq_row.iter_mut())
+                        .zip(hs_row.iter().zip(hq_row))
+                    {
+                        *a += hv;
+                        *q += hqv;
+                    }
+                }
+            }
+            for ly in -pad..(uh as isize + pad) {
+                for lx in -pad..(uw as isize + pad) {
+                    let ci = a_idx(lx, ly);
+                    let (sum, sum_sq) = (box_sum[ci], box_sq[ci] as i64);
+                    // dav1d `selfguided_filter`: the variance is taken on the
+                    // sums scaled back to 8-bit precision.
+                    let a8 = (sum_sq + ((1i64 << (2 * bd8)) >> 1)) >> (2 * bd8);
+                    let b8 = ((sum as i64) + ((1i64 << bd8) >> 1)) >> bd8;
+                    let p_val = ((n as i64 * a8 - b8 * b8).max(0)) as u64;
+                    let z = ((p_val * s as u64 + (1 << 19)) >> 20).min(255) as usize;
+                    let alpha = SGR_X_BY_X[z] as i32;
+                    let ai = a_idx(lx, ly);
+                    // dav1d does this product in unsigned 32-bit; at 12-bit it reaches
+                    // ~4.28e9 (255 * 25*4095 * 164), which overflows i32.
+                    a_tab[ai] =
+                        ((alpha as i64 * sum as i64 * one_by_n as i64 + (1 << 11)) >> 12) as i32;
+                    b_tab[ai] = alpha;
+                }
+            }
+            let a = |x: isize, y: isize| a_tab[a_idx(x, y)];
+            let b = |x: isize, y: isize| b_tab[a_idx(x, y)];
+            let s_at = |x: isize, y: isize| src_at(x, y);
+
+            if pair_rows {
+                // 5×5 pass. Even output rows use §7.17.4's "six neighbors"
+                // pattern over A/B rows **(y-1, y+1)** — NOT (y, y+1): dav1d's
+                // `sgr_finish_filter2` reads `A_ptrs[0]`/`A_ptrs[1]`, which
+                // hold the box-projections of the rows bracketing the even
+                // output row (the odd rows carry their own row's projection).
+                // An earlier version sampled (y, y+1) here, which made every
+                // even row of every 5×5 SGR unit (e.g. testsrc luma's set-14
+                // units) compute a slightly wrong projection — visible as
+                // scattered ±1 LR deltas vs dav1d on smooth gradients.
+                let mut y = 0isize;
+                while y < uh as isize {
+                    let ya = y - 1;
+                    let yb = (y + 1).min(uh as isize);
+                    for x in 0..uw as isize {
+                        let xl = x - 1;
+                        let xr = x + 1;
+                        let a_sum = (a(x, ya) + a(x, yb)) * 6
+                            + (a(xl, ya) + a(xr, ya) + a(xl, yb) + a(xr, yb)) * 5;
+                        let b_sum = (b(x, ya) + b(x, yb)) * 6
+                            + (b(xl, ya) + b(xr, ya) + b(xl, yb) + b(xr, yb)) * 5;
+                        t[y as usize * uw + x as usize] =
+                            (a_sum - b_sum * s_at(x, y) + (1 << 8)) >> 9;
+                    }
+                    if y + 1 < uh as isize {
+                        let y1 = y + 1;
+                        for x in 0..uw as isize {
+                            let xl = x - 1;
+                            let xr = x + 1;
+                            let a_sum = a(x, y1) * 6 + (a(xl, y1) + a(xr, y1)) * 5;
+                            let b_sum = b(x, y1) * 6 + (b(xl, y1) + b(xr, y1)) * 5;
+                            t[y1 as usize * uw + x as usize] =
+                                (a_sum - b_sum * s_at(x, y1) + (1 << 7)) >> 8;
+                        }
+                    }
+                    y += 2;
+                }
+            } else {
+                // 3×3 pass: EIGHT_NEIGHBORS pattern per row.
+                for y in 0..uh as isize {
+                    let ya = y - 1;
+                    let yb = y + 1;
+                    for x in 0..uw as isize {
+                        let xl = x - 1;
+                        let xr = x + 1;
+                        let a_sum = (a(x, y) + a(xl, y) + a(xr, y) + a(x, ya) + a(x, yb)) * 4
+                            + (a(xl, ya) + a(xr, ya) + a(xl, yb) + a(xr, yb)) * 3;
+                        let b_sum = (b(x, y) + b(xl, y) + b(xr, y) + b(x, ya) + b(x, yb)) * 4
+                            + (b(xl, ya) + b(xr, ya) + b(xl, yb) + b(xr, yb)) * 3;
+                        t[y as usize * uw + x as usize] =
+                            (a_sum - b_sum * s_at(x, y) + (1 << 8)) >> 9;
+                    }
+                }
+            }
+        };
+
+    let r0 = SGR_PARAMS[set][0];
+    let r1 = SGR_PARAMS[set][2];
+    let mut t0 = vec![0i32; uw * uh];
+    let mut t1 = vec![0i32; uw * uh];
+
+    if r0 > 0 {
+        let n0 = (2 * r0 + 1) * (2 * r0 + 1);
+        let one_by_n0 = (4096 + n0 / 2) / n0;
+        compute_pass(r0, SGR_S[set][0], n0, one_by_n0, true, &mut t0);
+    }
+    if r1 > 0 {
+        let n1 = (2 * r1 + 1) * (2 * r1 + 1);
+        let one_by_n1 = (4096 + n1 / 2) / n1;
+        compute_pass(r1, SGR_S[set][1], n1, one_by_n1, false, &mut t1);
+    }
+
+    // §7.17.4's projection weights: `w1` is *not* `xqd[1]` directly — it's
+    // `(1 << SGRPROJ_PRJ_BITS) - xqd[0] - xqd[1]`, cross-checked against dav1d's
+    // `lr_apply_tmpl.c`
+    // (`params.sgr.w0 = weights[0]; params.sgr.w1 = 128 - (weights[0] +
+    // weights[1]);`, applied unconditionally for every SgrProj unit
+    // regardless of which pass(es) are active). A previous version of this
+    // function used `xqd[1]` unweighted, which is only coincidentally
+    // correct when the 3×3 pass itself is disabled (`r1 == 0`, where
+    // `read_lr_unit` already pre-computes `xqd[1] = (1<<7) - xqd[0]` at
+    // parse time specifically so it doesn't need this transform) — for
+    // every unit that actually *uses* the 3×3 pass (`r1 != 0`, the common
+    // case), the raw decoded `xqd[1]` is roughly `SGRPROJ_PRJ_BITS`-scale
+    // too small on its own (found via a `mandelbrot` unit with `xqd=[0,2]`:
+    // applying `2` as the weight rounds every single pixel's correction to
+    // 0 after the `>> 11` — restoration became a complete no-op — while the
+    // correct weight `128 - 0 - 2 = 126` produces the small ±1 corrections
+    // dav1d's own output actually has).
+    let w1 = (1 << SGRPROJ_PRJ_BITS) - xqd[0] - xqd[1];
+    let sgr_dbg = crate::dbg_env::var("KINETIX_AV1_DBG_SGRPX")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once(',')?;
+            Some((
+                a.trim().parse::<usize>().ok()?,
+                b.trim().parse::<usize>().ok()?,
+            ))
+        });
+    for y in 0..uh {
+        for x in 0..uw {
+            let sv = src_at(x as isize, y as isize);
+            let correction = (xqd[0] * t0[y * uw + x] + w1 * t1[y * uw + x] + (1 << 10)) >> 11;
             if sgr_dbg == Some((ux0 + x, uy0 + y)) {
                 eprintln!(
                     "SGR n={} ({},{}) sv={sv} t0={} t1={} xqd={xqd:?} w1={w1} correction={correction} set={set} uw={uw} uh={uh} ux0={ux0} uy0={uy0} seg=(uy0={uy0})",
@@ -3745,6 +4210,102 @@ mod tests {
             cdef_plane_luma(&mut plane, &src, 8, 8, 0, 0, 7, 0, 0, 8, 8, &[false], 1, 8)
         });
         assert_eq!(plane, orig, "zero-strength CDEF is a no-op");
+    }
+
+    mod sgr_equiv {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// The windowed/separable SgrProj equals the original per-cell
+            /// implementation for every parameter set, unit placement (including
+            /// units touching/overhanging plane edges) and bit depth.
+            #[test]
+            fn prop_sgrproj_matches_reference(
+                pw in 8usize..40,
+                ph in 8usize..40,
+                seed in any::<u64>(),
+                ux0 in 0usize..24,
+                uy0 in 0usize..24,
+                uw in 1usize..24,
+                uh in 1usize..24,
+                set in 0usize..16,
+                x0 in -96i32..32,
+                x1 in -32i32..96,
+                ten_bit in any::<bool>(),
+            ) {
+                prop_assume!(ux0 + uw <= pw && uy0 + uh <= ph);
+                let bd = if ten_bit { 10 } else { 8 };
+                let pix_max = (1i32 << bd) - 1;
+                let mut st = seed | 1;
+                let src: Vec<Px> = (0..pw * ph)
+                    .map(|_| {
+                        st ^= st << 13;
+                        st ^= st >> 7;
+                        st ^= st << 17;
+                        (if st & 4 == 0 { st % (pix_max as u64 + 1) } else { 90 + (st & 15) }) as Px
+                    })
+                    .collect();
+                let xqd = [x0, x1];
+                let mut want = src.clone();
+                let mut got = src.clone();
+                sgrproj_filter_plane_reference(&mut want, &src, pw, ph, ux0, uy0, uw, uh, set, xqd, pix_max);
+                sgrproj_filter_plane(&mut got, &src, pw, ph, ux0, uy0, uw, uh, set, xqd, pix_max);
+                prop_assert_eq!(got, want);
+            }
+        }
+    }
+
+    mod cdef_simd {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// The dispatched (AVX2) CDEF block filter equals the scalar oracle
+            /// for interior and edge blocks, both block widths, and 8/10-bit.
+            #[test]
+            fn prop_cdef_filter_block_matches_scalar(
+                stride in 14usize..40,
+                rows in 14usize..40,
+                seed in any::<u64>(),
+                wide in any::<bool>(),
+                tall in any::<bool>(),
+                x0 in 0usize..30,
+                y0 in 0usize..30,
+                pri in 0i32..64,
+                sec in prop::sample::select(vec![0i32, 1, 2, 4]),
+                damping in 2i32..9,
+                dir in 0usize..8,
+                ten_bit in any::<bool>(),
+            ) {
+                let bit_depth = if ten_bit { 10 } else { 8 };
+                let max = (1u64 << bit_depth) - 1;
+                let mut state = seed | 1;
+                let src: Vec<Px> = (0..stride * rows)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        // Mix smooth and noisy content so constrain/min/max all trigger.
+                        (if state & 8 == 0 { state % (max + 1) } else { 100 + (state & 7) }) as Px
+                    })
+                    .collect();
+                let w = if wide { 8 } else { 4 };
+                let h = if tall { 8 } else { 4 };
+                prop_assume!(x0 + w <= stride && y0 + h <= rows);
+                let mut want = vec![7 as Px; stride * rows];
+                let mut got = want.clone();
+                cdef_filter_block_scalar(
+                    &mut want, stride, &src, stride, x0, y0, w, h, 0, 0, pri, sec, damping, dir,
+                    bit_depth,
+                );
+                cdef_filter_block(
+                    &mut got, stride, &src, stride, x0, y0, w, h, 0, 0, pri, sec, damping, dir,
+                    bit_depth,
+                );
+                prop_assert_eq!(got, want);
+            }
+        }
     }
 
     #[test]
