@@ -124,9 +124,11 @@ fn round_trips_streams_packets_and_timing() {
     assert_eq!(streams[1].codec, CodecId::Aac);
     assert_eq!((streams[1].channels, streams[1].sample_rate), (2, 48_000));
     assert_eq!(streams[1].extradata, [0x11, 0x90]);
-    // Edit lists survive: AAC priming is kept, video gets its composition delay.
+    // Edit lists survive: AAC priming is kept.
     assert_eq!(streams[1].edit_media_time, Some(1024));
-    assert_eq!(streams[0].edit_media_time, Some(2000));
+    // The video had no edit list (None), so none is invented: its composition
+    // delay stays in the timestamps (pts = dts + 2000 for the first frame).
+    assert_eq!(streams[0].edit_media_time, None);
     assert_same_packets(&packets, &got);
 }
 
@@ -493,4 +495,262 @@ fn remuxed_files_decode_in_ffmpeg_and_keep_every_packet() {
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(checked > 0, "no ffmpeg encoder was usable");
+}
+
+// ---------------------------------------------------------------------------
+// Fragmented MP4
+// ---------------------------------------------------------------------------
+
+use tpt_kinetix_mux::FragmentWriter;
+
+/// init segment + fragments cut every `every` video packets.
+fn fragmented(streams: &[StreamInfo], packets: &[Packet], every: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut w = FragmentWriter::new(streams).unwrap();
+    let init = w.init_segment();
+    let mut frags = Vec::new();
+    let mut video_seen = 0usize;
+    for p in packets {
+        if p.stream_index == 0 {
+            if video_seen > 0 && video_seen % every == 0 {
+                frags.extend(w.flush(false).unwrap());
+            }
+            video_seen += 1;
+        }
+        w.push(p, None).unwrap();
+    }
+    frags.extend(w.flush(true).unwrap());
+    assert!(w.flush(true).unwrap().is_none(), "nothing left to flush");
+    (init, frags)
+}
+
+#[test]
+fn fragments_round_trip_through_the_reader() {
+    let packets = sample_packets();
+    let streams = [video_stream(), audio_stream()];
+    let (init, frags) = fragmented(&streams, &packets, 10);
+    assert!(
+        frags.len() >= 5,
+        "expected several fragments, got {}",
+        frags.len()
+    );
+
+    // init = ftyp + moov(mvex); every fragment = moof + mdat.
+    assert_eq!(top_level(&init), ["ftyp", "moov"]);
+    for f in &frags {
+        assert_eq!(top_level(f), ["moof", "mdat"]);
+    }
+    // Sequence numbers count up from 1.
+    for (i, f) in frags.iter().enumerate() {
+        let at = f.windows(4).position(|w| w == b"mfhd").unwrap() + 8;
+        assert_eq!(
+            u32::from_be_bytes(f[at..at + 4].try_into().unwrap()),
+            i as u32 + 1
+        );
+    }
+
+    let file = [init, frags.concat()].concat();
+    let (info, got) = read_all(file);
+    assert_eq!(info.len(), 2);
+    assert_eq!(
+        (info[0].codec, info[1].codec),
+        (CodecId::H264, CodecId::Aac)
+    );
+    assert_eq!(info[0].extradata, video_stream().extradata);
+    assert_eq!(info[1].edit_media_time, Some(1024)); // priming kept in the init segment
+    assert_same_packets(&packets, &got);
+    // Derived duration: 60 frames of 1000/30000 s = 2 s.
+    assert!((info[0].duration_seconds().unwrap() - 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn fragment_boundaries_do_not_change_the_result() {
+    let packets = sample_packets();
+    let streams = [video_stream(), audio_stream()];
+    let baseline = {
+        let (init, frags) = fragmented(&streams, &packets, 1000);
+        read_all([init, frags.concat()].concat()).1
+    };
+    for every in [1usize, 2, 7, 15, 59] {
+        let (init, frags) = fragmented(&streams, &packets, every);
+        let got = read_all([init, frags.concat()].concat()).1;
+        assert_same_packets(&baseline, &got);
+    }
+}
+
+#[test]
+fn unresolved_last_samples_carry_into_the_next_fragment() {
+    let mut w = FragmentWriter::new(&[video_stream()]).unwrap();
+    for i in 0..4i64 {
+        w.push(
+            &pkt(0, 30_000, i * 1000, 0, i == 0, vec![i as u8; 10]),
+            None,
+        )
+        .unwrap();
+    }
+    // The 4th sample's duration is still unknown, so it is held back.
+    assert_eq!(w.buffered(0), 4);
+    let first = w.flush(false).unwrap().unwrap();
+    assert_eq!(w.buffered(0), 1);
+    w.push(&pkt(0, 30_000, 4000, 0, false, vec![9; 10]), None)
+        .unwrap();
+    let second = w.flush(true).unwrap().unwrap();
+    let (_, got) = read_all([w.init_segment(), first, second].concat());
+    assert_eq!(got.len(), 5);
+    assert_eq!(
+        got.iter().map(|p| p.dts.value).collect::<Vec<_>>(),
+        [0, 1000, 2000, 3000, 4000]
+    );
+}
+
+#[test]
+fn fragment_writer_rejects_bad_input() {
+    assert!(FragmentWriter::new(&[]).is_err());
+    assert!(FragmentWriter::new(&[StreamInfo::new(0, CodecId::H264, 1000)]).is_err()); // no avcC
+    let mut w = FragmentWriter::new(&[video_stream()]).unwrap();
+    assert!(w.push(&pkt(5, 30_000, 0, 0, true, vec![1]), None).is_err());
+    w.push(&pkt(0, 30_000, 2000, 0, true, vec![1]), None)
+        .unwrap();
+    assert!(w
+        .push(&pkt(0, 30_000, 1000, 0, false, vec![1]), None)
+        .is_err());
+    // The only buffered sample has no known duration yet, so it is held back.
+    assert!(w.flush(false).unwrap().is_none());
+    assert_eq!(w.buffered(0), 1);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(80))]
+
+    /// Fragmenting at arbitrary points and reading back reproduces every packet.
+    #[test]
+    fn random_fragmentation_round_trips(n in 1usize..80, seed in any::<u64>(), every in 1usize..20) {
+        let mut st = seed | 1;
+        let mut next = || { st ^= st << 13; st ^= st >> 7; st ^= st << 17; st };
+        let mut packets = Vec::new();
+        let (mut vd, mut ad) = (0i64, 0i64);
+        for i in 0..n {
+            let size = 1 + (next() % 2000) as usize;
+            packets.push(pkt(0, 30_000, vd, (next() % 3) as i64 * 700, i % 10 == 0, vec![(next() & 0xFF) as u8; size]));
+            vd += 400 + (next() % 800) as i64;
+            for _ in 0..(next() % 3) {
+                packets.push(pkt(1, 48_000, ad, 0, true, vec![(next() & 0xFF) as u8; 1 + (next() % 300) as usize]));
+                ad += 1024;
+            }
+        }
+        let streams = [video_stream(), audio_stream()];
+        let (init, frags) = fragmented(&streams, &packets, every);
+        let (_, got) = read_all([init, frags.concat()].concat());
+        for s in 0..2u32 {
+            let (w, g) = (per_stream(&packets, s), per_stream(&got, s));
+            prop_assert_eq!(w.len(), g.len());
+            for (a, b) in w.iter().zip(&g) {
+                prop_assert_eq!(&a.data, &b.data);
+                prop_assert_eq!((a.pts.value, a.dts.value, a.is_key_frame), (b.pts.value, b.dts.value, b.is_key_frame));
+            }
+        }
+    }
+}
+
+/// ffmpeg decodes fragmented output cleanly and sees every packet.
+#[test]
+fn fragmented_output_decodes_in_ffmpeg() {
+    if !have("ffmpeg") || !have("ffprobe") {
+        eprintln!("skipping: ffmpeg/ffprobe not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_frag_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src.mp4");
+    let ok = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25",
+            "-t",
+            "3",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "3",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-c:v", "libx264", "-bf", "2", "-g", "25", "-c:a", "aac"])
+        .arg(&src)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: libx264/aac unavailable");
+        return;
+    }
+    let mut reader = Mp4Reader::open(std::fs::File::open(&src).unwrap()).unwrap();
+    let streams = reader.streams();
+    let mut w = FragmentWriter::new(&streams).unwrap();
+    let mut out = w.init_segment();
+    let mut count = 0usize;
+    while let Some((p, d)) = reader.read_packet_timed().unwrap() {
+        if p.stream_index == 0 && p.is_key_frame && count > 0 {
+            out.extend(w.flush(false).unwrap().unwrap());
+        }
+        count += 1;
+        w.push(&p, Some(d)).unwrap();
+    }
+    out.extend(w.flush(true).unwrap().unwrap());
+    let dst = dir.join("frag.mp4");
+    std::fs::write(&dst, &out).unwrap();
+
+    let decode = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&dst)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        decode.stderr.is_empty(),
+        "ffmpeg: {}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
+    let (a, b) = (ffprobe_packets(&src), ffprobe_packets(&dst));
+    assert_eq!(a.len(), b.len(), "packet counts differ");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// Mutated or truncated *fragmented* files never panic, hang or over-allocate:
+    /// the `moof`/`traf`/`trun` parser reads attacker-controlled counts and offsets.
+    #[test]
+    fn reader_never_panics_on_mutated_fragmented_files(
+        flips in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..24),
+        truncate in prop::option::of(any::<prop::sample::Index>()),
+    ) {
+        let (init, frags) = fragmented(&[video_stream(), audio_stream()], &sample_packets(), 9);
+        let mut file = [init, frags.concat()].concat();
+        for (i, b) in &flips {
+            let at = i.index(file.len());
+            file[at] = *b;
+        }
+        if let Some(t) = truncate {
+            file.truncate(t.index(file.len()).max(1));
+        }
+        if let Ok(mut r) = Mp4Reader::open(file) {
+            for _ in 0..100_000 {
+                match r.read_packet() {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            let _ = r.seek(500);
+        }
+    }
 }

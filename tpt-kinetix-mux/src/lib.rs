@@ -38,9 +38,11 @@
 
 pub mod entries;
 pub mod faststart;
+pub mod fragmented;
 pub mod mp4;
 pub mod writer;
 
 pub use faststart::{faststart, FaststartReport};
+pub use fragmented::FragmentWriter;
 pub use mp4::{Mp4Muxer, Mp4MuxerConfig, MuxError};
 pub use writer::{Mp4Writer, WriterOptions};

@@ -26,6 +26,7 @@ use anyhow::{anyhow, bail, Result};
 use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
 
 use super::container::{parse_moov_payload, Mp4Track};
+use super::fragment::{is_fragmented, parse_moof, parse_trex_list};
 use crate::{source::ReadAt, Demuxer};
 
 /// Largest `moov` payload [`Mp4Reader`] will read (256 MiB).
@@ -34,6 +35,8 @@ pub const MAX_MOOV_BYTES: u64 = 256 << 20;
 pub const MAX_SAMPLES_PER_TRACK: usize = 16 << 20;
 /// Largest number of top-level boxes scanned while looking for `moov`.
 const MAX_TOP_LEVEL_BOXES: usize = 1 << 20;
+/// Largest `moof` accepted (64 MiB).
+const MAX_MOOF_BYTES: u64 = 64 << 20;
 
 /// Where one sample lives and when it plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +72,23 @@ impl<S: ReadAt> Mp4Reader<S> {
         let mut payload = vec![0u8; payload_len as usize];
         source.read_at(payload_off, &mut payload)?;
         let tracks = parse_moov_payload(&payload);
+        let fragmented = is_fragmented(&payload);
+        let trex = parse_trex_list(&payload);
         drop(payload);
-        let index = tracks.iter().map(build_index).collect::<Result<Vec<_>>>()?;
+        let mut index = tracks.iter().map(build_index).collect::<Result<Vec<_>>>()?;
+        if fragmented {
+            // Samples live in `moof` fragments: index each one (headers and the
+            // small `moof` boxes only; `mdat` payloads are never read here).
+            let mut next_dts: Vec<u64> = index
+                .iter()
+                .map(|v| v.last().map_or(0, |s| s.dts + u64::from(s.duration)))
+                .collect();
+            for (start, hlen, size) in scan_moofs(&source, len)? {
+                let mut moof = vec![0u8; (size - hlen) as usize];
+                source.read_at(start + hlen, &mut moof)?;
+                parse_moof(start, &moof, &trex, &tracks, &mut next_dts, &mut index)?;
+            }
+        }
         let cursor = vec![0; tracks.len()];
         Ok(Self {
             source,
@@ -92,8 +110,22 @@ impl<S: ReadAt> Mp4Reader<S> {
         self.tracks
             .iter()
             .enumerate()
-            .map(|(i, t)| t.stream_info(i as u32))
+            .map(|(i, t)| {
+                let mut s = t.stream_info(i as u32);
+                // Fragmented files carry no `mdhd` duration: derive it.
+                if s.duration == 0 {
+                    if let Some(last) = self.index[i].last() {
+                        s.duration = last.dts + u64::from(last.duration);
+                    }
+                }
+                s
+            })
             .collect()
+    }
+
+    /// Number of samples in track `track` (counts fragment samples too).
+    pub fn sample_count(&self, track: usize) -> usize {
+        self.index.get(track).map_or(0, Vec::len)
     }
 
     /// The flat sample index of track `track` (in decode order).
@@ -240,6 +272,46 @@ fn find_moov<S: ReadAt>(source: &S, len: u64) -> Result<(u64, u64)> {
             .ok_or_else(|| anyhow!("box size overflow at offset {pos}"))?;
     }
     Err(anyhow!("no moov box found in MP4 data"))
+}
+
+/// Locates every top-level `moof`: `(box_offset, header_len, box_size)`.
+fn scan_moofs<S: ReadAt>(source: &S, len: u64) -> Result<Vec<(u64, u64, u64)>> {
+    let mut out = Vec::new();
+    let mut pos = 0u64;
+    for _ in 0..MAX_TOP_LEVEL_BOXES {
+        if pos + 8 > len {
+            break;
+        }
+        let mut hdr = [0u8; 16];
+        let want = (len - pos).min(16) as usize;
+        source.read_at(pos, &mut hdr[..want])?;
+        let size32 = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        let kind = [hdr[4], hdr[5], hdr[6], hdr[7]];
+        let (hlen, size) = match size32 {
+            1 => {
+                if want < 16 {
+                    bail!("truncated 64-bit box header at offset {pos}");
+                }
+                (16u64, u64::from_be_bytes(hdr[8..16].try_into().unwrap()))
+            }
+            0 => (8, len - pos),
+            n => (8, u64::from(n)),
+        };
+        if size < hlen || size > len - pos {
+            bail!("invalid box size {size} at offset {pos}");
+        }
+        if &kind == b"moof" {
+            if size - hlen > MAX_MOOF_BYTES {
+                bail!(
+                    "moof of {} bytes exceeds the {MAX_MOOF_BYTES}-byte limit",
+                    size - hlen
+                );
+            }
+            out.push((pos, hlen, size));
+        }
+        pos += size;
+    }
+    Ok(out)
 }
 
 /// Run-length iterator over `(count, value)` pairs, yielding `default` once the

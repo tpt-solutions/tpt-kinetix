@@ -95,7 +95,7 @@ impl Mp4Track {
 ///
 /// Yields `(box_type, payload_slice)` pairs.  Skips boxes whose declared size
 /// is zero or that would reach past the end of `data`.
-fn walk_boxes(mut data: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> + '_ {
+pub(crate) fn walk_boxes(mut data: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> + '_ {
     std::iter::from_fn(move || {
         if data.is_empty() {
             return None;

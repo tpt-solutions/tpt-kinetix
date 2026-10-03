@@ -49,12 +49,12 @@ Known/qualitative, to be measured before claiming:
 
 ## Milestones
 
-- [~] **M1 — Streaming demux.** *(MP4 done 2026-10-04: `ReadAt` source trait + `Mp4Reader`; CLI `probe` no longer loads the file; TS and MKV still take a whole buffer; HTTP-range source + fragmented MP4 still open.)* `Demuxer` over `Read + Seek` (and an async/ranged source
+- [~] **M1 — Streaming demux.** *(MP4 done 2026-10-04: `ReadAt` + `Mp4Reader` (progressive and fragmented), HTTP-range source, CLI `probe`/`remux` never load the file; TS and MKV still take a whole buffer.)* `Demuxer` over `Read + Seek` (and an async/ranged source
   trait); MP4 reads `moov` without loading `mdat`; samples are read on demand. Replace every
   `fs::read` in CLI/examples. Test with a >RAM synthetic sparse file and an HTTP-range mock.
 - [~] **M2 — Codec-agnostic tracks.** *(MP4 done 2026-10-04: `core::StreamInfo`, `Mp4Reader::streams()`; MKV and TS still to do.)* Packets carry `codec id + extradata` for H.264, AV1,
   VP9, **AAC/Opus/MP3 as opaque passthrough** (no decoder). Demux MP4/MKV/TS multi-track.
-- [~] **M3 — Streaming muxer.** *(progressive multi-track MP4 + faststart + `remux` done 2026-10-04; fragmented MP4/CMAF still open.)* `Write`-based MP4 muxer: multi-track, faststart, edit lists,
+- [x] **M3 — Streaming muxer.** *(done 2026-10-04: progressive multi-track MP4, faststart, fragmented MP4/CMAF writer, `remux`; see "M3 progress" below. Non-MP4 outputs and metadata copy remain.)* `Write`-based MP4 muxer: multi-track, faststart, edit lists,
   and **fragmented MP4 / CMAF**. Remux (`tpt-kinetix remux in out`) round-trips vs
   `ffprobe`/`ffmpeg -c copy` byte-for-semantics.
 - [ ] **M4 — Packaging.** HLS with fMP4 segments + DASH (on top of M3), live sliding window,
@@ -138,3 +138,21 @@ Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range se
   differentiator, as expected.
 * Not yet: fragmented MP4 / CMAF (needed for M4), MKV/TS/WebM output, `udta`/metadata/chapters/subtitles copy,
   non-MP4 inputs for `remux`, `Write`-only (non-seekable) progressive output.
+
+### Fragmented MP4 (2026-10-04)
+
+* **Input:** `Mp4Reader` now indexes `moof`/`traf`/`trun` (with `trex` defaults, `tfhd` base-offset rules incl.
+  default-base-is-moof, `tfdt`, signed composition offsets, first-sample flags), reading only the small `moof`
+  boxes; durations/sample counts come from the index (`probe` shows real values). Untrusted `trun` counts must be
+  backed by bytes; `moof` <= 64 MiB; samples <= 16 Mi/track. Checked against ffmpeg-made fMP4 (with and without
+  `default_base_moof`, B-frames, VP9/Opus): `remux`ed to progressive, ffprobe packets are identical to the source's
+  (negative-CTS files differ only by ffprobe applying/ignoring the edit list differently for fragmented input).
+* **Output:** `mux::FragmentWriter` — init segment (`ftyp iso6/cmfc` + `moov` with empty tables, `mvex/trex`, source
+  edit list kept) and `moof`+`mdat` fragments (`tfhd` default-base-is-moof, `tfdt` v1, `trun` v1 with duration/size/
+  flags/signed cts), cut wherever the caller flushes (unresolved last-sample durations carry into the next
+  fragment). Write-only: no seeking, bounded memory, usable for sockets/pipes. CLI:
+  `remux in out --fragmented [--fragment-ms N]` (`out` may be `-` for stdout).
+* Tests: 17 in `tests/writer_roundtrip.rs` (boundary-independence, carry-over, sequence numbers, proptest,
+  mutation proptest on fragmented files, ffmpeg decode + packet count).
+* Next (M4): segmenter that cuts at key frames and names/indexes segments; HLS (fMP4) playlists, DASH MPD, live
+  sliding window; RTMP -> fMP4 including audio.

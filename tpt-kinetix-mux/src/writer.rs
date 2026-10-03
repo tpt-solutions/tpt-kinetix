@@ -339,7 +339,7 @@ impl<W: Write + Seek> Mp4Writer<W> {
     }
 }
 
-const MATRIX: [u8; 36] = [
+pub(crate) const MATRIX: [u8; 36] = [
     0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
     0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, //
     0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0,
@@ -381,11 +381,10 @@ fn build_trak(
         .iter()
         .map(|&(n, d)| u64::from(n) * u64::from(d))
         .sum();
-    let media_time = t
-        .info
-        .edit_media_time
-        .unwrap_or(i64::from(t.first_cts))
-        .max(0) as u64;
+    // Passthrough keeps the source's timeline: only write a media edit when the
+    // source had one (AAC priming, a muxer's B-frame delay). Inventing one from
+    // the first composition offset would shift this stream against the others.
+    let media_time = t.info.edit_media_time.unwrap_or(0).max(0) as u64;
 
     // Edit list: an optional empty edit (late start) then the media edit that
     // skips `media_time` ticks (codec priming / B-frame composition delay).

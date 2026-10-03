@@ -41,6 +41,13 @@ enum Commands {
         /// Move the index (`moov`) to the front so the file plays while downloading.
         #[arg(long)]
         faststart: bool,
+        /// Write fragmented MP4 (init segment + `moof`/`mdat` fragments, as used
+        /// by HLS-fMP4 and DASH). The output needs no seeking: use `-` for stdout.
+        #[arg(long, conflicts_with = "faststart")]
+        fragmented: bool,
+        /// Target fragment length in milliseconds (cut at the next video key frame).
+        #[arg(long, default_value_t = 2000, requires = "fragmented")]
+        fragment_ms: u32,
     },
     /// Transcode a media file (VP9 MP4 → AV1).
     Transcode {
@@ -122,7 +129,14 @@ async fn main() -> Result<()> {
             input,
             output,
             faststart,
-        } => remux::remux(&input, &output, faststart),
+            fragmented,
+            fragment_ms,
+        } => remux::remux(
+            &input,
+            &output,
+            faststart,
+            fragmented.then_some(fragment_ms),
+        ),
         Commands::Transcode {
             input,
             output,
@@ -170,7 +184,7 @@ fn probe(input: &std::path::Path) -> Result<()> {
     if spec.starts_with("http://") || spec.starts_with("https://") {
         let reader = tpt_kinetix_demux::Mp4Reader::open(tpt_kinetix_demux::http::open_url(&spec))
             .with_context(|| format!("failed to probe remote MP4: {spec}"))?;
-        print_mp4_tracks(&spec, reader.tracks());
+        print_mp4_tracks(&spec, &reader);
         let src = reader.into_source();
         println!(
             "I/O: {} HTTP request(s), {} bytes transferred",
@@ -202,31 +216,34 @@ fn probe(input: &std::path::Path) -> Result<()> {
     let demuxer = tpt_kinetix_demux::Mp4Reader::open(file)
         .with_context(|| format!("failed to parse MP4 container: {}", input.display()))?;
 
-    print_mp4_tracks(&input.display().to_string(), demuxer.tracks());
+    print_mp4_tracks(&input.display().to_string(), &demuxer);
     Ok(())
 }
 
 /// Prints the per-track summary shared by local and remote MP4 probes.
-fn print_mp4_tracks(label: &str, tracks: &[tpt_kinetix_demux::mp4::Mp4Track]) {
+fn print_mp4_tracks<S: tpt_kinetix_demux::ReadAt>(
+    label: &str,
+    reader: &tpt_kinetix_demux::Mp4Reader<S>,
+) {
+    let tracks = reader.tracks();
+    let streams = reader.streams();
     println!("File: {label}");
     println!("Tracks: {}", tracks.len());
 
-    for track in tracks {
+    for (i, track) in tracks.iter().enumerate() {
         let codec = track
             .codec
             .map(|c| format!("{c:?}"))
             .unwrap_or_else(|| "unknown".to_string());
-        let duration_s = if track.timescale != 0 {
-            track.duration as f64 / track.timescale as f64
-        } else {
-            0.0
-        };
+        // From the stream info so fragmented files (empty `mdhd` duration and
+        // sample tables) report their real length and sample count.
+        let duration_s = streams[i].duration_seconds().unwrap_or(0.0);
         println!(
             "  track #{id} [{media:?}] codec={codec} samples={samples} duration={dur:.3}s",
             id = track.track_id,
             media = track.media_type,
             codec = codec,
-            samples = track.sample_count(),
+            samples = reader.sample_count(i),
             dur = duration_s,
         );
         if track.width != 0 || track.height != 0 {

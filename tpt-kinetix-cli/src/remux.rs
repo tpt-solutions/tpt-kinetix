@@ -9,24 +9,36 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use tpt_kinetix_core::codec::{CodecId, MediaType};
 use tpt_kinetix_demux::{Mp4Reader, ReadAt};
-use tpt_kinetix_mux::{faststart, Mp4Writer, WriterOptions};
+use tpt_kinetix_mux::{faststart, FragmentWriter, Mp4Writer, WriterOptions};
 
 /// Copies `input` (a path, or an `http(s)://` URL) to `output`.
-pub fn remux(input: &str, output: &Path, want_faststart: bool) -> Result<()> {
+///
+/// `fragment_ms` selects fragmented-MP4 output with that target fragment length.
+pub fn remux(
+    input: &str,
+    output: &Path,
+    want_faststart: bool,
+    fragment_ms: Option<u32>,
+) -> Result<()> {
     if input.starts_with("http://") || input.starts_with("https://") {
         let reader = Mp4Reader::open(tpt_kinetix_demux::http::open_url(input))
             .with_context(|| format!("failed to open remote MP4: {input}"))?;
-        copy(reader, output, want_faststart)
+        copy(reader, output, want_faststart, fragment_ms)
     } else {
         let file = std::fs::File::open(input)
             .with_context(|| format!("failed to open input file: {input}"))?;
         let reader = Mp4Reader::open(file)
             .with_context(|| format!("failed to parse MP4 container: {input}"))?;
-        copy(reader, output, want_faststart)
+        copy(reader, output, want_faststart, fragment_ms)
     }
 }
 
-fn copy<S: ReadAt>(mut reader: Mp4Reader<S>, output: &Path, want_faststart: bool) -> Result<()> {
+fn copy<S: ReadAt>(
+    mut reader: Mp4Reader<S>,
+    output: &Path,
+    want_faststart: bool,
+    fragment_ms: Option<u32>,
+) -> Result<()> {
     let started = Instant::now();
     let all = reader.streams();
 
@@ -51,6 +63,10 @@ fn copy<S: ReadAt>(mut reader: Mp4Reader<S>, output: &Path, want_faststart: bool
     }
     if kept.is_empty() {
         bail!("no copyable video or audio streams in the input");
+    }
+
+    if let Some(ms) = fragment_ms {
+        return copy_fragmented(reader, &kept, &map, output, ms, started);
     }
 
     // With --faststart, write to a sibling temp file first, then relocate moov.
@@ -90,6 +106,68 @@ fn copy<S: ReadAt>(mut reader: Mp4Reader<S>, output: &Path, want_faststart: bool
         "remuxed {} stream(s), {packets} packets, {:.1} MiB of media in {secs:.2}s{moov_note} -> {}",
         kept.len(),
         bytes as f64 / (1 << 20) as f64,
+        output.display()
+    );
+    Ok(())
+}
+
+/// Writes fragmented MP4: an init segment, then one `moof`/`mdat` fragment per
+/// `fragment_ms` of the first video stream (cut at its next key frame), or per
+/// `fragment_ms` of the first stream when there is no video.
+fn copy_fragmented<S: ReadAt>(
+    mut reader: Mp4Reader<S>,
+    kept: &[tpt_kinetix_core::stream::StreamInfo],
+    map: &[Option<u32>],
+    output: &Path,
+    fragment_ms: u32,
+    started: Instant,
+) -> Result<()> {
+    let mut out: Box<dyn Write> = if output.as_os_str() == "-" {
+        Box::new(BufWriter::new(std::io::stdout().lock()))
+    } else {
+        Box::new(BufWriter::new(std::fs::File::create(output).with_context(
+            || format!("failed to create {}", output.display()),
+        )?))
+    };
+    let mut writer = FragmentWriter::new(kept)?;
+    out.write_all(&writer.init_segment())?;
+    // The stream that decides where fragments end.
+    let lead = kept
+        .iter()
+        .position(|s| s.media_type == MediaType::Video)
+        .unwrap_or(0);
+
+    let (mut packets, mut bytes, mut fragments) = (0u64, 0u64, 0u64);
+    while let Some((mut p, duration)) = reader.read_packet_timed()? {
+        let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
+            continue;
+        };
+        p.stream_index = *new_index;
+        // Cut before a lead-stream key frame once the fragment is long enough.
+        if p.stream_index as usize == lead
+            && p.is_key_frame
+            && writer.buffered_ms(lead) >= i64::from(fragment_ms)
+        {
+            if let Some(frag) = writer.flush(false)? {
+                out.write_all(&frag)?;
+                fragments += 1;
+            }
+        }
+        bytes += p.data.len() as u64;
+        packets += 1;
+        writer.push(&p, Some(duration))?;
+    }
+    if let Some(frag) = writer.flush(true)? {
+        out.write_all(&frag)?;
+        fragments += 1;
+    }
+    out.flush()?;
+    drop(out);
+    eprintln!(
+        "remuxed {} stream(s), {packets} packets, {:.1} MiB of media into {fragments} fragment(s) in {:.2}s -> {}",
+        kept.len(),
+        bytes as f64 / (1 << 20) as f64,
+        started.elapsed().as_secs_f64(),
         output.display()
     );
     Ok(())
