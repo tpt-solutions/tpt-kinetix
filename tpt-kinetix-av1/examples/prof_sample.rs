@@ -25,6 +25,11 @@ mod imp {
         fn SuspendThread(h: isize) -> u32;
         fn ResumeThread(h: isize) -> u32;
         fn GetThreadContext(h: isize, ctx: *mut Context) -> i32;
+        fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> isize;
+        fn Thread32First(snap: isize, e: *mut [u32; 7]) -> i32;
+        fn Thread32Next(snap: isize, e: *mut [u32; 7]) -> i32;
+        fn GetCurrentProcessId() -> u32;
+        fn CloseHandle(h: isize) -> i32;
     }
 
     fn split_ivf_frames(ivf: &[u8]) -> Vec<Vec<u8>> {
@@ -101,24 +106,62 @@ mod imp {
         let stop = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(Mutex::new(Vec::<usize>::new()));
         let (s2, sm2) = (stop.clone(), samples.clone());
+        // PROF_ALL=1 samples every thread of the process (rayon workers
+        // included), refreshing the thread list every ~20 ms.
+        let all = std::env::var("PROF_ALL").is_ok();
         let t = std::thread::spawn(move || {
             let mut local = Vec::new();
+            let me = unsafe { GetCurrentThreadId() };
+            let mut handles: Vec<isize> = vec![handle];
+            let mut last_refresh = std::time::Instant::now() - std::time::Duration::from_secs(1);
             while !s2.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_micros(500));
-                unsafe {
-                    if SuspendThread(handle) == u32::MAX {
-                        continue;
+                if all && last_refresh.elapsed() > std::time::Duration::from_millis(20) {
+                    last_refresh = std::time::Instant::now();
+                    for h in handles.drain(..) {
+                        if h != handle {
+                            unsafe { CloseHandle(h) };
+                        }
                     }
-                    let mut ctx = Context([0; 1232]);
-                    ctx.0[CONTEXT_FLAGS_OFFSET..CONTEXT_FLAGS_OFFSET + 4]
-                        .copy_from_slice(&CONTEXT_CONTROL.to_le_bytes());
-                    if GetThreadContext(handle, &mut ctx) != 0 {
-                        let rip = u64::from_le_bytes(
-                            ctx.0[RIP_OFFSET..RIP_OFFSET + 8].try_into().unwrap(),
-                        );
-                        local.push(rip as usize);
+                    handles.push(handle);
+                    unsafe {
+                        let snap = CreateToolhelp32Snapshot(4, 0);
+                        let mut e = [0u32; 7];
+                        e[0] = 28;
+                        let pid = GetCurrentProcessId();
+                        let mut ok = Thread32First(snap, &mut e);
+                        while ok != 0 {
+                            if e[3] == pid && e[2] != me && e[2] != GetCurrentThreadId() {
+                                let h = OpenThread(0x001F_FFFF, 0, e[2]);
+                                if h != 0 {
+                                    handles.push(h);
+                                }
+                            }
+                            e[0] = 28;
+                            ok = Thread32Next(snap, &mut e);
+                        }
+                        CloseHandle(snap);
                     }
-                    ResumeThread(handle);
+                    // The main thread appears twice (own handle + snapshot): fine
+                    // for a histogram, but drop the duplicate to keep weights even.
+                    handles.truncate(handles.len());
+                }
+                for &h in &handles {
+                    unsafe {
+                        if SuspendThread(h) == u32::MAX {
+                            continue;
+                        }
+                        let mut ctx = Context([0; 1232]);
+                        ctx.0[CONTEXT_FLAGS_OFFSET..CONTEXT_FLAGS_OFFSET + 4]
+                            .copy_from_slice(&CONTEXT_CONTROL.to_le_bytes());
+                        if GetThreadContext(h, &mut ctx) != 0 {
+                            let rip = u64::from_le_bytes(
+                                ctx.0[RIP_OFFSET..RIP_OFFSET + 8].try_into().unwrap(),
+                            );
+                            local.push(rip as usize);
+                        }
+                        ResumeThread(h);
+                    }
                 }
             }
             sm2.lock().unwrap().extend(local);
@@ -204,6 +247,7 @@ mod imp {
         for &ip in samples.iter() {
             *uniq.entry(ip).or_default() += 1;
         }
+        let mut idle = 0usize;
         let mut selfm: HashMap<String, usize> = HashMap::new();
         let mut outerm: HashMap<String, usize> = HashMap::new();
         for (&ip, &n) in &uniq {
@@ -220,9 +264,17 @@ mod imp {
             if names.is_empty() {
                 names.push(format!("<unresolved {ip:#x}>"));
             }
+            if std::env::var("PROF_ALL").is_ok()
+                && (names[0].starts_with("Zw") || names[0].starts_with("Nt"))
+            {
+                idle += n;
+                continue;
+            }
             *selfm.entry(names[0].clone()).or_default() += n;
             *outerm.entry(names.last().unwrap().clone()).or_default() += n;
         }
+        let total = total - idle;
+        println!("idle (wait) samples dropped: {idle}; busy samples: {total}");
         for (title, m) in [
             ("SELF (innermost inlined frame)", selfm),
             ("OUTER (non-inlined function)", outerm),
