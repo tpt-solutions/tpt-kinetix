@@ -204,3 +204,7 @@ fetch-av1-fate:
 # `just fetch-av1-fate` and `just fetch-h264-conformance` for full coverage.
 conformance-report:
     KINETIX_AV1_FATE_DIR="${KINETIX_AV1_FATE_DIR:-fixtures/av1-fate}" cargo run --release -p tpt-kinetix-test-utils --example conformance_report
+
+# WASM packager from Node over async range reads; output must equal the native CLI byte for byte.
+wasm-package-test:
+    bash tools/wasm-package-test.sh

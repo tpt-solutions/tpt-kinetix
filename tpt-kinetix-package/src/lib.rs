@@ -21,6 +21,8 @@ mod codecs;
 mod dash;
 mod hls;
 mod plan;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub use codecs::codec_string;
 pub use plan::{Segment, SegmentPlan};

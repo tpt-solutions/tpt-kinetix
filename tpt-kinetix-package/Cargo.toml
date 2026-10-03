@@ -12,11 +12,21 @@ categories = ["multimedia", "web-programming"]
 readme = "README.md"
 documentation = "https://docs.rs/tpt-kinetix-package"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 thiserror = { workspace = true }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-mux = { workspace = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+[features]
+# JavaScript bindings (browser / worker / Node): `wasm-pack build --features wasm`.
+wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
 
 [dev-dependencies]
 proptest = "1.5"

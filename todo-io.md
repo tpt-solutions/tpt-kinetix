@@ -181,3 +181,15 @@ Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range se
 * Next: WASM bindings (wasm-bindgen, JS range callback), live/sliding-window + low-latency HLS, RTMP/SRT ingest
   with audio, DASH validation with a real client (dash.js / Shaka), multi-bitrate ladders need transcoding (out of
   scope; passthrough only).
+
+### WASM / edge (2026-10-04)
+
+* `tpt-kinetix-package` feature `wasm` (wasm-bindgen): `WasmPackager.open(len, read, segmentSeconds)` where
+  `read(offset, length)` returns `Promise<Uint8Array>` (e.g. `fetch` with a `Range` header or an R2/S3 range GET);
+  `hlsMaster()`, `hlsMedia(i)`, `dashMpd()`, `initSegment(i)`, `await mediaSegment(i, n)`, `trackCount`,
+  `segmentCount`, `codec(i)`, `requests`. The module is ~278 KB (no `wasm-opt`).
+* `just wasm-package-test` (`tools/wasm-package-test.sh`): builds the WASM package, drives it from Node with
+  genuinely asynchronous range reads of a real file, and requires all 14 output files (playlists, MPD, init and media
+  segments) to be **byte-identical** to the native `package` output; the index loads in 5 range reads.
+* Also compiling for `wasm32-unknown-unknown`: `core`, `demux` (plus its existing `wasm` probe feature), `mux`,
+  `package`. Not yet: a Worker example, caching headers/ETag handling, `Range` support on segment responses.
