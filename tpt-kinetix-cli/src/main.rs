@@ -1,6 +1,7 @@
 //! `tpt-kinetix` — command-line interface for the TPT Kinetix media engine.
 
 mod package;
+mod probe_json;
 mod remux;
 
 use std::path::PathBuf;
@@ -27,8 +28,13 @@ struct Cli {
 enum Commands {
     /// Inspect a media container and print its tracks (demux-only, runnable today).
     Probe {
-        /// Input file path (MP4/ISO-BMFF or MPEG-TS).
+        /// Input file path (MP4/ISO-BMFF, MPEG-TS, or Matroska/WebM), or an
+        /// `http(s)://` URL for MP4 (probed with range requests).
         input: PathBuf,
+        /// Emit ffprobe-shaped JSON instead of the human-readable summary, so
+        /// other tools can consume `tpt-kinetix probe`.
+        #[arg(long)]
+        json: bool,
     },
     /// Copy an MP4's streams into a new MP4 without decoding (like `ffmpeg -c copy`).
     ///
@@ -181,7 +187,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Probe { input } => probe(&input),
+        Commands::Probe { input, json } => probe(&input, json),
         Commands::Live {
             port,
             segment_seconds,
@@ -272,8 +278,9 @@ async fn main() -> Result<()> {
 ///
 /// This exercises only the demux/identification path, which is fully
 /// implemented today (unlike `transcode`/`stream`). The container format is
-/// sniffed: MPEG-TS (0x47 sync at the 188-byte packet pitch) or MP4.
-fn probe(input: &std::path::Path) -> Result<()> {
+/// sniffed: MPEG-TS (0x47 sync at the 188-byte packet pitch), Matroska/WebM (the
+/// EBML magic) or MP4.
+fn probe(input: &std::path::Path, json: bool) -> Result<()> {
     use tpt_kinetix_demux::ReadAt;
 
     // `http://` / `https://` inputs are probed with range requests: only the
@@ -282,13 +289,31 @@ fn probe(input: &std::path::Path) -> Result<()> {
     if spec.starts_with("http://") || spec.starts_with("https://") {
         let reader = tpt_kinetix_demux::Mp4Reader::open(tpt_kinetix_demux::http::open_url(&spec))
             .with_context(|| format!("failed to probe remote MP4: {spec}"))?;
-        print_mp4_tracks(&spec, &reader);
-        let src = reader.into_source();
-        println!(
-            "I/O: {} HTTP request(s), {} bytes transferred",
-            src.requests(),
-            src.bytes_transferred()
-        );
+        let src = reader.index().file_len();
+        let streams = reader.streams();
+        let counts: Vec<Option<u64>> = (0..streams.len())
+            .map(|i| Some(reader.sample_count(i) as u64))
+            .collect();
+        if json {
+            print!(
+                "{}",
+                probe_json::document(
+                    "mov,mp4,m4a,3gp,3g2,mj2",
+                    "QuickTime / MOV",
+                    probe_json::duration_of(&streams),
+                    src,
+                    &probe_json::streams(&streams, &counts),
+                )
+            );
+        } else {
+            print_mp4_tracks(&spec, &reader);
+            let src = reader.into_source();
+            println!(
+                "I/O: {} HTTP request(s), {} bytes transferred",
+                src.requests(),
+                src.bytes_transferred()
+            );
+        }
         return Ok(());
     }
 
@@ -306,7 +331,7 @@ fn probe(input: &std::path::Path) -> Result<()> {
         // `todo-io.md`, M1); MP4 and Matroska below never load the file.
         let data = std::fs::read(input)
             .with_context(|| format!("failed to read input file: {}", input.display()))?;
-        return probe_ts(input, data);
+        return probe_ts(input, data, json);
     }
 
     if looks_like_matroska(&head) {
@@ -314,7 +339,26 @@ fn probe(input: &std::path::Path) -> Result<()> {
         // frame is a positional read. The media is never all resident.
         let reader = tpt_kinetix_demux::MkvReader::open(file)
             .with_context(|| format!("failed to parse Matroska container: {}", input.display()))?;
-        print_mkv_tracks(&input.display().to_string(), &reader);
+        if json {
+            let streams = reader.streams().to_vec();
+            let counts: Vec<Option<u64>> = streams
+                .iter()
+                .enumerate()
+                .map(|(i, _)| Some(reader.samples_of(i).len() as u64))
+                .collect();
+            print!(
+                "{}",
+                probe_json::document(
+                    "matroska,webm",
+                    "Matroska / WebM",
+                    Some(reader.duration_ms() as f64 / 1000.0),
+                    len,
+                    &probe_json::streams(&streams, &counts),
+                )
+            );
+        } else {
+            print_mkv_tracks(&input.display().to_string(), &reader);
+        }
         return Ok(());
     }
 
@@ -323,7 +367,24 @@ fn probe(input: &std::path::Path) -> Result<()> {
     let demuxer = tpt_kinetix_demux::Mp4Reader::open(file)
         .with_context(|| format!("failed to parse MP4 container: {}", input.display()))?;
 
-    print_mp4_tracks(&input.display().to_string(), &demuxer);
+    if json {
+        let streams = demuxer.streams();
+        let counts: Vec<Option<u64>> = (0..streams.len())
+            .map(|i| Some(demuxer.sample_count(i) as u64))
+            .collect();
+        print!(
+            "{}",
+            probe_json::document(
+                "mov,mp4,m4a,3gp,3g2,mj2",
+                "QuickTime / MOV",
+                probe_json::duration_of(&streams),
+                len,
+                &probe_json::streams(&streams, &counts),
+            )
+        );
+    } else {
+        print_mp4_tracks(&input.display().to_string(), &demuxer);
+    }
     Ok(())
 }
 
@@ -423,7 +484,7 @@ fn looks_like_mpeg_ts(data: &[u8]) -> bool {
 
 /// Inspect an MPEG-TS stream and print its programs, streams, and a
 /// per-PID packet summary.
-fn probe_ts(input: &std::path::Path, data: Vec<u8>) -> Result<()> {
+fn probe_ts(input: &std::path::Path, data: Vec<u8>, json: bool) -> Result<()> {
     let mut demuxer = tpt_kinetix_demux::TsDemuxer::new(data)
         .with_context(|| format!("failed to parse MPEG-TS stream: {}", input.display()))?;
 
@@ -483,15 +544,57 @@ fn probe_ts(input: &std::path::Path, data: Vec<u8>) -> Result<()> {
             s.last_pts_ms = Some(ms);
         }
     }
-    for (pid, s) in summaries {
+    for (pid, s) in &summaries {
         let range = match (s.first_pts_ms, s.last_pts_ms) {
             (Some(first), Some(last)) => format!("pts {first}..{last} ms"),
             _ => "pts unknown".to_string(),
         };
-        println!(
-            "  pid {pid:#06x}: {n} packets, {range}, {keys} key frames",
-            n = s.packets,
-            keys = s.key_frames,
+        if !json {
+            println!(
+                "  pid {pid:#06x}: {n} packets, {range}, {keys} key frames",
+                n = s.packets,
+                keys = s.key_frames,
+            );
+        }
+    }
+
+    if json {
+        // The same per-PID summary, as ffprobe-shaped stream objects. `TsStream`
+        // carries only the essentials, so build a `StreamInfo` per PID.
+        let infos: Vec<tpt_kinetix_core::stream::StreamInfo> = demuxer
+            .streams()
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let mut info = tpt_kinetix_core::stream::StreamInfo::new(
+                    i as u32,
+                    s.codec
+                        .unwrap_or(tpt_kinetix_core::codec::CodecId::Unknown(*b"none")),
+                    90_000,
+                );
+                info.media_type = s.media_type;
+                info
+            })
+            .collect();
+        let counts: Vec<Option<u64>> = demuxer
+            .streams()
+            .iter()
+            .map(|s| summaries.get(&u32::from(s.pid)).map(|x| x.packets as u64))
+            .collect();
+        let duration = summaries
+            .values()
+            .filter_map(|s| s.last_pts_ms)
+            .max()
+            .map(|ms| ms as f64 / 1000.0);
+        print!(
+            "{}",
+            probe_json::document(
+                "mpegts",
+                "MPEG-TS",
+                duration,
+                std::fs::metadata(input).map(|m| m.len()).unwrap_or(0),
+                &probe_json::streams(&infos, &counts),
+            )
         );
     }
 

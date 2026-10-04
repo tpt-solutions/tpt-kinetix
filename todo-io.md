@@ -161,8 +161,12 @@ Known/qualitative, to be measured before claiming:
   `ffprobe`/`ffmpeg -c copy` byte-for-semantics.
 - [~] **M4 — Packaging.** *(VOD just-in-time HLS-fMP4 + DASH done; live HLS from WebM-over-HTTP (AV1/VP9+Opus) done 2026-10-04; low-latency parts, dynamic DASH, Enhanced RTMP/WHIP ingest still open.)* HLS with fMP4 segments + DASH (on top of M3), live sliding window,
   low-latency parts; RTMP/SRT ingest -> package, audio included.
-- [ ] **M5 — Probe service.** `probe --json` matching ffprobe's field names for the common
-  cases; HTTP-range remote probing; WASM build kept working.
+- [x] **M5 — Probe service.** 2026-10-04: `probe --json` emits ffprobe-shaped JSON (a `streams`
+  array plus a `format` object; `index`, `codec_name`, `codec_type`, `width`/`height`,
+  `channels`, `sample_rate`, `time_base`, `duration`, `nb_frames`) for MP4, MPEG-TS and
+  Matroska/WebM, local and `http(s)://`. Values cross-checked against `ffprobe -of json` on
+  real files. Fields a demuxer cannot know (pix_fmt, colour, disposition) are omitted rather
+  than guessed. Remote range-request probing and the WASM build are unchanged.
 - [ ] **M6 — Evidence.** `just bench-io`: startup, remote-probe round trips, RSS/stream and
   streams/core vs ffmpeg, hostile-input corpus (ffmpeg crash/hang count vs Kinetix).
 

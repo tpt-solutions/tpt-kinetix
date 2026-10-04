@@ -33,7 +33,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization; **Enhanced RTMP** AV1/VP9 + Opus straight into live HLS (`live --rtmp-port`) |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4 and MPEG-TS input, format-sniffed). `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path (VP9 is the only supported transcode input). `stream` is still a stub. |
+| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4, MPEG-TS and Matroska/WebM input, format-sniffed) and `--json` emits ffprobe-shaped output. `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path (VP9 is the only supported transcode input). `stream` is still a stub. |
 
 > ⚠️ **Decode correctness:** The H.264, VP9 and AV1 decoders report
 > `pixel_exact: true` for their supported subsets (H.264: CAVLC/CABAC
@@ -205,6 +205,8 @@ If you have an MP4 file handy, you can also probe it directly with the CLI or th
 
 ```bash
 cargo run -p tpt-kinetix-cli -- probe path/to/video.mp4
+# or machine-readable, ffprobe-shaped:
+cargo run -p tpt-kinetix-cli -- probe path/to/video.webm --json
 ```
 
 ### Examples
