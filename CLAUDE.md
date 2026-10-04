@@ -74,7 +74,10 @@ breaking change in any public API bumps all of them together):
 - `tpt-kinetix-core` — shared types everything else depends on: `Frame`, `Packet`, `Timestamp`,
   `PixelFormat`, `KinetixError`, `DecoderCapabilities`.
 - `tpt-kinetix-demux` — container demuxers (MP4/ISO-BMFF works; MKV/WebM is a basic EBML subset).
-- `tpt-kinetix-mux` — container muxers (progressive MP4, single H.264 track).
+- `tpt-kinetix-mux` — container muxers: multi-track passthrough MP4 writer (`Mp4Writer`), `faststart`, fragmented
+  MP4/CMAF (`FragmentWriter`), plus the legacy single-track `Mp4Muxer`.
+- `tpt-kinetix-package` — just-in-time HLS (fMP4) + DASH packaging from an MP4 index over `AsyncReadAt`, and a live
+  sliding-window `LivePackager`; compiles to wasm32 (`wasm` feature). Examples in `examples/edge-worker`.
 - `out-kinetix-h264` — H.264/AVC decoder: NAL parsing, SPS/PPS, slice header/data, CAVLC + CABAC
   entropy decode, intra/inter prediction, motion compensation, deblocking, reference-picture
   management (MMCO/dec_ref_pic_marking, POC-based B-slice list ordering). This is the crate under
@@ -86,7 +89,7 @@ breaking change in any public API bumps all of them together):
   Used when starting a new codec crate; see CONTRIBUTING.md's "Adding a new codec" section.
 - `tpt-kinetix-pipeline` — lock-free multi-stage demux→decode→filter→encode pipeline (`rayon` +
   `crossbeam-channel`).
-- `tpt-kinetix-stream` — async streaming output: RTMP ingest (handshake/chunk/AMF/FLV) and HLS output
+- `tpt-kinetix-stream` — live server (`LiveServer`: WebM AV1/VP9+Opus POST ingest -> live HLS) and the older RTMP ingest + TS HLS output: RTMP ingest (handshake/chunk/AMF/FLV) and HLS output
   (MPEG-TS segmenting + sliding-window `.m3u8` + HTTP serving).
 - `tpt-kinetix-cli` — the `tpt-kinetix` binary (`probe` works today; `transcode`/`stream` are stubs).
 - `tpt-kinetix-test-utils` — shared conformance/corpus/bench-report helpers used across crates' test
@@ -129,3 +132,11 @@ MBAFF I/P/B frames are bit-exact vs ffmpeg with full deblocking. The High-profil
 decoder is pixel-exact (FATE 204/204 frames vs dav1d, plus the libaom crosscheck).
 Don't assume a decoder path is correct without running `just conformance` — `capabilities()` is the
 source of truth, not README prose.
+
+## Direction (read before proposing work)
+
+The project is **not** trying to out-run ffmpeg/dav1d at codec decode. The product is the memory-safe I/O layer
+(demux, mux, packaging, live ingest, edge/WASM). Prioritise **royalty-free codecs: AV1, VP9, Opus**; H.264/AAC are
+compatibility only. The task list lives in `todo-io.md` ("Open tasks" at the top) — keep it current when finishing
+or discovering work. Verify I/O work against ffmpeg/ffprobe (frame MD5s) and real players (`just browser-package-test`,
+`just live-browser-test`, `just wasm-package-test`, `just edge-worker-test`).

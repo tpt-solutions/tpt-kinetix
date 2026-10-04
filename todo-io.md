@@ -8,6 +8,78 @@ product is the **I/O layer**, where those are the point and where speed is I/O-b
 rather than assembly-bound: containers, packaging, ingest, streaming. Codec work
 (AV1/VP9 decode, the original codecs) stays as-is and is not the priority.
 
+## Open tasks (single source of truth — keep this list current)
+
+Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.264/AAC are compatibility paths only.
+`[x]` done, `[ ]` open. Details and evidence for finished work are in the "progress" sections below.
+
+### A. Live and ingest
+
+- [x] WebM-over-HTTP ingest (AV1/VP9 + Opus) -> live fMP4 HLS (`tpt-kinetix live`, `LiveServer`)
+- [ ] **Enhanced RTMP ingest** for AV1 / VP9 (FLV `ExVideoTagHeader`, FourCC `av01`/`vp09`; `av1C`/`vpcC` sequence start;
+      Opus via Enhanced RTMP audio FourCC once a sender exists — ffmpeg 6.1 cannot send it). Lets OBS-style encoders publish.
+- [ ] **Low-latency HLS**: `EXT-X-PART` partial segments, `EXT-X-SERVER-CONTROL`, blocking playlist reload
+      (`_HLS_msn`/`_HLS_part`), preload hints. Target glass-to-glass < 3 s (today ~3 segments = 6 s).
+- [ ] **Dynamic DASH MPD** for live (`type="dynamic"`, `availabilityStartTime`, sliding `SegmentTimeline`/`$Number$`,
+      `minimumUpdatePeriod`) + low-latency DASH (CMAF chunks).
+- [ ] **WHIP (WebRTC-HTTP ingest)** — browsers publish VP9/AV1 + Opus natively; needs ICE/DTLS/SRTP (large; evaluate a
+      memory-safe Rust WebRTC stack vs. scope).
+- [ ] Browser publish via `MediaRecorder` + streaming `fetch` (needs HTTP/2 or WebSocket ingest) and a demo page.
+- [ ] Ingest hardening: auth tokens on `/ingest/<key>`, per-key limits (bitrate, duration, max publishers), idle
+      timeout, backpressure, bounded memory under slow viewers, structured metrics (`/metrics`).
+- [ ] Reconnect/restart handling: publisher drop + resume with `EXT-X-DISCONTINUITY`, config change mid-stream.
+- [ ] Recording / DVR: persist segments, VOD playlist after the publish ends, resume window.
+- [ ] Multi-rendition ladders (needs transcoding; passthrough only today — separate decision).
+- [ ] Opus `DiscardPadding` (end trim) and `CodecDelay` passthrough fidelity.
+- [ ] HEVC/H.264/AAC live paths (secondary): FLV legacy RTMP -> the same `LivePackager` (the old TS HLS server stays).
+
+### B. Packaging (VOD) and edge
+
+- [x] Just-in-time HLS (fMP4) + static DASH from an MP4 index (`tpt-kinetix-package`, `package`, `serve`)
+- [x] WASM build + Node byte-identity test; Worker handler example + Node test; hls.js/dash.js Chrome tests
+- [ ] **DASH validation with an independent conformance checker** (DASH-IF validator / Shaka packager `--dump`) and a
+      Safari/hardware-player pass (note: Apple HLS does not play VP9/AV1 fMP4 everywhere — document the matrix).
+- [ ] Packager from **WebM/Matroska VOD input** (reuse `MkvStream` over `ReadAt`), not only MP4.
+- [ ] Worker: segment cache layer (Cache API), `Range` on segment responses, real Cloudflare/R2 deployment test,
+      CPU/memory limits under load, Deno/Fastly smoke tests.
+- [ ] Live variant at the edge (Durable Object / stateful worker holding the `LivePackager`).
+- [ ] Encryption: CENC/CBCS + ClearKey/Widevine key hooks (AV1/VP9/Opus).
+- [ ] Subtitles/WebVTT passthrough, multi-audio-language tracks and `EXT-X-MEDIA` metadata, trick-play.
+- [ ] `sidx` index boxes and `styp` for fragmented output (DASH-IF compatibility).
+
+### C. Containers (demux / mux)
+
+- [x] MP4 (progressive + fragmented) streaming demux over `ReadAt` / `AsyncReadAt`; HTTP range source
+- [x] Multi-track MP4 writer, faststart, fragmented MP4 writer, `remux`
+- [ ] **WebM/Matroska muxer** (royalty-free container for AV1/VP9/Opus): `Write`-based, live (unknown-size clusters)
+      and finite (seekable, with Cues); `remux` to `.webm`; Opus pre-skip/`CodecDelay`/`DiscardPadding`.
+- [ ] Replace the old whole-buffer MKV demuxer with `MkvStream` (CodecPrivate, multi-track, seek via Cues) and expose
+      `StreamInfo` for files (M2 for MKV).
+- [ ] MPEG-TS: streaming demux (`TsDemuxer` still takes a `Vec`) and `StreamInfo` (M1/M2 for TS).
+- [ ] Ogg/Opus (`.opus`) demux/mux; IVF (AV1/VP9) demux/mux (trivial, useful for tests).
+- [ ] Metadata/chapters/`udta`/cover art passthrough in `remux`; non-seekable progressive output; MP4 `elst` multi-edit.
+- [ ] `av1C`/`vpcC` synthesis when a container omits them (AV1 sequence-header OBU parse; VP9 from key frame is done).
+- [ ] Remove remaining `std::fs::read` callers (`pipeline/stage.rs`, CLI `transcode`).
+
+### D. Evidence, quality, tooling
+
+- [ ] **M6 `just bench-io`**: startup, remote-probe round trips, RSS per stream and streams/core vs ffmpeg
+      (RTMP/WebM -> HLS density), hostile-input corpus (ffmpeg crash/hang count vs Kinetix).
+- [ ] Run the fuzz targets (`fuzz_mp4_reader`, add `fuzz_mkv_stream`, `fuzz_moof`) in CI — local nightly sanitizer broken;
+      commit crash regressions to `fuzz/corpus/`.
+- [ ] CI jobs for the new end-to-end tests: `just wasm-package-test`, `edge-worker-test`, `browser-package-test`,
+      `live-browser-test` (need Chrome, Node, wasm-pack, ffmpeg with libaom/libvpx/libopus).
+- [ ] Load test the live server (N concurrent publishers/viewers; CPU, RSS, latency) and record it.
+- [ ] Real network latency measurements for remote probe / JIT segments (everything so far is localhost).
+- [ ] Docs: user guide for `remux` / `package` / `serve` / `live`, API docs for `ReadAt`/`AsyncReadAt`/`Packager`/
+      `LivePackager`, a PATENTS.md note on royalty-free vs passthrough of encumbered codecs.
+- [ ] `Packet` has no duration field (it is built in ~200 places): decide on a migration or keep the out-of-band
+      `read_packet_timed` / `write_packet_with_duration`.
+
+### E. Explicitly not planned
+
+Beating ffmpeg/dav1d at decode speed; new codecs; transcoding as a headline feature (see Direction).
+
 ## What the I/O layer is today (measured/read 2026-10-03)
 
 | Piece | State | Why it is not useful yet |
