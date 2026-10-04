@@ -30,7 +30,7 @@ fn run_vp9_pipeline(data: Vec<u8>) -> Result<(usize, Vec<(u32, u32)>), String> {
     let (sink, frames) = tpt_kinetix_pipeline::SinkStage::new();
 
     let pipeline = tpt_kinetix_pipeline::Pipeline::new()
-        .add_stage(tpt_kinetix_pipeline::DemuxStage { data })
+        .add_stage(tpt_kinetix_pipeline::DemuxStage::new(data))
         .add_stage(tpt_kinetix_pipeline::Vp9DecodeStage)
         .add_stage(sink);
 

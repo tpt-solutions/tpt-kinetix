@@ -197,3 +197,94 @@ fn test_error_propagates_to_sink_result() {
     let result = handle.join().expect("sink thread panicked");
     assert!(result.is_err(), "sink should surface upstream error");
 }
+
+/// `DemuxStage` takes a `ReadAt`, so a file-backed source must produce exactly the
+/// packets an in-memory one does — the same values, in the same order.
+///
+/// This is the guarantee the CLI's `transcode` now rests on: it hands the pipeline
+/// a `File` instead of a `Vec<u8>` so a large input is read positionally rather
+/// than slurped.
+#[test]
+fn demux_stage_from_a_file_matches_an_in_memory_source() {
+    use tpt_kinetix_demux::{Demuxer, Mp4Reader};
+    use tpt_kinetix_pipeline::{DemuxStage, PacketSinkStage, Pipeline};
+
+    fn have(tool: &str) -> bool {
+        std::process::Command::new(tool)
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_demuxsrc_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("in.mp4");
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x120:rate=25",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libvpx-vp9",
+            "-g",
+            "25",
+            "-b:v",
+            "200k",
+        ])
+        .arg(&path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: encoder unavailable");
+        return;
+    }
+    let bytes = std::fs::read(&path).unwrap();
+
+    // The reference: packets read straight out of an in-memory reader.
+    let mut reader = Mp4Reader::open(bytes.clone()).unwrap();
+    let want: Vec<(Vec<u8>, i64, bool)> = std::iter::from_fn(|| reader.read_packet().unwrap())
+        .map(|p| (p.data, p.pts.as_millis().unwrap_or(0), p.is_key_frame))
+        .collect();
+    assert!(!want.is_empty(), "no packets in the reference");
+
+    // The same thing through the pipeline, with the source behind a File.
+    let (sink, packets) = PacketSinkStage::new();
+    Pipeline::new()
+        .add_stage(DemuxStage::new(std::fs::File::open(&path).unwrap()))
+        .add_stage(sink)
+        .run_to_completion()
+        .unwrap();
+    let got: Vec<(Vec<u8>, i64, bool)> = std::sync::Arc::try_unwrap(packets)
+        .expect("Arc still shared")
+        .into_inner()
+        .expect("mutex poisoned")
+        .iter()
+        .map(|p| {
+            (
+                p.data.clone(),
+                p.pts.as_millis().unwrap_or(0),
+                p.is_key_frame,
+            )
+        })
+        .collect();
+
+    assert_eq!(got.len(), want.len(), "packet count differs");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert_eq!(g.0, w.0, "payload differs at packet {i}");
+        assert_eq!(g.1, w.1, "pts differs at packet {i}");
+        assert_eq!(g.2, w.2, "key-frame flag differs at packet {i}");
+    }
+}

@@ -104,7 +104,19 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       Ogg/Opus (`.opus`) demux/mux still open.
 - [ ] Metadata/chapters/`udta`/cover art passthrough in `remux`; non-seekable progressive output; MP4 `elst` multi-edit.
 - [ ] `av1C`/`vpcC` synthesis when a container omits them (AV1 sequence-header OBU parse; VP9 from key frame is done).
-- [ ] Remove remaining `std::fs::read` callers (`pipeline/stage.rs`, CLI `transcode`).
+- [x] Removed the remaining `std::fs::read` callers, 2026-10-04. `DemuxStage` now holds a
+      `Box<dyn ReadAt + Send>` and demuxes through `Mp4Reader` (positional reads) instead of a
+      `Vec<u8>`; a `Vec<u8>` still satisfies `ReadAt` so existing callers are unaffected. The CLI
+      `transcode` opens the file and hands it straight to the pipeline, so a multi-gigabyte input is
+      never resident; the geometry and codec probes each take their own short-lived handle. A test
+      pins that a file-backed source yields byte-identical packets to an in-memory one. The
+      whole-buffer reads left in `probe` are inherent — `TsDemuxer` and `IvfDemuxer` take a slice.
+- [!] **Found, not fixed: `transcode` panics on real VP9 input.** `tpt-kinetix-vp9/src/loop_filter.rs:559`
+      — `1u64 << (rows << 3)` overflows, killing a stage thread, so `transcode --vcodec av1` on any
+      ffmpeg-encoded VP9 fails. Confirmed pre-existing (reproduces identically at `a73aa41`).
+      `rows = mi_rows - mi_row`, and the guard `mi_row + 8 > mi_rows` does not actually bound `rows`
+      below 8, so the shift can reach >= 64. Belongs in `todo-vp9.md`; left alone here rather than
+      half-fixed from the I/O side.
 
 ### D. Evidence, quality, tooling
 

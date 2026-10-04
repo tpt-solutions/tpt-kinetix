@@ -41,14 +41,32 @@ pub trait Stage: Send + 'static {
 
 // ── DemuxStage ───────────────────────────────────────────────────────────────
 
-/// Demux stage: reads from an in-memory byte buffer and emits compressed
-/// [`PipelineMessage::Packet`]s.
+/// Demux stage: reads a container through a [`ReadAt`](tpt_kinetix_demux::ReadAt)
+/// and emits compressed [`PipelineMessage::Packet`]s.
 ///
 /// The `input` receiver is ignored — the stage produces its own data stream
-/// from `self.data`.
+/// from `self.source`.
+///
+/// The source is a [`ReadAt`](tpt_kinetix_demux::ReadAt) rather than a `Vec<u8>`
+/// so a file or a remote stream can be demuxed with positional reads: the
+/// container's boxes and samples are fetched as they are needed instead of the
+/// whole media being resident at once. A `Vec<u8>` still satisfies `ReadAt`, so
+/// callers that already hold the bytes can pass them through unchanged.
 pub struct DemuxStage {
-    /// Raw bytes of the container file to demux.
-    pub data: Vec<u8>,
+    /// The container to demux.
+    pub source: Box<dyn tpt_kinetix_demux::ReadAt + Send>,
+}
+
+impl DemuxStage {
+    /// Demuxes from `source`.
+    pub fn new<S>(source: S) -> Self
+    where
+        S: tpt_kinetix_demux::ReadAt + Send + 'static,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
 }
 
 impl Stage for DemuxStage {
@@ -62,7 +80,7 @@ impl Stage for DemuxStage {
         output: Sender<PipelineMessage>,
     ) -> JoinHandle<Result<(), KinetixError>> {
         std::thread::spawn(move || {
-            let mut demuxer = tpt_kinetix_demux::Mp4Demuxer::new(self.data)
+            let mut demuxer = tpt_kinetix_demux::Mp4Reader::open(self.source)
                 .map_err(|e| KinetixError::Parse(e.to_string()))?;
             loop {
                 match demuxer.read_packet() {

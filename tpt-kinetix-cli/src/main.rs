@@ -667,15 +667,19 @@ fn transcode(
     bitrate: Option<u32>,
 ) -> Result<()> {
     let input_path = PathBuf::from(input);
-    let data = std::fs::read(&input_path)
-        .with_context(|| format!("failed to read input file: {input}"))?;
+    // The container is opened, not slurped: `Mp4Reader` fetches the box headers
+    // and then each sample with a positional read, so a multi-gigabyte input
+    // never has to be resident. `input_video_geometry` below re-opens the path
+    // for the same reason (it only needs the `moov`).
+    let file = std::fs::File::open(&input_path)
+        .with_context(|| format!("failed to open input file: {input}"))?;
 
     // Probe the input once to learn the real video geometry and frame rate so the
     // output container carries correct dimensions and timing (the pipeline
     // re-derives width/height from the first decoded frame, but the muxer header
     // needs them up front).
     let (width, height, fps_num, fps_den) =
-        input_video_geometry(&data).unwrap_or((1920, 1080, 30, 1));
+        input_video_geometry_from_path(&input_path).unwrap_or((1920, 1080, 30, 1));
     tracing::info!(width, height, fps_num, fps_den, "probed input video track");
 
     let rate_control = match bitrate {
@@ -696,9 +700,18 @@ fn transcode(
     };
 
     match vcodec {
-        "av1" => transcode_to_av1(&data, output, rate_control, speed, geometry),
+        "av1" => transcode_to_av1(file, &input_path, output, rate_control, speed, geometry),
         _ => anyhow::bail!("unsupported output codec '{vcodec}'. Supported: av1"),
     }
+}
+
+/// Probe the input MP4 for its first video track's geometry and frame rate.
+///
+/// Reads the geometry from `path` without loading the file: only the box
+/// headers and the `moov` index are fetched.
+fn input_video_geometry_from_path(path: &std::path::Path) -> Option<(u32, u32, u32, u32)> {
+    let file = std::fs::File::open(path).ok()?;
+    input_video_geometry(file)
 }
 
 /// Probe the input MP4 for its first video track's geometry and frame rate.
@@ -706,10 +719,10 @@ fn transcode(
 /// Returns `(width, height, fps_num, fps_den)`. The frame rate is derived from
 /// the track's sample count and duration scaled to a denominator of 1000, so the
 /// values are always finite and never divide by zero.
-fn input_video_geometry(data: &[u8]) -> Option<(u32, u32, u32, u32)> {
+fn input_video_geometry<S: tpt_kinetix_demux::ReadAt>(source: S) -> Option<(u32, u32, u32, u32)> {
     use tpt_kinetix_core::codec::MediaType;
 
-    let demuxer = tpt_kinetix_demux::Mp4Demuxer::new(data.to_vec()).ok()?;
+    let demuxer = tpt_kinetix_demux::Mp4Reader::open(source).ok()?;
     let track = demuxer
         .tracks()
         .iter()
@@ -729,10 +742,12 @@ fn input_video_geometry(data: &[u8]) -> Option<(u32, u32, u32, u32)> {
 
 /// Returns the [`tpt_kinetix_core::codec::CodecId`] of the first video track.
 #[cfg_attr(not(feature = "codec-vp9"), allow(dead_code))]
-fn input_video_codec(data: &[u8]) -> Option<tpt_kinetix_core::codec::CodecId> {
+fn input_video_codec<S: tpt_kinetix_demux::ReadAt>(
+    source: S,
+) -> Option<tpt_kinetix_core::codec::CodecId> {
     use tpt_kinetix_core::codec::MediaType;
 
-    let demuxer = tpt_kinetix_demux::Mp4Demuxer::new(data.to_vec()).ok()?;
+    let demuxer = tpt_kinetix_demux::Mp4Reader::open(source).ok()?;
     let track = demuxer
         .tracks()
         .iter()
@@ -754,7 +769,8 @@ struct VideoGeometry {
 /// `codec-vp9`) is supported; this workspace ships no patent-encumbered decoder.
 #[cfg(not(feature = "codec-vp9"))]
 fn transcode_to_av1(
-    _data: &[u8],
+    _source: std::fs::File,
+    _input_path: &std::path::Path,
     _output: &str,
     _rate_control: tpt_kinetix_core::encode::RateControl,
     _speed: u8,
@@ -767,17 +783,23 @@ fn transcode_to_av1(
 
 #[cfg(feature = "codec-vp9")]
 fn transcode_to_av1(
-    data: &[u8],
+    source: std::fs::File,
+    input_path: &std::path::Path,
     output: &str,
     rate_control: tpt_kinetix_core::encode::RateControl,
     speed: u8,
     geometry: VideoGeometry,
 ) -> Result<()> {
-    if input_video_codec(data) == Some(tpt_kinetix_core::codec::CodecId::Vp9) {
+    // Probing the codec needs its own handle: the file is about to be handed to the
+    // pipeline, which owns it.
+    let codec = std::fs::File::open(input_path)
+        .ok()
+        .and_then(input_video_codec);
+    if codec == Some(tpt_kinetix_core::codec::CodecId::Vp9) {
         tracing::info!("input codec vp9: using the royalty-free decode path");
         return transcode_to_av1_via(
             tpt_kinetix_pipeline::Vp9DecodeStage,
-            data,
+            source,
             output,
             rate_control,
             speed,
@@ -791,7 +813,7 @@ fn transcode_to_av1(
 #[cfg(feature = "codec-vp9")]
 fn transcode_to_av1_via<S: tpt_kinetix_pipeline::Stage>(
     decode_stage: S,
-    data: &[u8],
+    source: std::fs::File,
     output: &str,
     rate_control: tpt_kinetix_core::encode::RateControl,
     speed: u8,
@@ -810,9 +832,7 @@ fn transcode_to_av1_via<S: tpt_kinetix_pipeline::Stage>(
     let (sink, packets) = tpt_kinetix_pipeline::PacketSinkStage::new();
 
     let pipeline = tpt_kinetix_pipeline::Pipeline::new()
-        .add_stage(tpt_kinetix_pipeline::DemuxStage {
-            data: data.to_vec(),
-        })
+        .add_stage(tpt_kinetix_pipeline::DemuxStage::new(source))
         .add_stage(decode_stage)
         .add_stage(tpt_kinetix_pipeline::EncodeStage::new(config))
         .add_stage(sink);

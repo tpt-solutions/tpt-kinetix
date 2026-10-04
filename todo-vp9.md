@@ -781,3 +781,28 @@ dumps, and remember the file is CRLF (patch scripts must preserve it).
    remains the 20k-case release proptest sweep.
 3. Profile-1/4:4:4 and 10/12-bit remain out of scope (rejected in strict
    mode with `KinetixError::Unsupported`).
+
+## Found 2026-10-04 (via `todo-io.md`): loop-filter bottom/right edge panics
+
+`tpt-kinetix-vp9/src/loop_filter.rs:559`:
+
+```rust
+if mi_row + 8 > mi_rows {
+    let rows = mi_rows - mi_row;
+    let mask_y = (1u64 << (rows << 3)).wrapping_sub(1);
+```
+
+`rows << 3` can reach >= 64, so the shift overflows and kills the thread. This is
+reachable from `tpt-kinetix transcode --vcodec av1` on any ffmpeg-encoded VP9
+(reproduces on a 160x120 testsrc2 clip), so the royalty-free transcode path is
+currently broken for its own input format. The guard `mi_row + 8 > mi_rows` is
+meant to bound `rows` to < 8 but does not: the two conditions are independent.
+
+Needs the right edge condition too (the left/above edges look handled) and a
+properly clamped mask, then a regression test on a clip that triggers it —
+likely a frame whose last MI row is partial. The conformance corpus in
+`docs/CONFORMANCE.md` evidently does not cover it, which is itself worth
+fixing.
+
+Confirmed pre-existing at `a73aa41`; not caused by the `ReadAt`/pipeline
+migration in the same session.
