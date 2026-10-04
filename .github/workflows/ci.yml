@@ -196,3 +196,98 @@ jobs:
         with:
           name: conformance-report
           path: conformance-out
+
+  wasm-package-test:
+    name: WASM package byte-identity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+      - name: Build the WASM packager and compare its output to native
+        # The WASM packager must produce byte-identical HLS/DASH to the native
+        # one over async range reads; a divergence here is a packaging bug that
+        # only shows up in browsers.
+        run: bash tools/wasm-package-test.sh
+
+  edge-worker-test:
+    name: Edge Worker handler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+      - name: Run the Worker request handler test
+        # The Worker handler must serve the same segment bytes as the native
+        # server, over a fetch-like callback.
+        run: bash tools/edge-worker-test.sh
+
+  browser-package-test:
+    name: Browser playback (hls.js / dash.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache the Chrome-for-Testing binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tpt-chrome
+          key: chrome-${{ runner.os }}-${{ hashFiles('tools/fetch-chrome.sh') }}
+      - name: Fetch Chrome (headless)
+        id: chrome
+        run: echo "path=$(bash tools/fetch-chrome.sh)" >> "$GITHUB_OUTPUT"
+      - name: Run the hls.js / dash.js playback tests
+        # Real players in real Chrome: proves the packaged manifests and
+        # segments are actually playable, not just well-formed.
+        env:
+          CHROME: ${{ steps.chrome.outputs.path }}
+        run: bash tools/browser-package-test.sh
+
+  live-browser-test:
+    name: Live playback (Chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache the Chrome-for-Testing binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tpt-chrome
+          key: chrome-${{ runner.os }}-${{ hashFiles('tools/fetch-chrome.sh') }}
+      - name: Fetch Chrome (headless)
+        id: chrome
+        run: echo "path=$(bash tools/fetch-chrome.sh)" >> "$GITHUB_OUTPUT"
+      - name: Run the live (WebM ingest -> fMP4 HLS) browser test
+        # A publisher sends WebM over HTTP and a real player in Chrome plays the
+        # live fMP4 HLS, including the low-latency parts.
+        env:
+          CHROME: ${{ steps.chrome.outputs.path }}
+        run: bash tools/live-browser-test.sh

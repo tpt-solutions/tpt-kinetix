@@ -23,8 +23,12 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       within a read; type-1/2 header delta applied twice when a payload arrived in pieces).
       Open follow-ups: Enhanced `Multitrack` and `Metadata` (HDR colour info) packets, the E-RTMP v2 capability exchange
       (`videoFourCcInfoMap`), extended timestamps on continuation chunks, RTMPS (TLS), and a real OBS pass.
-- [ ] **Low-latency HLS**: `EXT-X-PART` partial segments, `EXT-X-SERVER-CONTROL`, blocking playlist reload
-      (`_HLS_msn`/`_HLS_part`), preload hints. Target glass-to-glass < 3 s (today ~3 segments = 6 s).
+- [ ] **Low-latency HLS**: DONE 2026-10-04 — `EXT-X-PART` partial segments, `EXT-X-SERVER-CONTROL`, blocking
+      playlist reload (`_HLS_msn`/`_HLS_part`), `EXT-X-SKIP` delta playlists, `EXT-X-PRELOAD-HINT`
+      (`LiveOptions::part_seconds`, default 1/3 s, 0 disables; `live --part-seconds`). Parts of a
+      segment concatenate to exactly that segment's samples. Target glass-to-glass is now ~1 part
+      rather than ~3 segments (6 s). NOT measured against a real player yet — hls.js latency numbers
+      still to be recorded.
 - [ ] **Dynamic DASH MPD** for live (`type="dynamic"`, `availabilityStartTime`, sliding `SegmentTimeline`/`$Number$`,
       `minimumUpdatePeriod`) + low-latency DASH (CMAF chunks).
 - [ ] **WHIP (WebRTC-HTTP ingest)** — browsers publish VP9/AV1 + Opus natively; needs ICE/DTLS/SRTP (large; evaluate a
@@ -35,7 +39,10 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [ ] Reconnect/restart handling: publisher drop + resume with `EXT-X-DISCONTINUITY`, config change mid-stream.
 - [ ] Recording / DVR: persist segments, VOD playlist after the publish ends, resume window.
 - [ ] Multi-rendition ladders (needs transcoding; passthrough only today — separate decision).
-- [ ] Opus `DiscardPadding` (end trim) and `CodecDelay` passthrough fidelity.
+- [x] Opus pre-skip carried end to end: the `dOps` pre-skip becomes `OpusHead` on ingest and `CodecDelay`
+      + `SeekPreRoll` on WebM output (measured against ffmpeg: without it the stream starts 7 ms late).
+      Still open: `DiscardPadding` (the source's final partial frame is not trimmed on output — needs
+      `BlockGroup`, not `SimpleBlock`).
 - [ ] HEVC/H.264/AAC live paths (secondary): FLV legacy RTMP -> the same `LivePackager` (the old TS HLS server stays).
 
 ### B. Packaging (VOD) and edge
@@ -56,10 +63,15 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 
 - [x] MP4 (progressive + fragmented) streaming demux over `ReadAt` / `AsyncReadAt`; HTTP range source
 - [x] Multi-track MP4 writer, faststart, fragmented MP4 writer, `remux`
-- [ ] **WebM/Matroska muxer** (royalty-free container for AV1/VP9/Opus): `Write`-based, live (unknown-size clusters)
-      and finite (seekable, with Cues); `remux` to `.webm`; Opus pre-skip/`CodecDelay`/`DiscardPadding`.
-- [ ] Replace the old whole-buffer MKV demuxer with `MkvStream` (CodecPrivate, multi-track, seek via Cues) and expose
-      `StreamInfo` for files (M2 for MKV).
+- [x] **WebM/Matroska muxer** (`WebmWriter`, `tpt-kinetix-mux/src/webm.rs`): `Write`-based, live (unknown-size
+      clusters/segment, no seeking) and finite (patched sizes + `Cues` + `Duration`); AV1/VP9/Opus
+      passthrough with `av1C` carried verbatim, `OpusHead` synthesised from `dOps`, pre-skip as
+      `CodecDelay`/`SeekPreRoll`; `remux` writes `.webm`. Round-trips ffmpeg-made files (video frame-exact,
+      audio frame-exact but for the last frame, which needs `DiscardPadding` in a `BlockGroup`).
+- [x] Replaced the whole-buffer MKV demuxer with `MkvReader` (index over `ReadAt` + `StreamInfo`, seek to key
+      frame, `probe` sniffs the EBML magic). M2 for MKV. The index pass reads the file once (Matroska has no
+      seekable `moov`), but keeps only the frame index in memory and reads each frame by offset.
+- [ ] Seek via `Cues` in `MkvReader` (the parser skips `Cues` today; `MkvStream` exposes no cue positions).
 - [ ] MPEG-TS: streaming demux (`TsDemuxer` still takes a `Vec`) and `StreamInfo` (M1/M2 for TS).
 - [ ] Ogg/Opus (`.opus`) demux/mux; IVF (AV1/VP9) demux/mux (trivial, useful for tests).
 - [ ] Metadata/chapters/`udta`/cover art passthrough in `remux`; non-seekable progressive output; MP4 `elst` multi-edit.
@@ -72,8 +84,11 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       (RTMP/WebM -> HLS density), hostile-input corpus (ffmpeg crash/hang count vs Kinetix).
 - [ ] Run the fuzz targets (`fuzz_mp4_reader`, add `fuzz_mkv_stream`, `fuzz_moof`) in CI — local nightly sanitizer broken;
       commit crash regressions to `fuzz/corpus/`.
-- [ ] CI jobs for the new end-to-end tests: `just wasm-package-test`, `edge-worker-test`, `browser-package-test`,
-      `live-browser-test` (need Chrome, Node, wasm-pack, ffmpeg with libaom/libvpx/libopus).
+- [x] CI jobs for the new end-to-end tests: `wasm-package-test`, `edge-worker-test`, `browser-package-test`,
+      `live-browser-test` (added to `.github/workflows/ci.yml`; they run the existing `just` recipes /
+      `tools/*.sh` scripts). Chrome comes from `tools/fetch-chrome.sh` (Chrome-for-Testing, cached;
+      falls back to a system browser), since GitHub runners have none by default. NOT yet observed
+      green on a real runner — the scripts were only run locally on Windows.
 - [ ] Load test the live server (N concurrent publishers/viewers; CPU, RSS, latency) and record it.
 - [ ] Real network latency measurements for remote probe / JIT segments (everything so far is localhost).
 - [ ] Docs: user guide for `remux` / `package` / `serve` / `live`, API docs for `ReadAt`/`AsyncReadAt`/`Packager`/
