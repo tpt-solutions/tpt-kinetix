@@ -14,6 +14,7 @@
 
 #[cfg(feature = "http")]
 pub mod http;
+pub mod ivf;
 pub mod mkv;
 pub mod mkv_reader;
 pub mod mkv_stream;
@@ -24,6 +25,7 @@ pub mod ts;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+pub use ivf::IvfDemuxer;
 pub use mkv::MkvDemuxer;
 pub use mkv_reader::{MkvIndex, MkvReader, MkvSample};
 pub use mp4::{Mp4Demuxer, Mp4Index, Mp4Reader};

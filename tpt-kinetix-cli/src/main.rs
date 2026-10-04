@@ -362,6 +362,14 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    if looks_like_ivf(&head) {
+        // IVF is a bare elementary stream: the whole buffer is the media, so it
+        // is read whole like MPEG-TS above.
+        let data = std::fs::read(input)
+            .with_context(|| format!("failed to read input file: {}", input.display()))?;
+        return probe_ivf(&data, json);
+    }
+
     // MP4: reads the top-level box headers and the `moov` index, nothing else,
     // so probing a multi-gigabyte file costs kilobytes of I/O.
     let demuxer = tpt_kinetix_demux::Mp4Reader::open(file)
@@ -418,6 +426,10 @@ fn print_mkv_tracks(label: &str, reader: &tpt_kinetix_demux::MkvReader<std::fs::
 /// Matroska sniff: the EBML magic `1A 45 DF A3`.
 fn looks_like_matroska(data: &[u8]) -> bool {
     data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+}
+
+fn looks_like_ivf(data: &[u8]) -> bool {
+    data.starts_with(b"DKIF")
 }
 
 /// Prints the per-track summary shared by local and remote MP4 probes.
@@ -598,6 +610,35 @@ fn probe_ts(input: &std::path::Path, data: Vec<u8>, json: bool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// Inspects an IVF (bare AV1/VP9) file: one video track, and the frame count.
+fn probe_ivf(data: &[u8], json: bool) -> Result<()> {
+    let demuxer = tpt_kinetix_demux::IvfDemuxer::new(data.to_vec())
+        .with_context(|| "failed to parse IVF file")?;
+    let info = demuxer.stream_info().clone();
+    let frames = demuxer.frame_count() as u64;
+    if json {
+        print!(
+            "{}",
+            probe_json::document(
+                "ivf",
+                "IVF (raw AV1/VP9)",
+                None,
+                data.len() as u64,
+                &probe_json::streams(std::slice::from_ref(&info), &[Some(frames)]),
+            )
+        );
+        return Ok(());
+    }
+    println!("File: <ivf>");
+    println!("Format: IVF (raw {} elementary stream)", info.codec.name());
+    println!("Streams: 1");
+    println!(
+        "  track #0 [Video] codec={:?} frames={frames} resolution={}x{} timebase=1/{}",
+        info.codec, info.width, info.height, info.timescale
+    );
     Ok(())
 }
 

@@ -89,7 +89,9 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       seekable `moov`), but keeps only the frame index in memory and reads each frame by offset.
 - [ ] Seek via `Cues` in `MkvReader` (the parser skips `Cues` today; `MkvStream` exposes no cue positions).
 - [ ] MPEG-TS: streaming demux (`TsDemuxer` still takes a `Vec`) and `StreamInfo` (M1/M2 for TS).
-- [ ] Ogg/Opus (`.opus`) demux/mux; IVF (AV1/VP9) demux/mux (trivial, useful for tests).
+- [~] IVF (AV1/VP9) demux done 2026-10-04 (`IvfDemuxer`: fourcc, geometry, frame ranges, seek,
+      truncated-tail tolerant, `probe` support incl. `--json`; values match `ffprobe`). IVF mux and
+      Ogg/Opus (`.opus`) demux/mux still open.
 - [ ] Metadata/chapters/`udta`/cover art passthrough in `remux`; non-seekable progressive output; MP4 `elst` multi-edit.
 - [ ] `av1C`/`vpcC` synthesis when a container omits them (AV1 sequence-header OBU parse; VP9 from key frame is done).
 - [ ] Remove remaining `std::fs::read` callers (`pipeline/stage.rs`, CLI `transcode`).

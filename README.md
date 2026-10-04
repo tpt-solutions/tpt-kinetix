@@ -22,6 +22,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | --- | --- | --- |
 | MP4 / ISO-BMFF demux | ✅ Works | Track discovery, sample tables, packet extraction (`tpt-kinetix-demux`) |
 | MKV / WebM demux | 🟡 Basic (whole buffer) + ✅ live | Whole-buffer reader is a subset; `MkvStream` is a streaming parser for **AV1 / VP9 / Opus** WebM (unknown-size clusters, any chunking, `av1C`/`vpcC`/`dOps` built for MP4) used by live ingest |
+| IVF demux | ✅ Works | Raw AV1/VP9 elementary streams (`.ivf`, `DKIF`): fourcc, geometry, per-frame ranges, key-frame-free seeking, truncated-tail tolerant. `probe` reads it, values match `ffprobe` |
 | MPEG-TS demux | ✅ Works | ⚖️ Royalty-free. PAT/PMT parsing, PES depacketization with PTS/DTS, PCR tracking; unlocks HLS/broadcast input. H.264 comes out Annex-B framed; round-trips through the HLS `TsMuxer` and matches `ffprobe` on real clips (`tpt-kinetix-demux`) |
 | MP4 mux / remux | ✅ Works | Multi-track passthrough writer (AV1, VP9, Opus, AAC, H.264/H.265, FLAC, AC-3...), faststart, fragmented MP4 / CMAF writer; `tpt-kinetix remux` (`tpt-kinetix-mux`). The old single-track `Mp4Muxer` remains |
 | HLS / DASH packaging | ✅ Works | `tpt-kinetix-package`: just-in-time HLS (fMP4) + DASH from an MP4 index over ranged reads (file, HTTP, or WASM `fetch`); `package` and `serve` commands; Worker example in `examples/edge-worker`. Verified frame-exact in ffmpeg and playing in hls.js/dash.js |
