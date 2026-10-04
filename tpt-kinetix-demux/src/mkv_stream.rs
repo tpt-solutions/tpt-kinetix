@@ -74,6 +74,10 @@ pub struct MkvFrame {
     pub data: Vec<u8>,
     /// Duration in milliseconds when the container states it (`BlockDuration`).
     pub duration_ms: Option<u32>,
+    /// Absolute byte offset of the payload within the stream, as fed to
+    /// [`MkvStream::push`]. A reader over a [`ReadAt`](crate::source::ReadAt)
+    /// source uses it to fetch exactly this frame with one ranged read.
+    pub offset: u64,
 }
 
 #[derive(Default, Clone)]
@@ -95,6 +99,8 @@ struct RawFrame {
     key: bool,
     data: Vec<u8>,
     duration_ms: Option<u32>,
+    /// Absolute offset of `data` in the stream.
+    offset: u64,
 }
 
 /// An incremental WebM/Matroska parser.
@@ -114,6 +120,8 @@ pub struct MkvStream {
     pending_group: Option<RawFrame>,
     seen_ebml: bool,
     events: Vec<MkvEvent>,
+    /// Absolute offset of `buf[0]` in the stream, so frames can report theirs.
+    base: u64,
 }
 
 fn parse_id(data: &[u8]) -> Option<(u32, usize)> {
@@ -183,6 +191,7 @@ impl MkvStream {
             pending_group: None,
             seen_ebml: false,
             events: Vec::new(),
+            base: 0,
         }
     }
 
@@ -193,7 +202,11 @@ impl MkvStream {
             let n = self.skip.min(chunk.len() as u64) as usize;
             self.skip -= n as u64;
             chunk = &chunk[n..];
+            // Skipped bytes leave the stream without ever entering `buf`, so
+            // `base` (the offset of `buf[0]`) must account for them here.
+            self.base += n as u64;
         }
+        // `base` tracks buf[0] and only advances as the buffer is drained below.
         self.buf.extend_from_slice(chunk);
         self.drain(false)?;
         Ok(std::mem::take(&mut self.events))
@@ -262,8 +275,9 @@ impl MkvStream {
                             break; // wait for the whole element
                         }
                         let body = rest[header..header + size as usize].to_vec();
+                        let body_offset = self.base + pos as u64 + header as u64;
                         pos += header + size as usize;
-                        self.leaf(id, &body)?;
+                        self.leaf(id, &body, body_offset)?;
                     } else {
                         // Skip without buffering (Cues, Void, Tags, the EBML header ...).
                         pos += header;
@@ -273,6 +287,10 @@ impl MkvStream {
             }
         }
         self.buf.drain(..pos);
+        // `base` is the absolute offset of buf[0]: it advances by exactly what
+        // this pass consumed, which can exceed what `push` fed in (a single push
+        // may complete elements that were buffered by earlier calls).
+        self.base = self.base.saturating_add(pos as u64);
         Ok(())
     }
 
@@ -324,19 +342,19 @@ impl MkvStream {
         }
     }
 
-    fn leaf(&mut self, id: u32, body: &[u8]) -> Result<(), KinetixError> {
+    fn leaf(&mut self, id: u32, body: &[u8], body_offset: u64) -> Result<(), KinetixError> {
         match id {
             ID_TIMECODE_SCALE => self.timecode_scale_ns = uint(body).max(1),
             ID_CLUSTER_TIMESTAMP => self.cluster_ts = uint(body) as i64,
             ID_SIMPLE_BLOCK => {
                 self.flush_group()?;
-                if let Some(f) = self.parse_block(body, true)? {
+                if let Some(f) = self.parse_block(body, body_offset, true)? {
                     self.accept(f)?;
                 }
             }
             ID_BLOCK => {
                 self.flush_group()?;
-                self.pending_group = self.parse_block(body, false)?;
+                self.pending_group = self.parse_block(body, body_offset, false)?;
             }
             ID_BLOCK_DURATION => {
                 let ms = uint(body) as u128 * u128::from(self.timecode_scale_ns) / 1_000_000;
@@ -373,7 +391,13 @@ impl MkvStream {
         Ok(())
     }
 
-    fn parse_block(&self, body: &[u8], simple: bool) -> Result<Option<RawFrame>, KinetixError> {
+    /// `body_offset` is the absolute offset of `body` in the stream.
+    fn parse_block(
+        &self,
+        body: &[u8],
+        body_offset: u64,
+        simple: bool,
+    ) -> Result<Option<RawFrame>, KinetixError> {
         let Some((track, tl)) = parse_size(body) else {
             return Ok(None);
         };
@@ -395,6 +419,7 @@ impl MkvStream {
             key: !simple || flags & 0x80 != 0,
             data: body[tl + 3..].to_vec(),
             duration_ms: None,
+            offset: body_offset + (tl + 3) as u64,
         }))
     }
 
@@ -434,6 +459,7 @@ impl MkvStream {
             key: f.key,
             data: f.data,
             duration_ms: f.duration_ms,
+            offset: f.offset,
         }));
     }
 

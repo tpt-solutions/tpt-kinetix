@@ -15,6 +15,7 @@
 #[cfg(feature = "http")]
 pub mod http;
 pub mod mkv;
+pub mod mkv_reader;
 pub mod mkv_stream;
 pub mod mp4;
 pub mod rfconfig;
@@ -24,6 +25,7 @@ pub mod ts;
 pub mod wasm;
 
 pub use mkv::MkvDemuxer;
+pub use mkv_reader::{MkvReader, MkvSample};
 pub use mp4::{Mp4Demuxer, Mp4Index, Mp4Reader};
 pub use source::{block_on, AsyncReadAt, Blocking, CountingSource, ReadAt, SeekSource};
 use tpt_kinetix_core::{error::KinetixError, packet::Packet};

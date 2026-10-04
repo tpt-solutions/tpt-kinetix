@@ -303,10 +303,19 @@ fn probe(input: &std::path::Path) -> Result<()> {
 
     if looks_like_mpeg_ts(&head) {
         // The TS demuxer still takes a whole buffer (streaming TS is tracked in
-        // `todo-io.md`, M1); MP4 below never loads the file.
+        // `todo-io.md`, M1); MP4 and Matroska below never load the file.
         let data = std::fs::read(input)
             .with_context(|| format!("failed to read input file: {}", input.display()))?;
         return probe_ts(input, data);
+    }
+
+    if looks_like_matroska(&head) {
+        // Matroska/WebM: one streaming pass builds the frame index, then each
+        // frame is a positional read. The media is never all resident.
+        let reader = tpt_kinetix_demux::MkvReader::open(file)
+            .with_context(|| format!("failed to parse Matroska container: {}", input.display()))?;
+        print_mkv_tracks(&input.display().to_string(), &reader);
+        return Ok(());
     }
 
     // MP4: reads the top-level box headers and the `moov` index, nothing else,
@@ -316,6 +325,38 @@ fn probe(input: &std::path::Path) -> Result<()> {
 
     print_mp4_tracks(&input.display().to_string(), &demuxer);
     Ok(())
+}
+
+/// Prints the track summary of an indexed Matroska/WebM file.
+fn print_mkv_tracks(label: &str, reader: &tpt_kinetix_demux::MkvReader<std::fs::File>) {
+    println!("File: {label}");
+    println!("Tracks: {}", reader.streams().len());
+    for (i, s) in reader.streams().iter().enumerate() {
+        let frames = reader.samples_of(i);
+        let keys = frames.iter().filter(|f| f.is_key).count();
+        println!(
+            "  track #{i} [{:?}] codec={:?} samples={} keyframes={keys}",
+            s.media_type,
+            s.codec,
+            frames.len(),
+        );
+        if s.width != 0 || s.height != 0 {
+            println!("    resolution: {}x{}", s.width, s.height);
+        }
+        if s.channels != 0 || s.sample_rate != 0 {
+            println!("    audio: {} ch, {} Hz", s.channels, s.sample_rate);
+        }
+        if !s.extradata.is_empty() {
+            println!("    codec config: {} bytes", s.extradata.len());
+        }
+    }
+    println!("Frames: {}", reader.sample_count());
+    println!("Duration: {:.3}s", reader.duration_ms() as f64 / 1000.0);
+}
+
+/// Matroska sniff: the EBML magic `1A 45 DF A3`.
+fn looks_like_matroska(data: &[u8]) -> bool {
+    data.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
 }
 
 /// Prints the per-track summary shared by local and remote MP4 probes.
