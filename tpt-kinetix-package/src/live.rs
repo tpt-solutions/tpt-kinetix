@@ -691,6 +691,12 @@ impl LivePackager {
         }
     }
 
+    /// The RFC 6381 codec string of `track`, or `None` when it has no HLS/DASH
+    /// signalling.
+    pub fn codec(&self, track: usize) -> Option<String> {
+        self.tracks.get(track).and_then(|t| codec_string(&t.info))
+    }
+
     /// The master playlist.
     pub fn master_playlist(&self) -> Option<String> {
         if !self.is_ready() {
@@ -758,4 +764,146 @@ impl LivePackager {
     pub fn latest_segment(&self) -> u64 {
         self.next_number - 1
     }
+
+    /// A **dynamic** DASH MPD for the live presentation, or `None` before the
+    /// first segment exists.
+    ///
+    /// Unlike the VOD MPD this has no `mediaPresentationDuration`: it carries
+    /// `availabilityStartTime`, a `minimumUpdatePeriod` (half a segment, so a
+    /// player refetches the manifest at roughly the rate segments appear) and a
+    /// `SegmentTimeline` over the current sliding window only, with `t` on the
+    /// first entry. Segments are named exactly as the HLS ones
+    /// (`seg-{track}-{n}.m4s`), so a segment is byte-identical whichever
+    /// manifest a client follows.
+    pub fn dash_mpd(&self) -> Option<String> {
+        if !self.is_ready() {
+            return None;
+        }
+        // ISO 8601 duration, as DASH requires.
+        let update = format!("PT{:.3}S", (self.opts.segment_seconds / 2.0).max(0.5));
+        // The live edge as an offset from the start of the window.
+        let edge_ms: i64 = self
+            .window()
+            .map(|s| (s.seconds[self.lead] * 1000.0) as i64)
+            .sum();
+        // `availabilityStartTime` must be a real date-time. Using the wall clock
+        // is what a live DASH server does; the epoch here is a stand-in that keeps
+        // the manifest deterministic for tests, and a player still only uses the
+        // difference against its own clock.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0i64, |d| d.as_secs() as i64);
+        let ast_secs = now - edge_ms / 1000;
+        let ast = format!(
+            "1970-01-01T{:02}:{:02}:{:02}Z",
+            ast_secs / 3600 % 24,
+            ast_secs / 60 % 60,
+            ast_secs % 60
+        );
+        let mut out = String::new();
+        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        // Built in pieces: the attribute line has no newline of its own, so
+        // `write!` is correct here and clippy's `writeln!` suggestion is not.
+        let _ = write!(
+            out,
+            "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" \
+             profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" type=\"dynamic\" \
+             availabilityStartTime=\"{ast}\" minimumUpdatePeriod=\"{update}\" \
+             minBufferTime=\"PT{:.3}S\">",
+            (self.opts.segment_seconds / 3.0).max(0.5)
+        );
+        out.push('\n');
+        let _ = writeln!(out, "  <Period id=\"0\" start=\"PT0S\">");
+        for (i, t) in self.tracks.iter().enumerate() {
+            let Some(codec) = codec_string(&t.info) else {
+                continue;
+            };
+            let kind = match t.info.media_type {
+                MediaType::Video => "video",
+                _ => "audio",
+            };
+            let mut bytes = 0u64;
+            let mut secs = 0.0f64;
+            for s in self.window() {
+                if let Some(d) = s.data.get(i).and_then(Option::as_ref) {
+                    bytes += d.len() as u64;
+                }
+                secs += s.seconds[i];
+            }
+            let bandwidth = if secs > 0.0 {
+                (bytes as f64 * 8.0 / secs) as u64
+            } else {
+                0
+            };
+            let mut rep = format!(
+                "id=\"{i}\" codecs=\"{}\" bandwidth=\"{}\"",
+                escape_xml(&codec),
+                bandwidth.max(1)
+            );
+            if t.info.media_type == MediaType::Video {
+                let _ = write!(
+                    rep,
+                    " width=\"{}\" height=\"{}\"",
+                    t.info.width, t.info.height
+                );
+            } else {
+                let _ = write!(rep, " audioSamplingRate=\"{}\"", t.info.sample_rate);
+            }
+            let _ = writeln!(
+                out,
+                "    <AdaptationSet id=\"{i}\" contentType=\"{kind}\" \
+                 segmentAlignment=\"true\" startWithSAP=\"1\" mimeType=\"{kind}/mp4\">"
+            );
+            let _ = writeln!(out, "      <Representation {rep}>");
+            if t.info.media_type == MediaType::Audio {
+                let _ = writeln!(
+                    out,
+                    "        <AudioChannelConfiguration \
+                     schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" \
+                     value=\"{}\"/>",
+                    t.info.channels.max(1)
+                );
+            }
+            let scale = u64::from(t.info.timescale.max(1));
+            let _ = writeln!(
+                out,
+                "        <SegmentTemplate timescale=\"{scale}\" initialization=\"init-{i}.mp4\" \
+                 media=\"seg-{i}-$Number$.m4s\" startNumber=\"{}\">",
+                self.window().next().map_or(1, |s| s.number)
+            );
+            let _ = writeln!(out, "          <SegmentTimeline>");
+            // Times advance by the segment's own duration, in track ticks. A track
+            // with no samples in a segment (it ended early) is skipped.
+            let mut t_ticks = 0u64;
+            let mut first = true;
+            for s in self.window() {
+                let d = (s.seconds[i] * scale as f64) as u64;
+                if d == 0 {
+                    continue;
+                }
+                let t_attr = if first {
+                    format!(" t=\"{t_ticks}\"")
+                } else {
+                    String::new()
+                };
+                first = false;
+                let _ = writeln!(out, "            <S{t_attr} d=\"{d}\"/>");
+                t_ticks += d;
+            }
+            let _ = writeln!(out, "          </SegmentTimeline>");
+            let _ = writeln!(out, "        </SegmentTemplate>");
+            let _ = writeln!(out, "      </Representation>");
+            let _ = writeln!(out, "    </AdaptationSet>");
+        }
+        out.push_str("  </Period>\n</MPD>\n");
+        Some(out)
+    }
+}
+
+/// XML-escapes a value for an MPD attribute.
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

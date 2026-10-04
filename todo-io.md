@@ -29,8 +29,14 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       segment concatenate to exactly that segment's samples. Target glass-to-glass is now ~1 part
       rather than ~3 segments (6 s). NOT measured against a real player yet — hls.js latency numbers
       still to be recorded.
-- [ ] **Dynamic DASH MPD** for live (`type="dynamic"`, `availabilityStartTime`, sliding `SegmentTimeline`/`$Number$`,
-      `minimumUpdatePeriod`) + low-latency DASH (CMAF chunks).
+- [x] **Dynamic DASH MPD** for live, 2026-10-04: `LivePackager::dash_mpd()` emits `type="dynamic"` with
+      `availabilityStartTime`, a `minimumUpdatePeriod` (half a segment), `minBufferTime`, and a
+      `SegmentTimeline` over the current sliding window with `t` on the first entry — no
+      `mediaPresentationDuration`. Served at `GET /<key>/manifest.mpd` as `application/dash+xml`,
+      naming the *same* `init-N.mp4` / `seg-N-M.m4s` URLs the HLS playlists do, so a player can
+      switch between the two manifests and a segment is byte-identical either way. Tested over
+      real HTTP (both AV1 and VP9 publishes): the manifest is well-formed XML and every segment it
+      names is fetchable and `moof`/`styp`-headed. Low-latency DASH (CMAF chunks) is still open.
 - [ ] **WHIP (WebRTC-HTTP ingest)** — browsers publish VP9/AV1 + Opus natively; needs ICE/DTLS/SRTP (large; evaluate a
       memory-safe Rust WebRTC stack vs. scope).
 - [ ] Browser publish via `MediaRecorder` + streaming `fetch` (needs HTTP/2 or WebSocket ingest) and a demo page.

@@ -179,6 +179,15 @@ impl LiveServer {
                 .master_playlist()
                 .map_or_else(not_ready, |p| Reply::playlist(p.into_bytes()));
         }
+        // The same live presentation as a dynamic DASH manifest. The segment and
+        // init URLs are identical to HLS', so a player can switch between them.
+        if name == "manifest.mpd" {
+            return live
+                .lock()
+                .unwrap()
+                .dash_mpd()
+                .map_or_else(not_ready, |m| Reply::xml(m.into_bytes()));
+        }
         if let Some(t) = name
             .strip_prefix("track-")
             .and_then(|s| s.strip_suffix(".m3u8"))
@@ -439,6 +448,16 @@ impl Reply {
         Self {
             status: 200,
             content_type: "application/vnd.apple.mpegurl",
+            cache: "no-cache",
+            body,
+        }
+    }
+
+    fn xml(body: Vec<u8>) -> Self {
+        Self {
+            status: 200,
+            content_type: "application/dash+xml",
+            // A live manifest must never be cached: it describes a sliding window.
             cache: "no-cache",
             body,
         }

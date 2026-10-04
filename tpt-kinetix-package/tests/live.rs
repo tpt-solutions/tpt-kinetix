@@ -451,3 +451,58 @@ fn rejects_unusable_tracks_and_mid_stream_changes() {
     v.extradata = vec![0x81, 0x01, 0x0C, 0x00];
     assert!(live.set_tracks(vec![v]).is_err());
 }
+
+/// A dynamic DASH manifest describes the same live window as the HLS playlists,
+/// and every segment it names must actually resolve.
+#[test]
+fn dynamic_dash_manifest_matches_the_live_window() {
+    let dir = std::env::temp_dir().join(format!("tpt_dash_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(webm) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"]) else {
+        eprintln!("skipping: ffmpeg could not make the source");
+        return;
+    };
+    let (live, _) = ingest(&webm, LiveOptions::default());
+
+    let Some(mpd) = live.dash_mpd() else {
+        panic!("no MPD after a full ingest");
+    };
+    // Dynamic, not static: a live manifest has no fixed presentation duration.
+    assert!(mpd.contains("type=\"dynamic\""), "{mpd}");
+    assert!(mpd.contains("availabilityStartTime="), "{mpd}");
+    assert!(mpd.contains("minimumUpdatePeriod="), "{mpd}");
+    assert!(!mpd.contains("mediaPresentationDuration"), "{mpd}");
+    // One AdaptationSet per track, each with a timeline over the window.
+    assert_eq!(mpd.matches("<AdaptationSet ").count(), live.track_count());
+    for track in 0..live.track_count() {
+        assert!(
+            mpd.contains(&format!("init-{track}.mp4")),
+            "track {track} has no init segment"
+        );
+        assert!(
+            mpd.contains(&format!("media=\"seg-{track}-$Number$.m4s\"")),
+            "track {track} has no media template"
+        );
+    }
+
+    // Every segment the manifest promises must be fetchable and be a real
+    // fMP4 fragment: the sliding window must not outlive the retained segments.
+    let mut checked = 0;
+    for n in 1..=live.latest_segment() {
+        for track in 0..live.track_count() {
+            let Some(seg) = live.segment(track, n) else {
+                continue;
+            };
+            assert!(seg.len() > 8, "segment {track}/{n} is too small to be fMP4");
+            // A media segment is `styp`- or `moof`-headed; both are valid fMP4.
+            let kind = &seg[4..8];
+            assert!(
+                kind == b"styp" || kind == b"moof",
+                "segment {track}/{n} is not fMP4 (starts with {:?})",
+                String::from_utf8_lossy(kind)
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no segments were checked");
+}

@@ -154,6 +154,31 @@ async fn decode_matches(name: &str, vcodec: &[&str]) {
         master.contains(",Opus\"") && master.contains("RESOLUTION=320x240"),
         "{master}"
     );
+
+    // The same presentation is served as a dynamic DASH manifest, naming the
+    // very same init/segment URLs the HLS playlists do.
+    let (code, mpd) = http(port, "GET", "/cam/manifest.mpd", b"").await;
+    let mpd = String::from_utf8(mpd).unwrap();
+    assert_eq!(code, 200, "{mpd}");
+    assert!(mpd.contains("type=\"dynamic\""), "{mpd}");
+    assert!(mpd.contains("availabilityStartTime="), "{mpd}");
+    assert!(mpd.contains("minimumUpdatePeriod="), "{mpd}");
+    assert!(!mpd.contains("mediaPresentationDuration"), "{mpd}");
+    assert!(mpd.contains("init-0.mp4") && mpd.contains("seg-0-$Number$.m4s"));
+    assert!(well_formed_xml(&mpd), "MPD is not well-formed XML:\n{mpd}");
+    // And every segment it names is actually fetchable.
+    let first = mpd
+        .split("startNumber=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(1);
+    for track in 0..2 {
+        let name = format!("seg-{track}-{first}.m4s");
+        let (code, body) = http(port, "GET", &format!("/cam/{name}"), b"").await;
+        assert_eq!(code, 200, "{name} is named in the MPD but not served");
+        assert!(body.len() > 8 && (&body[4..8] == b"moof" || &body[4..8] == b"styp"));
+    }
     let (code, track0) = http(port, "GET", "/cam/track-0.m3u8", b"").await;
     assert_eq!(code, 200);
     assert!(String::from_utf8(track0)
@@ -385,4 +410,36 @@ async fn http_edge_cases() {
         400
     );
     assert_eq!(http(port, "GET", "/bad/master.m3u8", b"").await.0, 404);
+}
+
+/// Checks that every element in `xml` is closed and correctly nested: enough to
+/// reject a malformed MPD without pulling in a parser dependency.
+fn well_formed_xml(xml: &str) -> bool {
+    let mut stack: Vec<&str> = Vec::new();
+    let bytes = xml.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let Some(close) = xml[i..].find('>').map(|j| i + j) else {
+            return false;
+        };
+        let tag = &xml[i + 1..close];
+        i = close + 1;
+        // Comments, declarations and processing instructions carry no nesting.
+        if tag.starts_with('?') || tag.starts_with('!') {
+            continue;
+        }
+        if let Some(name) = tag.strip_prefix('/') {
+            // A closing tag must match the innermost open element.
+            if stack.pop() != Some(name.trim()) {
+                return false;
+            }
+        } else if !tag.ends_with('/') {
+            stack.push(tag.split_whitespace().next().unwrap_or(""));
+        }
+    }
+    stack.is_empty()
 }
