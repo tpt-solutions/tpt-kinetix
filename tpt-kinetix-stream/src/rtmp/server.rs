@@ -68,10 +68,18 @@ pub enum RtmpMediaEvent {
 /// connection tasks.
 pub type MediaHandler = Arc<dyn Fn(&RtmpMediaEvent) + Send + Sync>;
 
+/// A per-connection event sink, so state (for example a live packager) can be
+/// kept for each publisher separately.
+pub type SessionSink = Box<dyn FnMut(&RtmpMediaEvent) + Send>;
+
+/// Creates a [`SessionSink`] for every accepted connection.
+pub type SessionFactory = Arc<dyn Fn() -> SessionSink + Send + Sync>;
+
 /// An RTMP ingest server.
 pub struct RtmpServer {
     config: RtmpConfig,
     handler: Option<MediaHandler>,
+    session: Option<SessionFactory>,
 }
 
 impl RtmpServer {
@@ -80,7 +88,19 @@ impl RtmpServer {
         Self {
             config,
             handler: None,
+            session: None,
         }
+    }
+
+    /// Register a factory that makes one event sink per connection. Unlike
+    /// [`Self::with_handler`] the sink is `FnMut` and sees only its own
+    /// connection's events, so it can track a single publisher's state.
+    pub fn with_session_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn() -> SessionSink + Send + Sync + 'static,
+    {
+        self.session = Some(Arc::new(factory));
+        self
     }
 
     /// Register a handler that receives every high-level media event.
@@ -98,13 +118,19 @@ impl RtmpServer {
     /// returned by this method runs forever (or until an accept error occurs).
     pub async fn run(&self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(&self.config.bind_addr).await?;
-        tracing::info!(addr = %self.config.bind_addr, "RTMP server listening");
+        self.serve(listener).await
+    }
+
+    /// Accept RTMP connections on an already-bound listener.
+    pub async fn serve(&self, listener: TcpListener) -> anyhow::Result<()> {
+        tracing::info!(addr = ?listener.local_addr().ok(), "RTMP server listening");
         loop {
             let (mut stream, peer_addr) = listener.accept().await?;
             tracing::info!(%peer_addr, "RTMP client connected");
             let handler = self.handler.clone();
+            let session = self.session.as_ref().map(|f| f());
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(&mut stream, handler).await {
+                if let Err(e) = handle_connection(&mut stream, handler, session).await {
                     // A dropped/reset connection is expected and recovered by
                     // simply ending this task; the listener keeps accepting.
                     tracing::warn!(%peer_addr, error = %e, "RTMP connection ended");
@@ -187,6 +213,15 @@ fn connect_result(transaction_id: f64) -> Vec<u8> {
         Amf0Value::Object(vec![
             ("fmsVer".into(), Amf0Value::String("FMS/3,0,1,123".into())),
             ("capabilities".into(), Amf0Value::Number(31.0)),
+            // Enhanced RTMP: the codecs this server can ingest.
+            (
+                "fourCcList".into(),
+                Amf0Value::StrictArray(vec![
+                    Amf0Value::String("av01".into()),
+                    Amf0Value::String("vp09".into()),
+                    Amf0Value::String("Opus".into()),
+                ]),
+            ),
         ]),
         Amf0Value::Object(vec![
             ("level".into(), Amf0Value::String("status".into())),
@@ -236,14 +271,18 @@ fn publish_start_status() -> Vec<u8> {
 async fn handle_connection(
     stream: &mut TcpStream,
     handler: Option<MediaHandler>,
+    mut session: Option<SessionSink>,
 ) -> anyhow::Result<()> {
     // 1. RTMP handshake.
     perform_server_handshake(stream).await?;
     tracing::info!("RTMP handshake complete");
 
-    let emit = |event: RtmpMediaEvent| {
+    let mut emit = |event: RtmpMediaEvent| {
         if let Some(h) = handler.as_ref() {
             h(&event);
+        }
+        if let Some(s) = session.as_mut() {
+            s(&event);
         }
     };
 
@@ -275,7 +314,9 @@ async fn handle_connection(
                     }
                 }
                 Some(MessageTypeId::CommandAmf0) => {
-                    handle_command(stream, &msg, &mut created_stream, &emit).await?;
+                    let mut events = Vec::new();
+                    handle_command(stream, &msg, &mut created_stream, &mut events).await?;
+                    events.into_iter().for_each(&mut emit);
                 }
                 Some(MessageTypeId::Video) => match flv::parse_video_tag(&msg.payload) {
                     Ok(tag) => emit(RtmpMediaEvent::Video {
@@ -306,7 +347,7 @@ async fn handle_command(
     stream: &mut TcpStream,
     msg: &RtmpMessage,
     created_stream: &mut bool,
-    emit: &impl Fn(RtmpMediaEvent),
+    emit: &mut Vec<RtmpMediaEvent>,
 ) -> anyhow::Result<()> {
     let values = match amf::decode_all(&msg.payload) {
         Ok(v) => v,
@@ -347,11 +388,11 @@ async fn handle_command(
             tracing::info!(%stream_key, "RTMP publish");
             stream.write_all(&publish_start_status()).await?;
             stream.flush().await?;
-            emit(RtmpMediaEvent::PublishStart { stream_key });
+            emit.push(RtmpMediaEvent::PublishStart { stream_key });
         }
         "deleteStream" | "FCUnpublish" | "closeStream" => {
             tracing::info!(command_name, "RTMP publish teardown");
-            emit(RtmpMediaEvent::PublishStop);
+            emit.push(RtmpMediaEvent::PublishStop);
         }
         "releaseStream" | "FCPublish" | "_checkbw" => {
             // Acknowledge with an empty _result so common encoders proceed.

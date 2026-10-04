@@ -3,11 +3,13 @@
 //! Provides:
 //! - [`rtmp`] — RTMP ingest server (accepts live pushes from OBS / encoders)
 //! - [`hls`] — HLS packaging (segment generation + playlist management)
+//! - [`rtmp_live`] — Enhanced RTMP (AV1/VP9 + Opus) ingest into the same live HLS
 //! - [`live`] — WebM (AV1/VP9 + Opus) HTTP ingest with live fMP4 HLS playback
 
 pub mod hls;
 pub mod live;
 pub mod rtmp;
+pub mod rtmp_live;
 
 pub use hls::{
     playlist::HlsPlaylist,
@@ -15,3 +17,4 @@ pub use hls::{
 };
 pub use live::LiveServer;
 pub use rtmp::server::{RtmpConfig, RtmpServer};
+pub use rtmp_live::RtmpLiveSession;

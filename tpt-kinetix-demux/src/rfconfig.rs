@@ -1,7 +1,8 @@
 //! Codec configuration helpers for the royalty-free codecs, shared by every
 //! ingest path (WebM, Enhanced RTMP, ...): VP9 key-frame header parsing and the
 //! `vpcC` record, `OpusHead` to `dOps` conversion, and Opus packet durations.
-//! AV1 needs none: its `av1C` record is carried verbatim.
+//! AV1 needs no conversion (its `av1C` record is carried verbatim), only
+//! [`av1_dimensions`] to learn the picture size from it.
 
 /// What a VP9 key frame says about the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,110 @@ impl Bits<'_> {
     fn bits(&mut self, n: u32) -> Option<u32> {
         (0..n).try_fold(0u32, |v, _| Some((v << 1) | self.bit()?))
     }
+}
+
+/// The maximum coded size announced by the sequence header inside an `av1C`
+/// record (4 bytes of header, then `configOBUs`), or inside a bare sequence
+/// header OBU stream. `None` when no usable sequence header is present.
+pub fn av1_dimensions(av1c: &[u8]) -> Option<(u32, u32)> {
+    // An av1C record starts with marker(1)=1 version(7)=1.
+    let mut obus = if av1c.first() == Some(&0x81) {
+        av1c.get(4..)?
+    } else {
+        av1c
+    };
+    while !obus.is_empty() {
+        let header = obus[0];
+        let obu_type = (header >> 3) & 0xF;
+        let ext = usize::from(header & 4 != 0);
+        let has_size = header & 2 != 0;
+        let mut at = 1 + ext;
+        let size = if has_size {
+            let mut v = 0u64;
+            let mut i = 0;
+            loop {
+                let b = *obus.get(at)?;
+                at += 1;
+                v |= u64::from(b & 0x7F) << (7 * i);
+                i += 1;
+                if b & 0x80 == 0 {
+                    break;
+                }
+                if i >= 8 {
+                    return None;
+                }
+            }
+            usize::try_from(v).ok()?
+        } else {
+            obus.len().checked_sub(at)?
+        };
+        let payload = obus.get(at..at.checked_add(size)?)?;
+        if obu_type == 1 {
+            return seq_header_dimensions(payload);
+        }
+        obus = &obus[at + size..];
+    }
+    None
+}
+
+fn seq_header_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
+    let mut r = Bits {
+        data: payload,
+        pos: 0,
+    };
+    r.bits(3)?; // seq_profile
+    r.bit()?; // still_picture
+    let reduced = r.bit()? == 1;
+    if reduced {
+        r.bits(5)?; // seq_level_idx[0]
+    } else {
+        let timing_info = r.bit()? == 1;
+        let mut decoder_model = false;
+        let mut delay_len = 0;
+        if timing_info {
+            r.bits(32)?; // num_units_in_display_tick
+            r.bits(32)?; // time_scale
+            if r.bit()? == 1 {
+                // equal_picture_interval: uvlc num_ticks_per_picture_minus_1
+                let mut zeros = 0;
+                while r.bit()? == 0 {
+                    zeros += 1;
+                    if zeros >= 32 {
+                        return None;
+                    }
+                }
+                r.bits(zeros)?;
+            }
+            decoder_model = r.bit()? == 1;
+            if decoder_model {
+                delay_len = r.bits(5)? + 1; // buffer_delay_length_minus_1
+                r.bits(32)?; // num_units_in_decoding_tick
+                r.bits(5)?; // buffer_removal_time_length_minus_1
+                r.bits(5)?; // frame_presentation_time_length_minus_1
+            }
+        }
+        let display_delay = r.bit()? == 1;
+        let ops = r.bits(5)? + 1;
+        for _ in 0..ops {
+            r.bits(12)?; // operating_point_idc
+            if r.bits(5)? > 7 {
+                r.bit()?; // seq_tier
+            }
+            if decoder_model && r.bit()? == 1 {
+                r.bits(delay_len)?; // decoder_buffer_delay
+                r.bits(delay_len)?; // encoder_buffer_delay
+                r.bit()?; // low_delay_mode_flag
+            }
+            if display_delay && r.bit()? == 1 {
+                r.bits(4)?; // initial_display_delay_minus_1
+            }
+        }
+    }
+    let wbits = r.bits(4)? + 1;
+    let hbits = r.bits(4)? + 1;
+    let w = r.bits(wbits)? + 1;
+    let h = r.bits(hbits)? + 1;
+    Some((w, h))
 }
 
 /// Parses the uncompressed header of a VP9 **key frame**. `hint_w`/`hint_h` are
@@ -289,6 +394,19 @@ mod tests {
         assert!(vp9_config_from_frame(&[0x00, 0x01], 0, 0).is_none());
         assert!(vp9_config_from_frame(&bytes[..4], 0, 0).is_none());
         assert!(vp9_config_from_frame(&[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn av1_dimensions_from_sequence_header() {
+        // Hand-built reduced still-picture header, 2 x 2: profile 0, still 1, reduced 1,
+        // level 0 (5 bits), wbits-1 = 1, hbits-1 = 1, w-1 = 1, h-1 = 1 (2 bits each).
+        // bits: 000 1 1 00000 0001 0001 01 01 -> 0x18 0x04 0x54
+        let bits = [0x18, 0x04, 0x54];
+        let mut obu = vec![0x0A, bits.len() as u8];
+        obu.extend_from_slice(&bits);
+        assert_eq!(av1_dimensions(&obu), Some((2, 2)));
+        assert_eq!(av1_dimensions(&[]), None);
+        assert_eq!(av1_dimensions(&[0x0A, 0x05, 0x00]), None);
     }
 
     #[test]

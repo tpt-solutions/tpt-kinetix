@@ -16,8 +16,13 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 ### A. Live and ingest
 
 - [x] WebM-over-HTTP ingest (AV1/VP9 + Opus) -> live fMP4 HLS (`tpt-kinetix live`, `LiveServer`)
-- [ ] **Enhanced RTMP ingest** for AV1 / VP9 (FLV `ExVideoTagHeader`, FourCC `av01`/`vp09`; `av1C`/`vpcC` sequence start;
-      Opus via Enhanced RTMP audio FourCC once a sender exists — ffmpeg 6.1 cannot send it). Lets OBS-style encoders publish.
+- [x] **Enhanced RTMP ingest** for AV1 / VP9 + Opus (`tpt-kinetix live --rtmp-port`, `rtmp_live.rs`): `ExVideoTagHeader`
+      (`av01`/`vp09`, av1C/vpcC sequence start, CodedFrames/CodedFramesX) and `ExAudioTagHeader` (`Opus`); per-connection
+      sessions; frames decode identically to the WebM source (hand-written client, AV1 and VP9) and a stock ffmpeg
+      publishes VP9/AV1 end to end. Also fixed two RTMP chunk-stream bugs found on the way (SetChunkSize applied late
+      within a read; type-1/2 header delta applied twice when a payload arrived in pieces).
+      Open follow-ups: Enhanced `Multitrack` and `Metadata` (HDR colour info) packets, the E-RTMP v2 capability exchange
+      (`videoFourCcInfoMap`), extended timestamps on continuation chunks, RTMPS (TLS), and a real OBS pass.
 - [ ] **Low-latency HLS**: `EXT-X-PART` partial segments, `EXT-X-SERVER-CONTROL`, blocking playlist reload
       (`_HLS_msn`/`_HLS_part`), preload hints. Target glass-to-glass < 3 s (today ~3 segments = 6 s).
 - [ ] **Dynamic DASH MPD** for live (`type="dynamic"`, `availabilityStartTime`, sliding `SegmentTimeline`/`$Number$`,

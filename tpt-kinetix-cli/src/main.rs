@@ -83,6 +83,10 @@ enum Commands {
         /// Listen on all interfaces instead of localhost only.
         #[arg(long)]
         public: bool,
+        /// Also accept Enhanced RTMP publishers (AV1/VP9 + Opus) on this port, e.g. 1935;
+        /// they publish to `rtmp://host:port/live/<key>` and play at `/<key>/master.m3u8`.
+        #[arg(long)]
+        rtmp_port: Option<u16>,
     },
     /// Serve an MP4 as HLS and DASH, packaged just in time (nothing is pre-processed).
     Serve {
@@ -179,17 +183,28 @@ async fn main() -> Result<()> {
             segment_seconds,
             window,
             public,
+            rtmp_port,
         } => {
             let host = if public { "0.0.0.0" } else { "127.0.0.1" };
             println!(
                 "live server on http://{host}:{port}\n  publish: POST a WebM (AV1/VP9 + Opus) to /ingest/<key>\n  play   : http://{host}:{port}/<key>/master.m3u8"
             );
-            tpt_kinetix_stream::LiveServer::new(tpt_kinetix_package::LiveOptions {
+            let server = tpt_kinetix_stream::LiveServer::new(tpt_kinetix_package::LiveOptions {
                 segment_seconds,
                 window,
-            })
-            .bind_and_serve(&format!("{host}:{port}"))
-            .await
+            });
+            if let Some(rtmp) = rtmp_port {
+                println!(
+                    "  rtmp   : rtmp://{host}:{rtmp}/live/<key> (Enhanced RTMP: AV1/VP9 + Opus)"
+                );
+                let rtmp_server = server.rtmp_server(&format!("{host}:{rtmp}"));
+                tokio::spawn(async move {
+                    if let Err(e) = rtmp_server.run().await {
+                        eprintln!("RTMP server stopped: {e}");
+                    }
+                });
+            }
+            server.bind_and_serve(&format!("{host}:{port}")).await
         }
         Commands::Package {
             input,

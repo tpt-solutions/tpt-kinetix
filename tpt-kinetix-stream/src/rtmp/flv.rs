@@ -48,6 +48,10 @@ pub enum FlvVideoCodec {
     Avc,
     /// HEVC / H.265 (codec id 12, enhanced-RTMP / common extension).
     Hevc,
+    /// AV1 (Enhanced RTMP FourCC `av01`).
+    Av1,
+    /// VP9 (Enhanced RTMP FourCC `vp09`).
+    Vp9,
     /// Other codec id.
     Other(u8),
 }
@@ -118,9 +122,64 @@ pub enum FlvError {
     Truncated,
 }
 
-/// Parse an RTMP `Video` message payload into a [`FlvVideoTag`].
+/// Parses an Enhanced RTMP `ExVideoTagHeader` payload (first byte has bit 7 set).
+fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
+    let first = payload[0];
+    let frame_type = FlvFrameType::from_nibble((first >> 4) & 7);
+    let packet_type = first & 0x0F;
+    if payload.len() < 5 {
+        return Err(FlvError::Truncated);
+    }
+    let codec = match &payload[1..5] {
+        b"av01" => FlvVideoCodec::Av1,
+        b"vp09" => FlvVideoCodec::Vp9,
+        b"avc1" => FlvVideoCodec::Avc,
+        b"hvc1" => FlvVideoCodec::Hevc,
+        _ => FlvVideoCodec::Other(0xF0),
+    };
+    let mut tag = FlvVideoTag {
+        frame_type,
+        codec,
+        avc_packet_type: AvcPacketType::Unknown(packet_type),
+        composition_time: 0,
+        data: Vec::new(),
+    };
+    // A video-info frame carries a command byte, not coded data.
+    if frame_type == FlvFrameType::VideoInfo {
+        return Ok(tag);
+    }
+    let mut body = &payload[5..];
+    tag.avc_packet_type = match packet_type {
+        0 => AvcPacketType::SequenceHeader,
+        // CodedFrames (with a composition time only for AVC/HEVC) and CodedFramesX.
+        1 | 3 => AvcPacketType::Nalu,
+        2 => AvcPacketType::EndOfSequence,
+        other => AvcPacketType::Unknown(other),
+    };
+    if packet_type == 1 && matches!(codec, FlvVideoCodec::Avc | FlvVideoCodec::Hevc) {
+        let b = body.get(..3).ok_or(FlvError::Truncated)?;
+        let raw = (i32::from(b[0]) << 16) | (i32::from(b[1]) << 8) | i32::from(b[2]);
+        tag.composition_time = if raw & 0x0080_0000 != 0 {
+            raw - 0x0100_0000
+        } else {
+            raw
+        };
+        body = &body[3..];
+    }
+    if matches!(tag.avc_packet_type, AvcPacketType::Unknown(_)) {
+        return Ok(tag);
+    }
+    tag.data = body.to_vec();
+    Ok(tag)
+}
+
+/// Parse an RTMP `Video` message payload into a [`FlvVideoTag`]. Understands both
+/// the classic FLV layout and Enhanced RTMP's `ExVideoTagHeader` (AV1, VP9, ...).
 pub fn parse_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
     let first = *payload.first().ok_or(FlvError::Truncated)?;
+    if first & 0x80 != 0 {
+        return parse_ex_video_tag(payload);
+    }
     let frame_type = FlvFrameType::from_nibble(first >> 4);
     let codec = FlvVideoCodec::from_nibble(first & 0x0F);
 
@@ -146,7 +205,7 @@ pub fn parse_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
                 data: payload[5..].to_vec(),
             })
         }
-        FlvVideoCodec::Other(_) => Ok(FlvVideoTag {
+        FlvVideoCodec::Av1 | FlvVideoCodec::Vp9 | FlvVideoCodec::Other(_) => Ok(FlvVideoTag {
             frame_type,
             codec,
             avc_packet_type: AvcPacketType::Unknown(0),
@@ -163,6 +222,8 @@ pub enum FlvAudioCodec {
     Aac,
     /// MP3 (codec id 2).
     Mp3,
+    /// Opus (Enhanced RTMP FourCC `Opus`).
+    Opus,
     /// Other codec id.
     Other(u8),
 }
@@ -209,6 +270,34 @@ impl FlvAudioTag {
 /// Parse an RTMP `Audio` message payload into a [`FlvAudioTag`].
 pub fn parse_audio_tag(payload: &[u8]) -> Result<FlvAudioTag, FlvError> {
     let first = *payload.first().ok_or(FlvError::Truncated)?;
+    // Enhanced RTMP: SoundFormat 9 (ExHeader), the low nibble is the packet type,
+    // then a FourCC.
+    if first >> 4 == 9 {
+        let fourcc = payload.get(1..5).ok_or(FlvError::Truncated)?;
+        let codec = if fourcc == b"Opus" {
+            FlvAudioCodec::Opus
+        } else {
+            FlvAudioCodec::Other(9)
+        };
+        let aac_packet_type = match first & 0x0F {
+            0 => AacPacketType::SequenceHeader,
+            1 => AacPacketType::Raw,
+            other => AacPacketType::Unknown(other),
+        };
+        let data = if matches!(
+            aac_packet_type,
+            AacPacketType::SequenceHeader | AacPacketType::Raw
+        ) {
+            payload[5..].to_vec()
+        } else {
+            Vec::new()
+        };
+        return Ok(FlvAudioTag {
+            codec,
+            aac_packet_type,
+            data,
+        });
+    }
     let codec = FlvAudioCodec::from_nibble(first >> 4);
 
     match codec {
@@ -265,6 +354,48 @@ mod tests {
         assert_eq!(tag.codec, FlvAudioCodec::Aac);
         assert_eq!(tag.aac_packet_type, AacPacketType::Raw);
         assert_eq!(tag.data, vec![0x21, 0x22]);
+    }
+
+    #[test]
+    fn parses_enhanced_av1_and_vp9() {
+        // ExHeader | key frame | SequenceStart, "av01", av1C bytes.
+        let mut p = vec![0x80 | 0x10, b'a', b'v', b'0', b'1', 0x81, 0x00];
+        let t = parse_video_tag(&p).unwrap();
+        assert_eq!(t.codec, FlvVideoCodec::Av1);
+        assert!(t.is_sequence_header() && t.frame_type.is_keyframe());
+        assert_eq!(t.data, vec![0x81, 0x00]);
+        // CodedFramesX (3) and CodedFrames (1) of a non-AVC codec have no cts.
+        for pt in [1u8, 3] {
+            p = vec![0x80 | 0x20 | pt, b'v', b'p', b'0', b'9', 1, 2, 3];
+            let t = parse_video_tag(&p).unwrap();
+            assert_eq!(t.codec, FlvVideoCodec::Vp9);
+            assert_eq!(t.avc_packet_type, AvcPacketType::Nalu);
+            assert_eq!((t.composition_time, t.data), (0, vec![1, 2, 3]));
+        }
+        // Enhanced HEVC CodedFrames does carry a cts.
+        let t = parse_video_tag(&[0x80 | 0x20 | 1, b'h', b'v', b'c', b'1', 0, 0, 40, 9]).unwrap();
+        assert_eq!(
+            (t.codec, t.composition_time, t.data),
+            (FlvVideoCodec::Hevc, 40, vec![9])
+        );
+        // Metadata / multitrack packets and truncation are not media.
+        let t = parse_video_tag(&[0x80 | 0x10 | 4, b'a', b'v', b'0', b'1', 7]).unwrap();
+        assert!(t.data.is_empty() && !t.is_sequence_header());
+        assert!(parse_video_tag(&[0x81, b'a', b'v']).is_err());
+    }
+
+    #[test]
+    fn parses_enhanced_opus() {
+        let t = parse_audio_tag(&[0x90, b'O', b'p', b'u', b's', b'O', b'p']).unwrap();
+        assert_eq!(t.codec, FlvAudioCodec::Opus);
+        assert!(t.is_sequence_header());
+        assert_eq!(t.data, b"Op".to_vec());
+        let t = parse_audio_tag(&[0x91, b'O', b'p', b'u', b's', 0xFC, 0xFF]).unwrap();
+        assert_eq!(
+            (t.aac_packet_type, t.data),
+            (AacPacketType::Raw, vec![0xFC, 0xFF])
+        );
+        assert!(parse_audio_tag(&[0x90, b'O']).is_err());
     }
 
     #[test]

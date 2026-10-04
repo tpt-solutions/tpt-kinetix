@@ -30,7 +30,7 @@ use tpt_kinetix_package::{LiveOptions, LivePackager};
 /// Largest header block accepted from a client.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 
-type Shared = Arc<Mutex<LivePackager>>;
+pub(crate) type Shared = Arc<Mutex<LivePackager>>;
 
 /// Live ingest + HLS server state.
 #[derive(Clone)]
@@ -46,6 +46,22 @@ impl LiveServer {
             opts,
             streams: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Registers a new presentation under `key`, replacing any earlier one;
+    /// `None` when `key` is not a valid stream key.
+    pub(crate) fn begin(&self, key: &str) -> Option<Shared> {
+        if !valid_key(key) {
+            tracing::warn!(key, "rejecting an invalid stream key");
+            return None;
+        }
+        let live: Shared = Arc::new(Mutex::new(LivePackager::new(self.opts.clone())));
+        self.streams
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), live.clone());
+        tracing::info!(key, "publish started");
+        Some(live)
     }
 
     /// Accepts connections on `listener` forever.

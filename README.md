@@ -31,7 +31,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
 | VP9 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Profile-0 (8-bit 4:2:0) decode implemented end-to-end (reconstruction, reference management, loop filtering, superframes). The whole ffmpeg conformance corpus — 13 clips covering lossless/lossy, content, intra-only, inter, odd size 125x67, and multitile — decodes byte-exact vs `ffmpeg -c:v vp9` on every plane, and the test asserts it (`capabilities().pixel_exact == true`; `tpt-kinetix-vp9`, see `todo-vp9.md`). Wired into the pipeline (`Vp9DecodeStage`) and the CLI (`probe` reports decoder status; VP9-input transcode to AV1 takes this royalty-free path). |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
-| RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization |
+| RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization; **Enhanced RTMP** AV1/VP9 + Opus straight into live HLS (`live --rtmp-port`) |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
 | CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4 and MPEG-TS input, format-sniffed). `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path (VP9 is the only supported transcode input). `stream` is still a stub. |
 

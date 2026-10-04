@@ -218,6 +218,16 @@ impl Default for ChunkParser {
     }
 }
 
+/// The chunk stream id in the basic header at the start of `data`, if complete.
+fn peek_chunk_stream_id(data: &[u8]) -> Option<u32> {
+    let first = *data.first()?;
+    match first & 0x3F {
+        0 => Some(u32::from(*data.get(1)?) + 64),
+        1 => Some(u32::from(*data.get(2)?) * 256 + u32::from(*data.get(1)?) + 64),
+        id => Some(u32::from(id)),
+    }
+}
+
 /// A fully reassembled RTMP message (all its chunks concatenated).
 #[derive(Debug, Clone)]
 pub struct RtmpMessage {
@@ -278,6 +288,11 @@ impl ChunkAssembler {
         let mut out = Vec::new();
 
         loop {
+            // Parsing a header records it as the chunk stream's latest; remember the
+            // previous one so an attempt that must wait for more payload can be undone
+            // (re-parsing a type 1/2 header would otherwise add its delta twice).
+            let peeked = peek_chunk_stream_id(&self.buf);
+            let saved = peeked.and_then(|id| self.parser.prev_headers.get(&id).cloned());
             // Try to parse one chunk header from the front of the buffer.
             let (header, after_header_len) = match self.parser.parse_chunk_header(&self.buf) {
                 Ok((h, remaining)) => (h, self.buf.len() - remaining.len()),
@@ -294,10 +309,12 @@ impl ChunkAssembler {
 
             // Do we have the whole chunk payload buffered?
             if self.buf.len() < after_header_len + this_chunk {
-                // Roll back: we consumed header parsing state but not enough
-                // payload. Since parse_chunk_header mutated prev_headers, we must
-                // still wait; leave buffer intact and break. (Header state is
-                // idempotent enough for the next attempt on the same bytes.)
+                // Not enough payload yet: undo the header bookkeeping, keep the
+                // bytes buffered and retry when more arrive.
+                match saved {
+                    Some(h) => self.parser.prev_headers.insert(cs_id, h),
+                    None => self.parser.prev_headers.remove(&cs_id),
+                };
                 break;
             }
 
@@ -314,6 +331,14 @@ impl ChunkAssembler {
 
             if entry.data.len() >= header.message_length as usize {
                 let complete = self.partial.remove(&cs_id).expect("just inserted");
+                // A chunk-size change applies to the very next chunk, which may
+                // already be in this buffer.
+                if complete.header.message_type_id == MessageTypeId::SetChunkSize as u8
+                    && complete.data.len() >= 4
+                {
+                    let size = u32::from_be_bytes(complete.data[..4].try_into().unwrap());
+                    self.set_chunk_size(size & 0x7FFF_FFFF);
+                }
                 out.push(RtmpMessage {
                     message_type_id: complete.header.message_type_id,
                     message_stream_id: complete.header.message_stream_id,
@@ -394,6 +419,35 @@ mod tests {
         v.extend_from_slice(&stream_id.to_le_bytes()); // message_stream_id (LE)
         v.extend_from_slice(payload);
         v
+    }
+
+    #[test]
+    fn chunk_size_change_applies_within_the_same_read() {
+        // SetChunkSize(4096) immediately followed by a 300-byte message: the message is a
+        // single chunk only if the new size is already in force when it is parsed.
+        let mut wire = type0_chunk(1, 0, &4096u32.to_be_bytes());
+        let big = vec![7u8; 300];
+        wire.extend(type0_chunk(9, 1, &big));
+        let mut asm = ChunkAssembler::new();
+        let msgs = asm.push(&wire);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1].payload, big);
+        assert_eq!(asm.chunk_size(), 4096);
+    }
+
+    #[test]
+    fn type1_delta_is_applied_once_when_the_payload_arrives_late() {
+        let mut asm = ChunkAssembler::new();
+        // A first message at t=1000 on chunk stream 4, then a type-1 message (delta 40)
+        // whose payload is delivered in two reads.
+        let mut first = vec![0x04, 0x00, 0x03, 0xE8, 0, 0, 2, 9, 1, 0, 0, 0, 1, 2];
+        assert_eq!(asm.push(&first).len(), 1);
+        first = vec![0x44, 0, 0, 40, 0, 0, 4, 9, 10, 11];
+        assert!(asm.push(&first).is_empty());
+        let msgs = asm.push(&[12, 13]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].timestamp, 1040);
+        assert_eq!(msgs[0].payload, vec![10, 11, 12, 13]);
     }
 
     #[test]
