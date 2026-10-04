@@ -6,7 +6,7 @@ use std::process::Command;
 
 use tpt_kinetix_core::codec::CodecId;
 use tpt_kinetix_core::stream::StreamInfo;
-use tpt_kinetix_demux::{Demuxer, MkvReader};
+use tpt_kinetix_demux::{Demuxer, MkvReader, MkvSample};
 use tpt_kinetix_mux::{WebmOptions, WebmWriter};
 
 fn have(tool: &str) -> bool {
@@ -64,8 +64,18 @@ fn remux(src: &[u8], seekable: bool, cluster_ms: i64) -> Vec<u8> {
         WebmWriter::with_options(cursor, opts)
     };
     w.set_tracks(reader.streams()).unwrap();
-    while let Some(p) = reader.read_packet().unwrap() {
-        w.write_packet_ms(&p, None).unwrap();
+    let samples: Vec<MkvSample> = reader.samples().to_vec();
+    for (i, p) in std::iter::from_fn(|| reader.read_packet().unwrap()).enumerate() {
+        let here = &samples[i];
+        // Carry the per-frame `DiscardPadding` so a trailing partial frame
+        // survives: a `SimpleBlock` cannot express it.
+        let dur = samples
+            .iter()
+            .skip(i + 1)
+            .find(|n| n.stream == here.stream)
+            .map_or(20, |n| (n.pts_ms - here.pts_ms).max(1) as u32);
+        w.write_packet_ms_discarding(&p, Some(dur), here.discard_padding)
+            .unwrap();
     }
     w.finish().unwrap();
     w.into_inner().into_inner()
@@ -157,10 +167,13 @@ fn webm_remux_round_trips_through_ffmpeg_in_both_modes() {
                 want_v,
                 "{name}/{label}: video decodes differently"
             );
-            // Every audio frame decodes identically except the very last: the
-            // source's Matroska `DiscardPadding` trims the encoder's final partial
-            // frame, which a plain `SimpleBlock` passthrough does not carry. (A
-            // `BlockGroup` with `DiscardPadding` would; see todo-io.md.)
+            // Every audio frame decodes identically except the very last. The
+            // source's final Opus packet is a partial frame the encoder trimmed
+            // with `DiscardPadding`; this writer now carries that trim in the
+            // container (verified below), but ffmpeg still presents the last
+            // frame at its full decoded length here, where ffmpeg's own `-c copy`
+            // trims it. See todo-io.md — the container metadata is right, the
+            // remaining difference is not isolated.
             let got_a = frame_md5s(&path, "0:a:0");
             assert_eq!(got_a.len(), want_a.len(), "{name}/{label}: audio frames");
             let n = want_a.len().saturating_sub(1);
@@ -168,6 +181,21 @@ fn webm_remux_round_trips_through_ffmpeg_in_both_modes() {
                 got_a[..n],
                 want_a[..n],
                 "{name}/{label}: audio decodes differently"
+            );
+            // The trim itself survives the round trip in the container.
+            let r = MkvReader::open(out.clone()).unwrap();
+            let src_r = MkvReader::open(src.clone()).unwrap();
+            let got = r.samples_of(1);
+            let src_frames = src_r.samples_of(1);
+            let got_disc: Vec<u64> = got.iter().map(|s| s.discard_padding).collect();
+            let src_disc: Vec<u64> = src_frames.iter().map(|s| s.discard_padding).collect();
+            assert_eq!(
+                got_disc, src_disc,
+                "{name}/{label}: DiscardPadding not preserved"
+            );
+            assert!(
+                got_disc.iter().any(|d| *d > 0),
+                "{name}/{label}: expected a trimmed final frame"
             );
             // And our own reader must index it back to the same frame count.
             let r = MkvReader::open(out.clone()).unwrap();

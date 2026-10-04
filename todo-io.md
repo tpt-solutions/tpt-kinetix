@@ -41,8 +41,14 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [ ] Multi-rendition ladders (needs transcoding; passthrough only today — separate decision).
 - [x] Opus pre-skip carried end to end: the `dOps` pre-skip becomes `OpusHead` on ingest and `CodecDelay`
       + `SeekPreRoll` on WebM output (measured against ffmpeg: without it the stream starts 7 ms late).
-      Still open: `DiscardPadding` (the source's final partial frame is not trimmed on output — needs
-      `BlockGroup`, not `SimpleBlock`).
+- [ ] **`DiscardPadding` (end trim) — partially done, one open question.** 2026-10-04: `MkvStream` now parses
+      `DiscardPadding` (0x75A2) and `WebmWriter` re-emits it in a `BlockGroup`, so the trim round-trips
+      (verified: our reader sees the identical value, and the bytes match ffmpeg's). NOTE the value is in
+      *nanoseconds* per the Matroska TimestampScale, not samples — that cost two 1000x bugs. But ffmpeg
+      still decodes the final frame at its full length (803 samples) where it decodes the source as 312,
+      even though **`ffmpeg -c copy` itself preserves 312** — so something else differs and is NOT yet
+      isolated. Measured state: 100/100 video frames and 200/201 audio frames decode identically after
+      a WebM->WebM remux; only the final trimmed frame differs.
 - [ ] HEVC/H.264/AAC live paths (secondary): FLV legacy RTMP -> the same `LivePackager` (the old TS HLS server stays).
 
 ### B. Packaging (VOD) and edge
@@ -69,8 +75,9 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [x] **WebM/Matroska muxer** (`WebmWriter`, `tpt-kinetix-mux/src/webm.rs`): `Write`-based, live (unknown-size
       clusters/segment, no seeking) and finite (patched sizes + `Cues` + `Duration`); AV1/VP9/Opus
       passthrough with `av1C` carried verbatim, `OpusHead` synthesised from `dOps`, pre-skip as
-      `CodecDelay`/`SeekPreRoll`; `remux` writes `.webm`. Round-trips ffmpeg-made files (video frame-exact,
-      audio frame-exact but for the last frame, which needs `DiscardPadding` in a `BlockGroup`).
+      `CodecDelay`/`SeekPreRoll`, `DiscardPadding` re-emitted in a `BlockGroup`; `remux` writes `.webm`.
+      Round-trips ffmpeg-made files: video frame-exact, audio frame-exact but for the final trimmed
+      frame (see the `DiscardPadding` note in section A).
 - [x] Replaced the whole-buffer MKV demuxer with `MkvReader` (index over `ReadAt` + `StreamInfo`, seek to key
       frame, `probe` sniffs the EBML magic). M2 for MKV. The index pass reads the file once (Matroska has no
       seekable `moov`), but keeps only the frame index in memory and reads each frame by offset.

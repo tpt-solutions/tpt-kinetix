@@ -50,6 +50,7 @@ const ID_BLOCK_GROUP: u32 = 0xA0;
 const ID_BLOCK: u32 = 0xA1;
 const ID_BLOCK_DURATION: u32 = 0x9B;
 const ID_REFERENCE_BLOCK: u32 = 0xFB;
+const ID_DISCARD_PADDING: u32 = 0x75A2;
 
 /// Something the parser found in the stream.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +75,13 @@ pub struct MkvFrame {
     pub data: Vec<u8>,
     /// Duration in milliseconds when the container states it (`BlockDuration`).
     pub duration_ms: Option<u32>,
+    /// Samples to discard from the end of this frame's presentation
+    /// (`DiscardPadding`), in the codec's own rate — 48 kHz for Opus. `0` when
+    /// the container states none.
+    ///
+    /// Matroska states the value in nanoseconds; it is converted here so callers
+    /// can subtract it from a frame's sample count directly.
+    pub discard_padding: u64,
     /// Absolute byte offset of the payload within the stream, as fed to
     /// [`MkvStream::push`]. A reader over a [`ReadAt`](crate::source::ReadAt)
     /// source uses it to fetch exactly this frame with one ranged read.
@@ -99,6 +107,8 @@ struct RawFrame {
     key: bool,
     data: Vec<u8>,
     duration_ms: Option<u32>,
+    /// `DiscardPadding` in samples (see [`MkvFrame::discard_padding`]).
+    discard_padding: u64,
     /// Absolute offset of `data` in the stream.
     offset: u64,
 }
@@ -313,6 +323,7 @@ impl MkvStream {
                 | ID_BLOCK
                 | ID_BLOCK_DURATION
                 | ID_REFERENCE_BLOCK
+                | ID_DISCARD_PADDING
         )
     }
 
@@ -367,6 +378,16 @@ impl MkvStream {
                     g.key = false;
                 }
             }
+            ID_DISCARD_PADDING => {
+                // Matroska states this in TimestampScale units (nanoseconds here),
+                // but it is a trim in *samples*: convert so callers work in the
+                // codec's own rate. 0x00CDFE60 (13.5 ms) is 648 of a 960-sample
+                // Opus frame, which is how ffmpeg ends an encode.
+                if let Some(g) = &mut self.pending_group {
+                    let ns = uint(body);
+                    g.discard_padding = (ns / 1_000_000) * 48 + (ns % 1_000_000) * 48 / 1_000_000;
+                }
+            }
             _ => {
                 if let Some(b) = &mut self.building {
                     match id {
@@ -419,6 +440,7 @@ impl MkvStream {
             key: !simple || flags & 0x80 != 0,
             data: body[tl + 3..].to_vec(),
             duration_ms: None,
+            discard_padding: 0,
             offset: body_offset + (tl + 3) as u64,
         }))
     }
@@ -459,6 +481,7 @@ impl MkvStream {
             key: f.key,
             data: f.data,
             duration_ms: f.duration_ms,
+            discard_padding: f.discard_padding,
             offset: f.offset,
         }));
     }

@@ -63,6 +63,10 @@ const ID_BIT_DEPTH: u32 = 0x6264;
 const ID_CLUSTER: u32 = 0x1F43_B675;
 const ID_CLUSTER_TIMESTAMP: u32 = 0xE7;
 const ID_SIMPLE_BLOCK: u32 = 0xA3;
+const ID_BLOCK_GROUP: u32 = 0xA0;
+const ID_BLOCK: u32 = 0xA1;
+const ID_BLOCK_DURATION: u32 = 0x9B;
+const ID_DISCARD_PADDING: u32 = 0x75A2;
 const ID_CUES: u32 = 0x1C53_BB6B;
 const ID_CUE_POINT: u32 = 0xBB;
 const ID_CUE_TIME: u32 = 0xB3;
@@ -139,6 +143,17 @@ fn elem_float(out: &mut Vec<u8>, id: u32, value: f64) {
 
 fn elem_string(out: &mut Vec<u8>, id: u32, value: &str) {
     elem(out, id, value.as_bytes());
+}
+
+/// The body of a `Block`/`SimpleBlock`: track vint, 16-bit timecode, flags, payload.
+fn block_body(track: u64, rel_ms: i16, key: bool, data: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(data.len() + 4);
+    vint_size(&mut body, track, 1); // track number as a 1-byte vint
+    body.extend_from_slice(&rel_ms.to_be_bytes());
+    // Keyframe flag; no lacing, no invisible, no discardable.
+    body.push(if key { 0x80 } else { 0x00 });
+    body.extend_from_slice(data);
+    body
 }
 
 /// The Matroska `CodecId` string for a supported track, or `None`.
@@ -404,6 +419,20 @@ impl<W: Write> WebmWriter<W> {
         packet: &Packet,
         duration: Option<u32>,
     ) -> Result<(), KinetixError> {
+        self.write_packet_discarding(packet, duration, 0)
+    }
+
+    /// Like [`Self::write_packet`], plus a `DiscardPadding` in samples (48 kHz),
+    /// which the writer emits as a `BlockGroup`.
+    ///
+    /// The duration must be the frame's *full* duration; the discard is stated
+    /// separately, as the container does.
+    pub fn write_packet_discarding(
+        &mut self,
+        packet: &Packet,
+        duration: Option<u32>,
+        discard: u64,
+    ) -> Result<(), KinetixError> {
         if self.finished {
             return Ok(());
         }
@@ -425,7 +454,20 @@ impl<W: Write> WebmWriter<W> {
             self.open_cluster(pts_ms)?;
         }
         let base = self.cluster.as_ref().map_or(0, |c| c.timestamp_ms);
-        self.write_block(number, (pts_ms - base) as i16, key, &data)?;
+        let rel = pts_ms - base;
+        if discard > 0 {
+            // A `SimpleBlock` cannot carry a discard, so this frame needs the
+            // `BlockGroup` form.
+            //
+            // No `BlockDuration`: ffmpeg does not state one on a trimmed final
+            // block either — it lets the decoder use the packet's own duration
+            // and subtracts the padding — and writing one changes how the trim is
+            // applied, so the last frame would decode to a different length.
+            let trim_ns = discard * 1_000_000_000 / 48_000;
+            self.write_block_group(number, rel as i16, key, &data, None, trim_ns)?;
+        } else {
+            self.write_block(number, rel as i16, key, &data)?;
+        }
         self.last_ms = self.last_ms.max(pts_ms + duration_ms(duration, timescale));
         Ok(())
     }
@@ -443,6 +485,24 @@ impl<W: Write> WebmWriter<W> {
             .map_or(1000, |t| t.info.timescale.max(1));
         let d = duration_ms.map(|ms| (u64::from(ms) * u64::from(timescale) / 1000) as u32);
         self.write_packet(packet, d)
+    }
+
+    /// Like [`Self::write_packet_ms`], plus a `DiscardPadding` in samples (48 kHz).
+    ///
+    /// `duration_ms` is the frame's *full* duration; the trim is stated
+    /// separately, as Matroska does.
+    pub fn write_packet_ms_discarding(
+        &mut self,
+        packet: &Packet,
+        duration_ms: Option<u32>,
+        discard: u64,
+    ) -> Result<(), KinetixError> {
+        let timescale = self
+            .tracks
+            .get(packet.stream_index as usize)
+            .map_or(1000, |t| t.info.timescale.max(1));
+        let d = duration_ms.map(|ms| (u64::from(ms) * u64::from(timescale) / 1000) as u32);
+        self.write_packet_discarding(packet, d, discard)
     }
 }
 
@@ -605,14 +665,38 @@ impl<W: Write> WebmWriter<W> {
         key: bool,
         data: &[u8],
     ) -> Result<(), KinetixError> {
-        let mut body = Vec::with_capacity(data.len() + 4);
-        vint_size(&mut body, track, 1); // track number as a 1-byte vint
-        body.extend_from_slice(&rel_ms.to_be_bytes());
-        // Keyframe flag; no lacing, no invisible, no discardable.
-        body.push(if key { 0x80 } else { 0x00 });
-        body.extend_from_slice(data);
         let mut buf = Vec::new();
-        elem(&mut buf, ID_SIMPLE_BLOCK, &body);
+        elem(
+            &mut buf,
+            ID_SIMPLE_BLOCK,
+            &block_body(track, rel_ms, key, data),
+        );
+        self.flush(&buf)
+    }
+
+    /// Writes a `BlockGroup` around the block, with a `BlockDuration` and a
+    /// `DiscardPadding` (both in nanoseconds, per the Matroska TimestampScale).
+    ///
+    /// A `SimpleBlock` cannot carry either, so this is how a trailing partial
+    /// frame (the encoder's `DiscardPadding`) survives a remux: without it a
+    /// player presents samples the source trimmed away.
+    fn write_block_group(
+        &mut self,
+        track: u64,
+        rel_ms: i16,
+        key: bool,
+        data: &[u8],
+        duration_ns: Option<u64>,
+        discard: u64,
+    ) -> Result<(), KinetixError> {
+        let mut group = Vec::new();
+        elem(&mut group, ID_BLOCK, &block_body(track, rel_ms, key, data));
+        if let Some(ns) = duration_ns {
+            elem_uint(&mut group, ID_BLOCK_DURATION, ns);
+        }
+        elem_uint(&mut group, ID_DISCARD_PADDING, discard);
+        let mut buf = Vec::new();
+        elem(&mut buf, ID_BLOCK_GROUP, &group);
         self.flush(&buf)
     }
 

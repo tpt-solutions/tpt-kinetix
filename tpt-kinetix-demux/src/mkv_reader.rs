@@ -52,6 +52,9 @@ pub struct MkvSample {
     pub pts_ms: i64,
     /// Whether the frame is a random-access point.
     pub is_key: bool,
+    /// Samples to discard from the end of this frame's presentation
+    /// (`DiscardPadding`, 48 kHz for Opus). `0` when the container states none.
+    pub discard_padding: u64,
 }
 
 /// A Matroska / WebM file indexed over a [`ReadAt`] source.
@@ -106,12 +109,19 @@ impl MkvIndex {
                     .map(|n| n.pts_ms - f.pts_ms)
                     .filter(|d| *d > 0)
                     .unwrap_or_else(|| nominal_frame_ms(info));
+                let mut duration = u64::try_from(dur_ms.max(0)).unwrap_or(0) * scale / 1000;
+                // `DiscardPadding` shortens the frame's presentation; honour it so
+                // a packager does not play the encoder's trailing partial frame.
+                if f.discard_padding > 0 {
+                    let trim = f.discard_padding * scale / 48_000;
+                    duration = duration.saturating_sub(trim).max(1);
+                }
                 samples.push(SampleRef {
                     offset: f.offset,
                     size: f.size,
                     dts: u64::try_from(f.pts_ms.max(0)).unwrap_or(0) * scale / 1000,
                     cts_offset: 0,
-                    duration: (dur_ms.max(0) as u64 * scale / 1000).min(u64::from(u32::MAX)) as u32,
+                    duration: duration.min(u64::from(u32::MAX)) as u32,
                     is_key: f.is_key,
                 });
             }
@@ -248,6 +258,7 @@ fn sample_of(f: &MkvFrame) -> Result<MkvSample, KinetixError> {
             .map_err(|_| KinetixError::Parse("frame larger than 4 GiB".into()))?,
         pts_ms: f.pts_ms,
         is_key: f.key,
+        discard_padding: f.discard_padding,
     })
 }
 

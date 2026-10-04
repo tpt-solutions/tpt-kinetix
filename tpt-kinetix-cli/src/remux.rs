@@ -116,6 +116,27 @@ fn remux_webm(input: &str, output: &Path, remote: bool) -> Result<()> {
     }
 }
 
+/// The full duration of every frame in milliseconds, plus its `DiscardPadding`.
+///
+/// A frame's duration is its distance to the next frame *of the same track*;
+/// the last one has no successor, so it uses the Opus nominal 20 ms.
+fn frame_timings(
+    reader: &tpt_kinetix_demux::MkvReader<impl tpt_kinetix_demux::ReadAt>,
+) -> Vec<(u32, u64)> {
+    let samples = reader.samples();
+    let mut out = vec![(0u32, 0u64); samples.len()];
+    // Last index seen per track, so each frame can look forward in its own track.
+    let mut next_of: Vec<Option<usize>> = vec![None; reader.streams().len().max(1)];
+    for (i, s) in samples.iter().enumerate().rev() {
+        let dur = next_of[s.stream]
+            .map(|n| (samples[n].pts_ms - s.pts_ms).max(1))
+            .unwrap_or(20);
+        out[i] = (dur.min(u32::MAX as i64) as u32, s.discard_padding);
+        next_of[s.stream] = Some(i);
+    }
+    out
+}
+
 /// Writes an already-indexed WebM file to `output` (or to stdout as a live
 /// stream when `output` is `-`).
 fn write_webm<S: tpt_kinetix_demux::ReadAt>(
@@ -127,16 +148,20 @@ fn write_webm<S: tpt_kinetix_demux::ReadAt>(
     if tracks.is_empty() {
         bail!("no AV1, VP9 or Opus track in the input");
     }
+    let timings = frame_timings(&reader);
 
     if output.as_os_str() == "-" {
         // stdout cannot seek, so only a live (unknown-size) stream is possible.
         let mut writer = WebmWriter::with_options(std::io::stdout().lock(), WebmOptions::default());
         writer.set_tracks(&tracks)?;
         let (mut packets, mut bytes) = (0u64, 0u64);
+        let mut i = 0usize;
         while let Some(p) = reader.read_packet()? {
+            let (dur, discard) = timings.get(i).copied().unwrap_or((0, 0));
+            i += 1;
             bytes += p.data.len() as u64;
             packets += 1;
-            writer.write_packet_ms(&p, None)?;
+            writer.write_packet_ms_discarding(&p, Some(dur), discard)?;
         }
         writer.finish()?;
         eprintln!(
@@ -152,10 +177,13 @@ fn write_webm<S: tpt_kinetix_demux::ReadAt>(
     let mut writer = WebmWriter::new_seekable(BufWriter::new(file));
     writer.set_tracks(&tracks)?;
     let (mut packets, mut bytes) = (0u64, 0u64);
+    let mut i = 0usize;
     while let Some(p) = reader.read_packet()? {
+        let (dur, discard) = timings.get(i).copied().unwrap_or((0, 0));
+        i += 1;
         bytes += p.data.len() as u64;
         packets += 1;
-        writer.write_packet_ms(&p, None)?;
+        writer.write_packet_ms_discarding(&p, Some(dur), discard)?;
     }
     writer.finish()?;
     let mut out = writer.into_inner();
