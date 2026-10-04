@@ -335,6 +335,8 @@ fn apply(live: &Shared, events: Vec<MkvEvent>) -> Result<()> {
     for e in events {
         match e {
             MkvEvent::Tracks(t) => live.set_tracks(t).map_err(|e| anyhow::anyhow!("{e}"))?,
+            // A live stream has no Cues; the index arrives after the body.
+            MkvEvent::Cue(_) => {}
             MkvEvent::Frame(f) => live
                 .push(f.stream, f.pts_ms, f.key, f.data, f.duration_ms)
                 .map_err(|e| anyhow::anyhow!("{e}"))?,

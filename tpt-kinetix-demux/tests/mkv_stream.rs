@@ -84,6 +84,7 @@ fn run(bytes: &[u8], chunk: usize) -> (Vec<tpt_kinetix_core::stream::StreamInfo>
         for e in events {
             match e {
                 MkvEvent::Tracks(t) => tracks = t,
+                MkvEvent::Cue(_) => {}
                 MkvEvent::Frame(f) => frames.push(f),
             }
         }

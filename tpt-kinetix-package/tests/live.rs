@@ -60,6 +60,8 @@ fn ingest(webm: &[u8], opts: LiveOptions) -> (LivePackager, Vec<MkvFrame>) {
         for e in events {
             match e {
                 MkvEvent::Tracks(t) => live.set_tracks(t).unwrap(),
+                // A live stream has no Cues; the index arrives after the body.
+                MkvEvent::Cue(_) => {}
                 MkvEvent::Frame(f) => {
                     live.push(f.stream, f.pts_ms, f.key, f.data.clone(), f.duration_ms)
                         .unwrap();
@@ -398,6 +400,8 @@ fn parts_of_the_segment_in_progress_are_visible() {
         for e in parser.push(chunk).unwrap() {
             match e {
                 MkvEvent::Tracks(t) => live.set_tracks(t).unwrap(),
+                // A live stream has no Cues; the index arrives after the body.
+                MkvEvent::Cue(_) => {}
                 MkvEvent::Frame(f) => {
                     live.push(f.stream, f.pts_ms, f.key, f.data, f.duration_ms)
                         .unwrap();

@@ -51,6 +51,12 @@ const ID_BLOCK: u32 = 0xA1;
 const ID_BLOCK_DURATION: u32 = 0x9B;
 const ID_REFERENCE_BLOCK: u32 = 0xFB;
 const ID_DISCARD_PADDING: u32 = 0x75A2;
+const ID_CUES: u32 = 0x1C53_BB6B;
+const ID_CUE_POINT: u32 = 0xBB;
+const ID_CUE_TIME: u32 = 0xB3;
+const ID_CUE_TRACK_POSITIONS: u32 = 0xB7;
+const ID_CUE_TRACK: u32 = 0xF7;
+const ID_CUE_CLUSTER_POSITION: u32 = 0xF1;
 
 /// Something the parser found in the stream.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +66,25 @@ pub enum MkvEvent {
     Tracks(Vec<StreamInfo>),
     /// One coded frame.
     Frame(MkvFrame),
+    /// One `CuePoint` from the `Cues` index.
+    ///
+    /// Cues appear *after* the clusters they describe in a seekable file, so this
+    /// arrives only once the body has already been streamed past — it is what
+    /// makes a second, cheap pass at an arbitrary byte offset possible.
+    Cue(MkvCue),
+}
+
+/// One entry of the Matroska `Cues` index: a random-access point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MkvCue {
+    /// Presentation time of the cue, in milliseconds.
+    pub time_ms: i64,
+    /// The track number the cue applies to (1-based, as Matroska numbers them).
+    pub track: u64,
+    /// Byte offset of the cluster holding this cue, **relative to the start of the
+    /// Segment's data** — which is how Matroska states it. Add
+    /// [`MkvStream::segment_data_start`] to get an absolute file offset.
+    pub cluster_position: u64,
 }
 
 /// A frame in container order.
@@ -132,6 +157,19 @@ pub struct MkvStream {
     events: Vec<MkvEvent>,
     /// Absolute offset of `buf[0]` in the stream, so frames can report theirs.
     base: u64,
+    /// Absolute offset of the Segment's first data byte. `CueClusterPosition` is
+    /// relative to this, so cue positions are only useful once it is known.
+    segment_data_start: u64,
+    /// The `CuePoint` being assembled, if the parser is inside `Cues`.
+    cue: Option<CueBuilder>,
+}
+
+/// A `CuePoint` under construction.
+#[derive(Debug, Default, Clone, Copy)]
+struct CueBuilder {
+    time_ticks: u64,
+    track: u64,
+    cluster_position: u64,
 }
 
 fn parse_id(data: &[u8]) -> Option<(u32, usize)> {
@@ -202,7 +240,15 @@ impl MkvStream {
             seen_ebml: false,
             events: Vec::new(),
             base: 0,
+            segment_data_start: 0,
+            cue: None,
         }
+    }
+
+    /// Absolute offset of the Segment's first data byte — the base that
+    /// `CueClusterPosition` values are stated against.
+    pub fn segment_data_start(&self) -> u64 {
+        self.segment_data_start
     }
 
     /// Feeds the next chunk and returns the events it completes.
@@ -223,8 +269,9 @@ impl MkvStream {
     }
 
     /// Signals the end of the stream (flushes a group still waiting for its
-    /// `ReferenceBlock`).
+    /// `ReferenceBlock`, and the last `CuePoint`).
     pub fn finish(&mut self) -> Result<Vec<MkvEvent>, KinetixError> {
+        self.flush_cue();
         self.drain(true)?;
         self.flush_group()?;
         Ok(std::mem::take(&mut self.events))
@@ -260,10 +307,49 @@ impl MkvStream {
                 return Err(KinetixError::Parse("not a WebM/Matroska stream".into()));
             }
 
+            // A `CuePoint` ends when the next element is not one of its children: that is
+            // the only point at which all its fields are known, because the cue's
+            // time and cluster position arrive *after* `CueTrackPositions` is
+            // entered.
+            if self.cue.is_some()
+                && !matches!(
+                    id,
+                    ID_CUE_TIME | ID_CUE_TRACK_POSITIONS | ID_CUE_TRACK | ID_CUE_CLUSTER_POSITION
+                )
+            {
+                // Inlined rather than `self.flush_cue()`: `rest` borrows
+                // `self.buf` here, so only disjoint field accesses are allowed.
+                if let Some(c) = self.cue.take() {
+                    let time_ms = (c.time_ticks * self.timecode_scale_ns / 1_000_000) as i64;
+                    self.events.push(MkvEvent::Cue(MkvCue {
+                        time_ms,
+                        track: c.track,
+                        cluster_position: c.cluster_position,
+                    }));
+                }
+            }
             match id {
                 // Master elements we descend into (their children arrive flat).
-                ID_SEGMENT | ID_INFO | ID_TRACKS | ID_TRACK_ENTRY | ID_VIDEO | ID_AUDIO
-                | ID_CLUSTER | ID_BLOCK_GROUP => {
+                ID_SEGMENT
+                | ID_INFO
+                | ID_TRACKS
+                | ID_TRACK_ENTRY
+                | ID_VIDEO
+                | ID_AUDIO
+                | ID_CLUSTER
+                | ID_BLOCK_GROUP
+                | ID_CUES
+                | ID_CUE_POINT
+                | ID_CUE_TRACK_POSITIONS => {
+                    if id == ID_SEGMENT {
+                        // `pos` still points at the Segment's *id*; the data
+                        // starts after the header, which is what every
+                        // `CueClusterPosition` is relative to.
+                        self.segment_data_start = self.base + (pos + header) as u64;
+                    }
+                    if id == ID_CUE_POINT {
+                        self.cue = Some(CueBuilder::default());
+                    }
                     pos += header;
                     self.enter(id)?;
                 }
@@ -304,6 +390,21 @@ impl MkvStream {
         Ok(())
     }
 
+    /// Emits the pending `CuePoint`, if any. Called when the next non-cue element
+    /// arrives, and by [`MkvStream::finish`] for the last one.
+    fn flush_cue(&mut self) {
+        if let Some(c) = self.cue.take() {
+            let time_ms = (c.time_ticks * self.timecode_scale_ns / 1_000_000) as i64;
+            self.events.push(MkvEvent::Cue(MkvCue {
+                time_ms,
+                track: c.track,
+                cluster_position: c.cluster_position,
+            }));
+        }
+    }
+
+    /// Ends the stream, returning any events the final elements completed —
+    /// notably the last `CuePoint`, whose end is only known at end of input.
     fn wants_body(id: u32) -> bool {
         matches!(
             id,
@@ -324,6 +425,9 @@ impl MkvStream {
                 | ID_BLOCK_DURATION
                 | ID_REFERENCE_BLOCK
                 | ID_DISCARD_PADDING
+                | ID_CUE_TIME
+                | ID_CUE_TRACK
+                | ID_CUE_CLUSTER_POSITION
         )
     }
 
@@ -354,6 +458,30 @@ impl MkvStream {
     }
 
     fn leaf(&mut self, id: u32, body: &[u8], body_offset: u64) -> Result<(), KinetixError> {
+        // Cue children are handled first: they share no meaning with the track
+        // and cluster elements below, and the cue is emitted when its
+        // `CueTrackPositions` closes (see `enter`).
+        if self.cue.is_some() {
+            match id {
+                ID_CUE_TIME => {
+                    if let Some(c) = self.cue.as_mut() {
+                        c.time_ticks = uint(body);
+                    }
+                }
+                ID_CUE_TRACK => {
+                    if let Some(c) = self.cue.as_mut() {
+                        c.track = uint(body);
+                    }
+                }
+                ID_CUE_CLUSTER_POSITION => {
+                    if let Some(c) = self.cue.as_mut() {
+                        c.cluster_position = uint(body);
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         match id {
             ID_TIMECODE_SCALE => self.timecode_scale_ns = uint(body).max(1),
             ID_CLUSTER_TIMESTAMP => self.cluster_ts = uint(body) as i64,

@@ -31,10 +31,13 @@ use tpt_kinetix_core::timestamp::Timestamp;
 use crate::source::ReadAt;
 use crate::Demuxer;
 
-use super::mkv_stream::{MkvEvent, MkvFrame, MkvStream};
+use super::mkv_stream::{MkvCue, MkvEvent, MkvFrame, MkvStream};
 
 /// Largest number of frames accepted in the index (4 Mi).
 pub const MAX_FRAMES: usize = 4 << 20;
+
+/// Largest number of `Cues` accepted in the index (1 Mi).
+pub const MAX_CUES: usize = 1 << 20;
 
 /// Bytes read per `read_at` during the indexing pass.
 const SCAN_CHUNK: usize = 256 * 1024;
@@ -63,6 +66,11 @@ pub struct MkvReader<S: ReadAt> {
     streams: Vec<StreamInfo>,
 
     samples: Vec<MkvSample>,
+    /// The `Cues` index, sorted by time, with cluster positions already made
+    /// absolute. Empty for a file written without cues (a live stream).
+    cues: Vec<MkvCue>,
+    /// The file offset the Segment's data begins at.
+    segment_data_start: u64,
     cursor: usize,
 }
 
@@ -164,6 +172,7 @@ impl<S: ReadAt> MkvReader<S> {
         let mut parser = MkvStream::new();
         let mut streams: Vec<StreamInfo> = Vec::new();
         let mut samples: Vec<MkvSample> = Vec::new();
+        let mut cues: Vec<MkvCue> = Vec::new();
         let mut at = 0u64;
         let cap = usize::try_from(len)
             .unwrap_or(SCAN_CHUNK)
@@ -174,15 +183,38 @@ impl<S: ReadAt> MkvReader<S> {
             source.read_at(at, &mut buf[..want])?;
             let events = parser.push(&buf[..want])?;
             at += want as u64;
-            collect(&events, &mut streams, &mut samples)?;
+            collect(&events, &mut streams, &mut samples, &mut cues)?;
         }
-        collect(&parser.finish()?, &mut streams, &mut samples)?;
+        collect(&parser.finish()?, &mut streams, &mut samples, &mut cues)?;
+        // Cues arrive with positions relative to the Segment's data, which is
+        // only known once the whole file has been walked.
+        let segment_data_start = parser.segment_data_start();
+        for c in &mut cues {
+            c.cluster_position += segment_data_start;
+        }
+        cues.sort_by_key(|c| (c.time_ms, c.cluster_position));
         Ok(Self {
             source,
             streams,
             samples,
+            cues,
+            segment_data_start,
             cursor: 0,
         })
+    }
+
+    /// The `Cues` index with absolute cluster offsets, sorted by time.
+    ///
+    /// Empty when the file carries no cues — a live or streaming WebM has none,
+    /// and cannot be cue-seeked.
+    pub fn cues(&self) -> &[MkvCue] {
+        &self.cues
+    }
+
+    /// The file offset the Segment's data begins at; the base `CueClusterPosition`
+    /// values are stated against.
+    pub fn segment_data_start(&self) -> u64 {
+        self.segment_data_start
     }
 
     /// Codec-agnostic descriptions of every track.
@@ -229,6 +261,7 @@ fn collect(
     events: &[MkvEvent],
     streams: &mut Vec<StreamInfo>,
     samples: &mut Vec<MkvSample>,
+    cues: &mut Vec<MkvCue>,
 ) -> Result<(), KinetixError> {
     for e in events {
         match e {
@@ -244,6 +277,12 @@ fn collect(
                         "more than {MAX_FRAMES} frames"
                     )));
                 }
+            }
+            MkvEvent::Cue(c) => {
+                if cues.len() >= MAX_CUES {
+                    return Err(KinetixError::Parse(format!("more than {MAX_CUES} cues")));
+                }
+                cues.push(c.clone());
             }
         }
     }

@@ -87,7 +87,17 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [x] Replaced the whole-buffer MKV demuxer with `MkvReader` (index over `ReadAt` + `StreamInfo`, seek to key
       frame, `probe` sniffs the EBML magic). M2 for MKV. The index pass reads the file once (Matroska has no
       seekable `moov`), but keeps only the frame index in memory and reads each frame by offset.
-- [ ] Seek via `Cues` in `MkvReader` (the parser skips `Cues` today; `MkvStream` exposes no cue positions).
+- [~] Matroska `Cues` **parsing** done 2026-10-04: `MkvStream` emits `MkvEvent::Cue` (`CueTime` /
+      `CueTrack` / `CueClusterPosition`) and `MkvReader::cues()` returns them time-sorted with
+      *absolute* cluster offsets (Matroska states them relative to the Segment's data, which is
+      captured as the Segment's header is consumed). Tested against a real file: every cue points at
+      an actual `Cluster` element that holds a key frame at the stated time. Two bugs found and fixed
+      while testing — `segment_data_start` was captured before the Segment header was skipped, and
+      `CueTrackPositions` itself was ending the cue before its children were read.
+      **Using the cues to skip I/O is NOT possible for a local file** — Matroska stores `Cues`
+      *after* every cluster, so reading them means reading the whole file anyway. What it buys is a
+      validated index a web-demuxer-style client (or a cached one) can seek with. Still open:
+      actually serving that index / cue-based seeking over HTTP.
 - [ ] MPEG-TS: streaming demux (`TsDemuxer` still takes a `Vec`) and `StreamInfo` (M1/M2 for TS).
 - [~] IVF (AV1/VP9) demux done 2026-10-04 (`IvfDemuxer`: fourcc, geometry, frame ranges, seek,
       truncated-tail tolerant, `probe` support incl. `--json`; values match `ffprobe`). IVF mux and

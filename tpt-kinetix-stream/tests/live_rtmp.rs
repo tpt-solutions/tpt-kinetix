@@ -120,6 +120,7 @@ async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config:
     for e in events {
         match e {
             MkvEvent::Tracks(t) => tracks = t,
+            MkvEvent::Cue(_) => {}
             MkvEvent::Frame(f) => frames.push(f),
         }
     }

@@ -63,6 +63,7 @@ fn parsed(webm: &[u8]) -> (Vec<u8>, Vec<MkvFrame>) {
                     }
                 }
                 MkvEvent::Frame(f) => frames.push(f),
+                MkvEvent::Cue(_) => {}
             }
         }
     };
@@ -207,4 +208,75 @@ fn seeking_lands_on_a_key_frame() {
     r.seek(-1).unwrap();
     assert!(r.read_packet().unwrap().unwrap().is_key_frame);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `Cues` index must be parsed and must point at real clusters.
+///
+/// Matroska stores cues *after* the clusters they describe, so this cannot save
+/// I/O on a local file by itself; what it does buy is a validated index that a
+/// web-demuxer-style client (or a cached one) can seek with.
+#[test]
+fn cues_point_at_the_key_frames_they_claim() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_cues_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // A keyframe every second, so there are several cues to check.
+    let Some(src) = make_webm(
+        &dir,
+        "src.webm",
+        &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"],
+    ) else {
+        eprintln!("skipping: encoder unavailable");
+        return;
+    };
+    let reader = MkvReader::open(src.clone()).unwrap();
+    let cues = reader.cues();
+    assert!(!cues.is_empty(), "no cues parsed from a seekable file");
+
+    // Cues must be sorted by time and all point inside the file.
+    for w in cues.windows(2) {
+        assert!(w[0].time_ms <= w[1].time_ms, "cues are not sorted by time");
+    }
+    let len = src.len() as u64;
+    for c in cues {
+        assert!(
+            c.cluster_position > 0 && c.cluster_position < len,
+            "cue at {} is outside the file (len {len})",
+            c.cluster_position
+        );
+        // A cue's cluster really is a Cluster: the 4-byte id at that offset.
+        let off = c.cluster_position as usize;
+        assert_eq!(
+            &src[off..off + 4],
+            &[0x1F, 0x43, 0xB6, 0x75],
+            "cue at {off} does not point at a Cluster"
+        );
+    }
+
+    // Every cue's time must match the first frame at or after that position, and
+    // there must be a key frame there — that is what makes it a seek point.
+    let samples = reader.samples();
+    for c in cues.iter().filter(|c| c.track == 1) {
+        let first = samples
+            .iter()
+            .filter(|s| s.offset >= c.cluster_position)
+            .min_by_key(|s| s.offset)
+            .expect("cue points past the last frame");
+        assert!(
+            first.is_key,
+            "frame at the cue for {} ms is not a key frame",
+            c.time_ms
+        );
+        // And it is within one frame duration of the stated time.
+        let drift = (first.pts_ms - c.time_ms).abs();
+        assert!(
+            drift <= 100,
+            "cue says {} ms but the key frame is at {} ms",
+            c.time_ms,
+            first.pts_ms
+        );
+    }
 }
