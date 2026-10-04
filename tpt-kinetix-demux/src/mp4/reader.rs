@@ -66,6 +66,8 @@ pub struct Mp4Index {
     len: u64,
     pub(crate) tracks: Vec<Mp4Track>,
     pub(crate) index: Vec<Vec<SampleRef>>,
+    /// `StreamInfo` per track, built once (see [`Mp4Index::stream_infos`]).
+    stream_infos: Vec<tpt_kinetix_core::stream::StreamInfo>,
 }
 
 impl Mp4Index {
@@ -93,7 +95,30 @@ impl Mp4Index {
                 parse_moof(start, &moof, &trex, &tracks, &mut next_dts, &mut index)?;
             }
         }
-        Ok(Self { len, tracks, index })
+        Ok(Self::new(len, tracks, index))
+    }
+
+    /// Builds the derived per-track `StreamInfo` cache from a finished index.
+    fn new(len: u64, tracks: Vec<Mp4Track>, index: Vec<Vec<SampleRef>>) -> Self {
+        let stream_infos = tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut s = t.stream_info(i as u32);
+                if s.duration == 0 {
+                    if let Some(last) = index[i].last() {
+                        s.duration = last.dts + u64::from(last.duration);
+                    }
+                }
+                s
+            })
+            .collect();
+        Self {
+            len,
+            tracks,
+            index,
+            stream_infos,
+        }
     }
 
     /// Length of the file the index was loaded from.
@@ -110,19 +135,14 @@ impl Mp4Index {
     /// `stream_index`. For fragmented files (whose `mdhd` has no duration) the
     /// duration is derived from the indexed samples.
     pub fn streams(&self) -> Vec<tpt_kinetix_core::stream::StreamInfo> {
-        self.tracks
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let mut s = t.stream_info(i as u32);
-                if s.duration == 0 {
-                    if let Some(last) = self.index[i].last() {
-                        s.duration = last.dts + u64::from(last.duration);
-                    }
-                }
-                s
-            })
-            .collect()
+        self.stream_infos.clone()
+    }
+
+    /// The same descriptions as [`Mp4Index::streams`], borrowed. Built once
+    /// when the index is loaded, so callers that need them repeatedly (the
+    /// packager) do not rebuild the list.
+    pub fn stream_infos(&self) -> &[tpt_kinetix_core::stream::StreamInfo] {
+        &self.stream_infos
     }
 
     /// Number of samples in track `track` (counts fragment samples too).

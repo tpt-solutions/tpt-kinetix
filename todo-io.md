@@ -51,7 +51,10 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [x] WASM build + Node byte-identity test; Worker handler example + Node test; hls.js/dash.js Chrome tests
 - [ ] **DASH validation with an independent conformance checker** (DASH-IF validator / Shaka packager `--dump`) and a
       Safari/hardware-player pass (note: Apple HLS does not play VP9/AV1 fMP4 everywhere — document the matrix).
-- [ ] Packager from **WebM/Matroska VOD input** (reuse `MkvStream` over `ReadAt`), not only MP4.
+- [x] Packager from **WebM/Matroska VOD input**: `MkvIndex` exposes Matroska frames as `SampleRef`s, the
+      `Packager` works over a `SampleIndex` trait (implemented by `Mp4Index` and `MkvIndex`), and
+      `package`/`serve` sniff the EBML magic. Verified: a real VP9 + Opus WebM packages into HLS that
+      ffmpeg decodes frame-for-frame identically to the source.
 - [ ] Worker: segment cache layer (Cache API), `Range` on segment responses, real Cloudflare/R2 deployment test,
       CPU/memory limits under load, Deno/Fastly smoke tests.
 - [ ] Live variant at the edge (Durable Object / stateful worker holding the `LivePackager`).

@@ -40,6 +40,56 @@ use tpt_kinetix_demux::mp4::SampleRef;
 use tpt_kinetix_demux::{AsyncReadAt, Mp4Index};
 use tpt_kinetix_mux::FragmentWriter;
 
+/// What the packager needs from a demuxed source: where every sample is and
+/// what each track is.
+///
+/// Implemented by [`Mp4Index`] (MP4, progressive or fragmented) and
+/// [`MkvIndex`](tpt_kinetix_demux::MkvIndex) (Matroska/WebM), so the same
+/// just-in-time HLS/DASH packaging serves both containers.
+pub trait SampleIndex {
+    /// Total length of the source in bytes (a sanity bound on sample ranges).
+    fn file_len(&self) -> u64;
+
+    /// The tracks, in source order.
+    fn streams(&self) -> &[StreamInfo];
+
+    /// Number of samples in `track`.
+    fn sample_count(&self, track: usize) -> usize;
+
+    /// The samples of `track`, in decode order.
+    fn samples(&self, track: usize) -> &[SampleRef];
+}
+
+impl SampleIndex for Mp4Index {
+    fn file_len(&self) -> u64 {
+        Mp4Index::file_len(self)
+    }
+    fn streams(&self) -> &[StreamInfo] {
+        self.stream_infos()
+    }
+    fn sample_count(&self, track: usize) -> usize {
+        Mp4Index::sample_count(self, track)
+    }
+    fn samples(&self, track: usize) -> &[SampleRef] {
+        Mp4Index::samples(self, track)
+    }
+}
+
+impl SampleIndex for tpt_kinetix_demux::MkvIndex {
+    fn file_len(&self) -> u64 {
+        self.file_len()
+    }
+    fn streams(&self) -> &[StreamInfo] {
+        self.streams()
+    }
+    fn sample_count(&self, track: usize) -> usize {
+        self.sample_count(track)
+    }
+    fn samples(&self, track: usize) -> &[SampleRef] {
+        self.samples(track)
+    }
+}
+
 /// Packaging errors.
 #[derive(Debug, Error)]
 pub enum PackageError {
@@ -88,16 +138,16 @@ struct PackagedTrack {
     codec: String,
 }
 
-/// An MP4 prepared for on-demand HLS/DASH packaging.
+/// An MP4 (or Matroska/WebM) prepared for on-demand HLS/DASH packaging.
 pub struct Packager {
-    index: Mp4Index,
+    index: Box<dyn SampleIndex + Send + Sync>,
     tracks: Vec<PackagedTrack>,
     plan: SegmentPlan,
     opts: PackagerOptions,
 }
 
 impl Packager {
-    /// Loads the index from `source` and plans segments. Tracks that cannot be
+    /// Loads an MP4 index from `source` and plans segments. Tracks that cannot be
     /// packaged (unknown codec, no codec string, non audio/video) are skipped.
     pub async fn load<S: AsyncReadAt>(
         source: &S,
@@ -106,13 +156,30 @@ impl Packager {
         let index = Mp4Index::load(source)
             .await
             .map_err(|e| PackageError::Input(format!("{e:#}")))?;
-        Self::from_index(index, opts)
+        Self::from_index(Box::new(index), opts)
+    }
+
+    /// Packages a Matroska/WebM source instead of an MP4.
+    ///
+    /// The index is built with one streaming pass
+    /// ([`MkvIndex::open`](tpt_kinetix_demux::MkvIndex::open)); segments are
+    /// then read by offset exactly as for MP4.
+    pub fn load_mkv<S: tpt_kinetix_demux::ReadAt + ?Sized>(
+        source: &S,
+        opts: PackagerOptions,
+    ) -> Result<Self, PackageError> {
+        let index = tpt_kinetix_demux::MkvIndex::open(source)
+            .map_err(|e| PackageError::Input(format!("{e:#}")))?;
+        Self::from_index(Box::new(index), opts)
     }
 
     /// Builds a packager from an already-loaded index.
-    pub fn from_index(index: Mp4Index, opts: PackagerOptions) -> Result<Self, PackageError> {
+    pub fn from_index(
+        index: Box<dyn SampleIndex + Send + Sync>,
+        opts: PackagerOptions,
+    ) -> Result<Self, PackageError> {
         let mut tracks = Vec::new();
-        for (i, info) in index.streams().into_iter().enumerate() {
+        for (i, info) in index.streams().iter().cloned().enumerate() {
             let packagable = matches!(info.media_type, MediaType::Video | MediaType::Audio)
                 && !matches!(info.codec, CodecId::Unknown(_))
                 && index.sample_count(i) > 0;
@@ -131,7 +198,7 @@ impl Packager {
             ));
         }
         let sources: Vec<usize> = tracks.iter().map(|t| t.source_index).collect();
-        let plan = plan::plan_segments(&index, &sources, opts.segment_seconds);
+        let plan = plan::plan_segments(index.as_ref(), &sources, opts.segment_seconds);
         Ok(Self {
             index,
             tracks,

@@ -3,7 +3,9 @@
 use std::ops::Range;
 
 use tpt_kinetix_core::codec::MediaType;
-use tpt_kinetix_demux::Mp4Index;
+use tpt_kinetix_demux::mp4::SampleRef;
+
+use crate::SampleIndex;
 
 /// One segment: for every packaged track, the sample range it contains.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,11 +43,11 @@ fn us(dts: u64, timescale: u32) -> u128 {
 /// have elapsed; every other track is cut at the first sample at or after the
 /// same instant, so the segments of all renditions line up in time.
 pub(crate) fn plan_segments(
-    index: &Mp4Index,
+    index: &dyn SampleIndex,
     source_indices: &[usize],
     target_seconds: f64,
 ) -> SegmentPlan {
-    let tracks = index.tracks();
+    let tracks = index.streams();
     let lead = source_indices
         .iter()
         .position(|&i| tracks[i].media_type == MediaType::Video)
@@ -112,7 +114,7 @@ pub(crate) fn plan_segments(
                 starts[p][k].min(end)..end
             })
             .collect();
-        let pts = |s: &tpt_kinetix_demux::mp4::SampleRef| s.dts as i64 + i64::from(s.cts_offset);
+        let pts = |s: &SampleRef| s.dts as i64 + i64::from(s.cts_offset);
         min_pts.push(
             rs.iter()
                 .map(|r| samples[r.clone()].iter().map(pts).min())

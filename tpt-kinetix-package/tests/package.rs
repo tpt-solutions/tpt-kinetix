@@ -583,3 +583,125 @@ fn hls_output_decodes_identically_to_the_source_in_ffmpeg() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Packages a Matroska/WebM source: the playlists, segments and MPD must
+/// describe it like an MP4 of the same media, and ffmpeg must decode the HLS
+/// output to exactly the frames the source decodes to.
+#[test]
+fn webm_source_packages_into_playable_hls() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_pkgwebm_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src.webm");
+    let ok = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25",
+            "-t",
+            "6",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "6",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"])
+        .args(["-c:a", "libopus", "-ac", "2", "-b:a", "64k"])
+        .arg(&src)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: libvpx-vp9/libopus unavailable");
+        return;
+    }
+
+    let bytes = std::fs::read(&src).unwrap();
+    let p = Packager::load_mkv(
+        &bytes,
+        PackagerOptions {
+            segment_seconds: 2.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Two tracks (VP9 video, Opus audio), both signallable in HLS.
+    assert_eq!(p.streams().len(), 2, "tracks");
+    assert!(p.codec(0).unwrap().starts_with("vp09."), "{:?}", p.codec(0));
+    assert_eq!(p.codec(1), Some("Opus"));
+    assert!(p.segment_count() >= 3, "{} segments", p.segment_count());
+
+    // The playlists and the MPD name the segments that exist.
+    for t in 0..2usize {
+        let pl = p.hls_media(t).unwrap();
+        assert!(pl.contains(&format!("init-{t}.mp4")), "{pl}");
+        for n in 1..=p.segment_count() {
+            assert!(pl.contains(&format!("seg-{t}-{n}.m4s")), "{pl}");
+            assert!(
+                block_on(p.media_segment(&Blocking(&bytes), t, n))
+                    .unwrap()
+                    .len()
+                    > 8
+            );
+        }
+        assert!(p.init_segment(t).unwrap().len() > 8);
+    }
+    assert!(p.hls_master().contains("RESOLUTION=320x240"));
+    assert!(p.dash_mpd().contains("vp09."));
+
+    // All of a track's segments reassemble into a playable fMP4.
+    for t in 0..2usize {
+        let mut file = p.init_segment(t).unwrap();
+        for n in 1..=p.segment_count() {
+            file.extend(block_on(p.media_segment(&Blocking(&bytes), t, n)).unwrap());
+        }
+        let mut r = Mp4Reader::open(file).unwrap();
+        let mut count = 0;
+        while r.read_packet().unwrap().is_some() {
+            count += 1;
+        }
+        assert!(count > 0, "track {t} produced no packets");
+    }
+
+    // And ffmpeg decodes the packaged HLS to exactly the source.
+    let out = dir.join("hls");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("master.m3u8"), p.hls_master()).unwrap();
+    for t in 0..2usize {
+        std::fs::write(out.join(format!("track-{t}.m3u8")), p.hls_media(t).unwrap()).unwrap();
+        std::fs::write(
+            out.join(format!("init-{t}.mp4")),
+            p.init_segment(t).unwrap(),
+        )
+        .unwrap();
+        for n in 1..=p.segment_count() {
+            std::fs::write(
+                out.join(format!("seg-{t}-{n}.m4s")),
+                block_on(p.media_segment(&Blocking(&bytes), t, n)).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    let want = framemd5(&["-i", src.to_str().unwrap()], "0:v:0");
+    assert!(!want.is_empty());
+    assert_eq!(
+        framemd5(&["-i", out.join("master.m3u8").to_str().unwrap()], "0:v:0"),
+        want,
+        "WebM-packaged HLS decodes differently from the source"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

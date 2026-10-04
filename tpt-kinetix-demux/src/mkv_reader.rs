@@ -21,6 +21,8 @@
 //! All limits of [`MkvStream`] apply: leaf elements are capped, laced blocks are
 //! rejected, and the frame count is bounded by [`MAX_FRAMES`].
 
+use crate::mp4::SampleRef;
+use tpt_kinetix_core::codec::MediaType;
 use tpt_kinetix_core::error::KinetixError;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
@@ -56,8 +58,91 @@ pub struct MkvSample {
 pub struct MkvReader<S: ReadAt> {
     source: S,
     streams: Vec<StreamInfo>,
+
     samples: Vec<MkvSample>,
     cursor: usize,
+}
+
+/// A Matroska / WebM file's frame index, shaped like [`Mp4Index`](crate::Mp4Index).
+///
+/// This is what a just-in-time packager needs: per-track [`SampleRef`]s with an
+/// absolute offset and size, so a segment is served with ranged reads and the
+/// source bytes never all reside in memory. Matroska carries presentation times
+/// only, so `cts_offset` is always 0 and `dts == pts`.
+///
+/// Build it with [`MkvIndex::open`] over any [`ReadAt`] source.
+pub struct MkvIndex {
+    len: u64,
+    streams: Vec<StreamInfo>,
+    /// [`SampleRef`]s per track, in decode (= presentation) order.
+    index: Vec<Vec<SampleRef>>,
+}
+
+/// A plausible frame duration in milliseconds when the container states none.
+fn nominal_frame_ms(info: &StreamInfo) -> i64 {
+    match info.media_type {
+        MediaType::Audio => 20,
+        MediaType::Video => 33, // ~30 fps
+        MediaType::Other => 20,
+    }
+}
+
+impl MkvIndex {
+    /// Indexes `source` with one sequential pass (see [`MkvReader`]).
+    pub fn open<S: ReadAt + ?Sized>(source: &S) -> Result<Self, KinetixError> {
+        let len = source.len()?;
+        let reader = MkvReader::open(source)?;
+        let streams = reader.streams().to_vec();
+        let mut index = Vec::with_capacity(streams.len());
+        for (t, info) in streams.iter().enumerate() {
+            let scale = u64::from(info.timescale.max(1));
+            let frames = reader.samples_of(t);
+            let mut samples: Vec<SampleRef> = Vec::with_capacity(frames.len());
+            for (i, f) in frames.iter().enumerate() {
+                // A frame's duration is its distance to the next one; Matroska
+                // states it per block and most muxers omit it.
+                let dur_ms = frames
+                    .get(i + 1)
+                    .map(|n| n.pts_ms - f.pts_ms)
+                    .filter(|d| *d > 0)
+                    .unwrap_or_else(|| nominal_frame_ms(info));
+                samples.push(SampleRef {
+                    offset: f.offset,
+                    size: f.size,
+                    dts: u64::try_from(f.pts_ms.max(0)).unwrap_or(0) * scale / 1000,
+                    cts_offset: 0,
+                    duration: (dur_ms.max(0) as u64 * scale / 1000).min(u64::from(u32::MAX)) as u32,
+                    is_key: f.is_key,
+                });
+            }
+            index.push(samples);
+        }
+        Ok(Self {
+            len,
+            streams,
+            index,
+        })
+    }
+
+    /// Total length of the source in bytes.
+    pub fn file_len(&self) -> u64 {
+        self.len
+    }
+
+    /// Codec-agnostic descriptions of every track.
+    pub fn streams(&self) -> &[StreamInfo] {
+        &self.streams
+    }
+
+    /// Number of samples in `track`.
+    pub fn sample_count(&self, track: usize) -> usize {
+        self.index.get(track).map_or(0, Vec::len)
+    }
+
+    /// The sample index of `track`, in decode order.
+    pub fn samples(&self, track: usize) -> &[SampleRef] {
+        self.index.get(track).map_or(&[], Vec::as_slice)
+    }
 }
 
 impl<S: ReadAt> MkvReader<S> {

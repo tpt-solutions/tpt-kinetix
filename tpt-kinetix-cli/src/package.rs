@@ -1,8 +1,9 @@
 //! `tpt-kinetix package` (static HLS + DASH output) and `tpt-kinetix serve`
 //! (just-in-time packaging over HTTP), both built on [`Packager`].
 //!
-//! The input is an MP4 file or an `http(s)://` URL; in both cases only the
-//! index and the samples of the segments actually requested are ever read.
+//! The input is an MP4 or a Matroska/WebM file, or an `http(s)://` URL; in both
+//! cases only the index and the samples of the segments actually requested are
+//! ever read.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -13,6 +14,16 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use tpt_kinetix_demux::{block_on, Blocking, ReadAt};
 use tpt_kinetix_package::{Packager, PackagerOptions};
+
+/// Whether `input` is a Matroska/WebM file (local path or URL), decided from the
+/// first bytes rather than the extension.
+fn is_webm(source: &dyn ReadAt) -> Result<bool> {
+    let mut head = [0u8; 4];
+    source
+        .read_at(0, &mut head)
+        .with_context(|| "failed to read the input's first bytes")?;
+    Ok(head == [0x1A, 0x45, 0xDF, 0xA3])
+}
 
 /// Opens `input` and runs `f` with a [`Packager`] and its (blocking) source.
 fn with_packager<R>(
@@ -33,8 +44,14 @@ fn with_packager<R>(
                     .with_context(|| format!("failed to open input file: {input}"))?,
             )
         };
-    let packager = block_on(Packager::load(&Blocking(&*source), opts))
-        .with_context(|| format!("failed to read the MP4 index of {input}"))?;
+    // MP4 has a seekable index; Matroska does not, so its index needs a pass.
+    let packager = if is_webm(&*source)? {
+        Packager::load_mkv(&*source, opts)
+            .with_context(|| format!("failed to index the WebM source {input}"))?
+    } else {
+        block_on(Packager::load(&Blocking(&*source), opts))
+            .with_context(|| format!("failed to read the MP4 index of {input}"))?
+    };
     f(packager, source)
 }
 
