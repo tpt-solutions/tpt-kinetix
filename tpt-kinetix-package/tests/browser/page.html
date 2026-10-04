@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>tpt-kinetix packager browser test</title>
+<video id="v" muted playsinline width="320" height="240"></video>
+<script src="/hls.js"></script>
+<script src="/dash.js"></script>
+<script>
+  // Plays a stream with a real MSE client and reports progress to the harness.
+  const q = new URLSearchParams(location.search);
+  const kind = q.get("kind");
+  const url = q.get("url");
+  const want = Number(q.get("seconds") || 5);
+  const v = document.getElementById("v");
+  const errors = [];
+  let done = false;
+
+  function report(extra) {
+    if (done) return;
+    done = true;
+    const audioTracks = v.audioTracks ? v.audioTracks.length : null;
+    fetch("/result", {
+      method: "POST",
+      body: JSON.stringify({
+        kind, url, errors,
+        currentTime: v.currentTime,
+        duration: v.duration,
+        videoWidth: v.videoWidth,
+        videoHeight: v.videoHeight,
+        readyState: v.readyState,
+        buffered: v.buffered.length ? [v.buffered.start(0), v.buffered.end(v.buffered.length - 1)] : null,
+        audioTracks,
+        decodedFrames: v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : null,
+        droppedFrames: v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().droppedVideoFrames : null,
+        ...extra,
+      }),
+    });
+  }
+
+  v.addEventListener("error", () => errors.push("video element error " + (v.error && v.error.message)));
+  v.addEventListener("timeupdate", () => { if (v.currentTime >= want) report({ ok: true }); });
+  setTimeout(() => report({ ok: false, timeout: true }), 40000);
+
+  if (kind === "hls") {
+    if (!Hls.isSupported()) { errors.push("Hls.isSupported() is false"); report({ ok: false }); }
+    else {
+      const hls = new Hls();
+      hls.on(Hls.Events.ERROR, (_, d) => errors.push(`${d.type}/${d.details}${d.fatal ? " (fatal)" : ""}`));
+      hls.loadSource(url);
+      hls.attachMedia(v);
+      v.play().catch((e) => errors.push("play: " + e));
+    }
+  } else {
+    const p = dashjs.MediaPlayer().create();
+    p.on("error", (e) => errors.push("dash error " + JSON.stringify(e.error || e).slice(0, 200)));
+    p.initialize(v, url, true);
+  }
+</script>

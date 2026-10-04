@@ -193,3 +193,19 @@ Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range se
   segments) to be **byte-identical** to the native `package` output; the index loads in 5 range reads.
 * Also compiling for `wasm32-unknown-unknown`: `core`, `demux` (plus its existing `wasm` probe feature), `mux`,
   `package`. Not yet: a Worker example, caching headers/ETag handling, `Range` support on segment responses.
+
+### Real clients and the edge handler (2026-10-04)
+
+* **Real MSE players (`just browser-package-test`):** headless Chrome + **hls.js** and **dash.js** play the
+  `serve`d stream (12 s clip, 3 s segments, H.264 B-frames + AAC): both advance past a segment boundary
+  (hls.js 5.22 s / 135 frames decoded, dash.js 5.08 s / 129 frames; 0 dropped, 0 player errors). This also covers
+  DASH with a real client, which the ffmpeg DASH-demuxer frame-count quirk could not.
+* **Worker handler (`examples/edge-worker`, `just edge-worker-test`):** runtime-neutral `handler.mjs` (Workers /
+  Deno / Fastly / Node 18+), Workers entry `index.mjs`, `wrangler.toml`. Origin = HTTP range requests or an R2-style
+  bucket binding. Segments/inits are `Cache-Control: immutable`, playlists 300 s, weak ETag from the origin,
+  `If-None-Match` -> 304, HEAD, 404/405/502 (an origin that ignores `Range` is a 502, never a full download).
+  Node test: all output files byte-identical to the native packager for a 645 KiB clip and for the 85 MB / 120 s
+  moov-at-end clip; on the latter the whole stream cost **21 origin range requests reading every byte exactly once**
+  (83,708 KiB of 83,708 KiB), and a cold segment costs ~7 requests (index + its own ~6 MB).
+* **Not done / not verified:** a real Cloudflare deployment (no account here), real R2, Workers CPU/memory limits
+  under load, `Range` on segment responses, a segment cache layer inside the Worker, Safari/hardware players.

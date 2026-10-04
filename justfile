@@ -208,3 +208,11 @@ conformance-report:
 # WASM packager from Node over async range reads; output must equal the native CLI byte for byte.
 wasm-package-test:
     bash tools/wasm-package-test.sh
+
+# The Worker handler (examples/edge-worker) in Node vs the native packager, byte for byte.
+edge-worker-test:
+    bash tools/edge-worker-test.sh
+
+# hls.js and dash.js playing the just-in-time output in headless Chrome.
+browser-package-test:
+    bash tools/browser-package-test.sh

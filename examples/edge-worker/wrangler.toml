@@ -1,0 +1,12 @@
+name = "kinetix-jit-packager"
+main = "index.mjs"
+compatibility_date = "2024-11-01"
+
+# Either point at an HTTP origin that supports Range requests ...
+[vars]
+ORIGIN_BASE = "https://media.example.com"
+
+# ... or bind an R2 bucket and the Worker reads objects from it directly:
+# [[r2_buckets]]
+# binding = "BUCKET"
+# bucket_name = "videos"
