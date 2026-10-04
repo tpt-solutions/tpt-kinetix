@@ -8,7 +8,7 @@ use std::process::Command;
 use tpt_kinetix_core::codec::CodecId;
 use tpt_kinetix_demux::mkv_stream::{MkvEvent, MkvFrame, MkvStream};
 use tpt_kinetix_demux::{Demuxer, Mp4Reader};
-use tpt_kinetix_package::{LiveOptions, LivePackager};
+use tpt_kinetix_package::{LiveOptions, LivePackager, PlaylistRequest};
 
 fn have(tool: &str) -> bool {
     Command::new(tool)
@@ -105,6 +105,7 @@ fn case(name: &str, vcodec: &[&str], codec_prefix: &str) {
         LiveOptions {
             segment_seconds: 2.0,
             window: 100,
+            part_seconds: None,
         },
     );
     assert!(all.is_finished() && all.is_ready());
@@ -157,6 +158,7 @@ fn case(name: &str, vcodec: &[&str], codec_prefix: &str) {
         LiveOptions {
             segment_seconds: 1.0,
             window: 3,
+            part_seconds: None,
         },
     );
     let wsegs = win.latest_segment();
@@ -271,6 +273,155 @@ fn vp9_opus_live_segments_reassemble_slide_and_decode() {
         &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"],
         "vp09.",
     );
+}
+
+/// Low-latency HLS: parts must appear before their segment is complete, the
+/// playlist must carry the LL-HLS tags, the parts of a completed segment must
+/// still concatenate to that segment's samples, and a blocking reload request
+/// must only be answered once its part exists.
+#[test]
+fn parts_publish_before_their_segment_and_reassemble() {
+    if !have("ffmpeg") {
+        eprintln!("skipping ll-hls parts: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_ll_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(webm) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"]) else {
+        eprintln!("skipping ll-hls parts: encoder unavailable");
+        return;
+    };
+    let (live, frames) = ingest(
+        &webm,
+        LiveOptions {
+            segment_seconds: 2.0,
+            window: 100,
+            part_seconds: Some(1.0 / 3.0),
+        },
+    );
+    let pl = live.media_playlist(0).unwrap();
+    // LL-HLS tags and version 9.
+    assert!(pl.contains("#EXT-X-VERSION:9"), "{pl}");
+    assert!(
+        pl.contains("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES"),
+        "{pl}"
+    );
+    assert!(pl.contains("CAN-SKIP-UNTIL="), "{pl}");
+    assert!(pl.contains("#EXT-X-PART-INF:PART-TARGET="), "{pl}");
+    assert!(
+        !pl.contains("#EXT-X-PRELOAD-HINT"),
+        "a finished stream preloads nothing"
+    );
+    assert!(
+        !pl.contains("#EXT-X-SKIP"),
+        "a fresh playlist skips nothing"
+    );
+
+    // Every segment is described by its parts, in order, and each part URI is
+    // fetchable and starts with a moof (no part is listed but missing).
+    let segs = live.latest_segment();
+    assert!(segs >= 5, "{segs} segments");
+    let mut parts_total = 0usize;
+    for n in 1..=segs {
+        let mut count = 0u64;
+        while let Some(data) = live.part(0, n, count) {
+            let fourcc = &data[4..8];
+            assert_eq!(fourcc, b"moof", "part {n}/{count} is not a fragment");
+            count += 1;
+            parts_total += 1;
+            assert!(count < 64, "runaway parts");
+        }
+        assert!(count > 0, "segment {n} has no parts");
+        // The parts of a segment must reassemble to exactly its samples.
+        let mut file = live.init_segment(0).unwrap();
+        for i in 0..count {
+            file.extend(live.part(0, n, i).unwrap().iter());
+        }
+        let got: Vec<_> = read_all(file).into_iter().map(|p| p.data).collect();
+        let seg_bytes = live.segment(0, n).unwrap();
+        let direct: Vec<_> = read_all([live.init_segment(0).unwrap(), seg_bytes.to_vec()].concat())
+            .into_iter()
+            .map(|p| p.data)
+            .collect();
+        assert_eq!(
+            got.iter().map(|d| d.len()).collect::<Vec<_>>(),
+            direct.iter().map(|d| d.len()).collect::<Vec<_>>(),
+            "segment {n}: parts differ in shape from the segment"
+        );
+        for (i, (g, d)) in got.iter().zip(&direct).enumerate() {
+            assert_eq!(g, d, "segment {n}: part payload {i} differs");
+        }
+    }
+    assert!(
+        parts_total > segs as usize * 3,
+        "expected several parts per segment"
+    );
+    // The source video frames are all still there.
+    let mut file = live.init_segment(0).unwrap();
+    for n in 1..=segs {
+        file.extend(live.segment(0, n).unwrap().iter());
+    }
+    assert_eq!(
+        read_all(file).len(),
+        frames.iter().filter(|f| f.stream == 0).count()
+    );
+
+    // `satisfies` gates a blocking reload on the requested part existing.
+    let req = PlaylistRequest {
+        msn: Some(segs + 5),
+        part: Some(0),
+        ..PlaylistRequest::default()
+    };
+    assert!(!live.satisfies(0, &req) || live.is_finished());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// While the stream is running, a segment in progress must already have parts
+/// and a preload hint, and a blocking request for a future part must be
+/// unanswerable until it appears.
+#[test]
+fn parts_of_the_segment_in_progress_are_visible() {
+    let mut parser = MkvStream::new();
+    let mut live = LivePackager::new(LiveOptions {
+        segment_seconds: 2.0,
+        window: 10,
+        part_seconds: Some(1.0 / 3.0),
+    });
+    let dir = std::env::temp_dir().join(format!("tpt_ll2_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(webm) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"]) else {
+        return;
+    };
+    // Feed the first half only, so at least one segment is done and one is live.
+    let half = webm.len() / 2;
+    for chunk in webm[..half].chunks(4096) {
+        for e in parser.push(chunk).unwrap() {
+            match e {
+                MkvEvent::Tracks(t) => live.set_tracks(t).unwrap(),
+                MkvEvent::Frame(f) => {
+                    live.push(f.stream, f.pts_ms, f.key, f.data, f.duration_ms)
+                        .unwrap();
+                }
+            }
+        }
+    }
+    assert!(live.is_ready(), "no segment yet");
+    let pl = live.media_playlist(0).unwrap();
+    assert!(pl.contains("#EXT-X-PRELOAD-HINT:TYPE=PART"), "{pl}");
+    // A request for the segment after the one in progress cannot be answered.
+    let ahead = PlaylistRequest {
+        msn: Some(live.latest_segment() + 2),
+        ..PlaylistRequest::default()
+    };
+    assert!(!live.satisfies(0, &ahead));
+    // Every advertised part is fetchable, and the hint names the next index.
+    for i in 0..live.latest_part() {
+        assert!(
+            live.part(0, live.latest_segment() + 1, i).is_some(),
+            "part {i}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

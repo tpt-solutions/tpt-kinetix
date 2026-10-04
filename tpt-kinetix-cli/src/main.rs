@@ -80,6 +80,10 @@ enum Commands {
         /// Segments listed in a playlist.
         #[arg(long, default_value_t = 6)]
         window: usize,
+        /// Target partial-segment length in seconds for low-latency HLS
+        /// (`EXT-X-PART` + blocking playlist reload); 0 disables parts.
+        #[arg(long, default_value_t = 0.333)]
+        part_seconds: f64,
         /// Listen on all interfaces instead of localhost only.
         #[arg(long)]
         public: bool,
@@ -182,6 +186,7 @@ async fn main() -> Result<()> {
             port,
             segment_seconds,
             window,
+            part_seconds,
             public,
             rtmp_port,
         } => {
@@ -192,6 +197,7 @@ async fn main() -> Result<()> {
             let server = tpt_kinetix_stream::LiveServer::new(tpt_kinetix_package::LiveOptions {
                 segment_seconds,
                 window,
+                part_seconds: (part_seconds > 0.0).then_some(part_seconds),
             });
             if let Some(rtmp) = rtmp_port {
                 println!(

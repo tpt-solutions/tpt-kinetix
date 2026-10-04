@@ -26,7 +26,7 @@ mod plan;
 pub mod wasm;
 
 pub use codecs::codec_string;
-pub use live::{LiveError, LiveOptions, LivePackager};
+pub use live::{LiveError, LiveOptions, LivePackager, PlaylistRequest};
 pub use plan::{Segment, SegmentPlan};
 
 use std::ops::Range;

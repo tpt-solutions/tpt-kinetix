@@ -16,8 +16,9 @@
 //! synthesised from the first packet (re-anchored if the clocks drift by 100 ms),
 //! which keeps audio gapless although ingest timestamps are millisecond-accurate.
 //!
-//! Not (yet) implemented: low-latency parts (`EXT-X-PART`) and blocking playlist
-//! reload, so latency is about three segment durations.
+//! Not (yet) implemented: preload hints are emitted, but a client that reloads a
+//! playlist while the requested media sequence number is still in progress gets
+//! the current playlist immediately instead of a blocking 404.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -54,6 +55,9 @@ pub struct LiveOptions {
     pub segment_seconds: f64,
     /// Number of segments listed in a playlist.
     pub window: usize,
+    /// Target partial-segment (`EXT-X-PART`) length in seconds. `None`
+    /// disables parts and reverts to plain segment-latency HLS.
+    pub part_seconds: Option<f64>,
 }
 
 impl Default for LiveOptions {
@@ -61,8 +65,21 @@ impl Default for LiveOptions {
         Self {
             segment_seconds: 2.0,
             window: 6,
+            part_seconds: Some(1.0 / 3.0),
         }
     }
+}
+
+/// What a player asked for with a media playlist reload: the low-latency
+/// blocking-reload query parameters (`_HLS_msn`, `_HLS_part`, `_HLS_skip`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlaylistRequest {
+    /// Last media sequence number the client had (`_HLS_msn`).
+    pub msn: Option<u64>,
+    /// Last part index within that segment (`_HLS_part`).
+    pub part: Option<u64>,
+    /// First segment the client wants (`_HLS_skip`), for delta updates.
+    pub skip: Option<u64>,
 }
 
 struct Sample {
@@ -80,11 +97,25 @@ struct Track {
     next_dts: Option<u64>,
 }
 
+/// A partial segment: an independently loadable fragment of the segment in
+/// progress, published before the segment itself is complete.
+struct Part {
+    /// Data of this part.
+    data: Arc<Vec<u8>>,
+    /// Duration in seconds of this track inside the part.
+    seconds: f64,
+    /// Whether the part starts on a random-access point of its track.
+    independent: bool,
+}
+
 struct Segment {
     number: u64,
     /// Per track; `None` when the track had no samples in this segment.
     data: Vec<Option<Arc<Vec<u8>>>>,
     seconds: Vec<f64>,
+    /// The parts this segment was published as, per track, so a client that is
+    /// part-way through the segment can still fetch the earlier ones.
+    parts: Vec<Vec<Part>>,
 }
 
 /// Builds a live sliding-window HLS presentation.
@@ -97,6 +128,29 @@ pub struct LivePackager {
     next_number: u64,
     segments: VecDeque<Segment>,
     finished: bool,
+    /// Parts published so far for the segment in progress, per track.
+    parts: Vec<Vec<Part>>,
+    /// Start of the part in progress, in milliseconds.
+    part_start_ms: Option<i64>,
+    /// Number of parts published for the segment in progress.
+    part_index: u64,
+    /// Samples already published as parts but not yet folded into a segment, per
+    /// track. Retained so the segment's own fragment contains every sample.
+    part_samples: Vec<Vec<Sample>>,
+}
+
+/// One `#EXT-X-PART` line naming the part's URI.
+fn part_tag(out: &mut String, track: usize, segment: u64, index: u64, p: &Part) {
+    let _ = writeln!(
+        out,
+        "#EXT-X-PART:DURATION={:.6},URI=\"part-{track}-{segment}-{index}.mp4\"{}",
+        p.seconds,
+        if p.independent {
+            ",INDEPENDENT=YES"
+        } else {
+            ""
+        }
+    );
 }
 
 fn build_fragment(
@@ -138,6 +192,10 @@ impl LivePackager {
             next_number: 1,
             segments: VecDeque::new(),
             finished: false,
+            parts: Vec::new(),
+            part_start_ms: None,
+            part_index: 0,
+            part_samples: Vec::new(),
         }
     }
 
@@ -191,6 +249,9 @@ impl LivePackager {
             .iter()
             .position(|t| t.info.media_type == MediaType::Video)
             .unwrap_or(0);
+        let n = tracks.len();
+        self.parts = (0..n).map(|_| Vec::new()).collect();
+        self.part_samples = (0..n).map(|_| Vec::new()).collect();
         self.tracks = tracks;
         Ok(())
     }
@@ -235,6 +296,7 @@ impl LivePackager {
                 None if !key => return Ok(()), // wait for the first key frame
                 None => {
                     self.seg_start_ms = Some(pts_ms);
+                    self.part_start_ms = Some(pts_ms);
                     // Audio buffered before the start: keep what is not earlier.
                     for t in &mut self.tracks {
                         if t.info.media_type != MediaType::Video {
@@ -244,12 +306,20 @@ impl LivePackager {
                         }
                     }
                 }
-                Some(start)
-                    if key && (pts_ms - start) as f64 >= self.opts.segment_seconds * 1000.0 =>
-                {
-                    self.cut(pts_ms, false)?;
+                Some(start) => {
+                    // Publish a partial segment before the segment is complete.
+                    if self.parts_enabled() {
+                        if let Some(part_start) = self.part_start_ms {
+                            let want = (self.opts.part_seconds.unwrap_or(0.0) * 1000.0) as i64;
+                            if (pts_ms - part_start) >= want {
+                                self.cut_part(pts_ms)?;
+                            }
+                        }
+                    }
+                    if key && (pts_ms - start) as f64 >= self.opts.segment_seconds * 1000.0 {
+                        self.cut(pts_ms, false)?;
+                    }
                 }
-                Some(_) => {}
             }
             self.last_lead_ms = pts_ms;
         } else if self.seg_start_ms.is_none() {
@@ -303,15 +373,68 @@ impl LivePackager {
         });
     }
 
+    /// Whether partial segments are enabled and configured sanely.
+    fn parts_enabled(&self) -> bool {
+        self.opts.part_seconds.is_some_and(|p| p > 0.0)
+    }
+
+    /// Closes the part in progress at `end_ms` and publishes it as an
+    /// `EXT-X-PART`-addressable fragment. Samples are retained in
+    /// [`Self::part_samples`] so the segment's own fragment still contains them.
+    fn cut_part(&mut self, end_ms: i64) -> Result<(), LiveError> {
+        let number = self.next_number;
+        let start_ms = self.part_start_ms.unwrap_or(end_ms);
+        let mut added = 0usize;
+        for (i, t) in self.tracks.iter_mut().enumerate() {
+            let rate = u64::from(t.info.timescale);
+            let boundary = (end_ms.max(0) as u64) * rate / 1000;
+            let split = t.pending.partition_point(|s| s.dts < boundary);
+            if split == 0 {
+                continue;
+            }
+            let taken: Vec<Sample> = t.pending.drain(..split).collect();
+            let ticks: u64 = taken
+                .iter()
+                .map(|s| u64::from(s.duration.unwrap_or(0)))
+                .sum();
+            let seconds = if i == self.lead {
+                ((end_ms - start_ms).max(0) as f64) / 1000.0
+            } else {
+                ticks as f64 / rate as f64
+            };
+            let independent = t.info.media_type != MediaType::Video || taken[0].key;
+            let data = Arc::new(build_fragment(&t.info, &taken, number)?);
+            self.part_samples[i].extend(taken);
+            self.parts[i].push(Part {
+                data,
+                seconds,
+                independent,
+            });
+            added += 1;
+        }
+        if added == 0 {
+            // Nothing since the last part: keep waiting.
+            return Ok(());
+        }
+        self.part_index += 1;
+        self.part_start_ms = Some(end_ms);
+        Ok(())
+    }
+
     /// Closes the segment in progress at `end_ms` and appends it to the window.
     fn cut(&mut self, end_ms: i64, flush_all: bool) -> Result<(), LiveError> {
         let start_ms = self.seg_start_ms.unwrap_or(end_ms);
         let number = self.next_number;
+        // LL-HLS requires every sample of the segment to be inside a part: close
+        // the last part at the segment boundary before the segment itself.
+        if self.parts_enabled() && self.seg_start_ms.is_some() {
+            self.cut_part(end_ms)?;
+        }
         let mut data = Vec::with_capacity(self.tracks.len());
         let mut seconds = Vec::with_capacity(self.tracks.len());
         for (i, t) in self.tracks.iter_mut().enumerate() {
             let rate = u64::from(t.info.timescale);
-            let current = if t.info.media_type == MediaType::Video {
+            let mut current = if t.info.media_type == MediaType::Video {
                 std::mem::take(&mut t.pending)
             } else {
                 // Audio: everything decoded before the boundary (all of it when the
@@ -325,6 +448,10 @@ impl LivePackager {
                 let rest = t.pending.split_off(split);
                 std::mem::replace(&mut t.pending, rest)
             };
+            // Samples already published as parts come first (earlier decode times).
+            let mut prefix = std::mem::take(&mut self.part_samples[i]);
+            prefix.append(&mut current);
+            let current = prefix;
             if current.is_empty() {
                 data.push(None);
                 seconds.push(0.0);
@@ -345,10 +472,16 @@ impl LivePackager {
             });
             data.push(Some(Arc::new(build_fragment(&t.info, &current, number)?)));
         }
+        let parts = std::mem::take(&mut self.parts);
+        self.parts = (0..self.tracks.len()).map(|_| Vec::new()).collect();
+        self.part_samples = (0..self.tracks.len()).map(|_| Vec::new()).collect();
+        self.part_index = 0;
+        self.part_start_ms = Some(end_ms);
         self.segments.push_back(Segment {
             number,
             data,
             seconds,
+            parts,
         });
         self.next_number += 1;
         // Keep a little beyond the window so a slow client can still fetch it.
@@ -423,6 +556,30 @@ impl LivePackager {
             .and_then(|s| s.data.get(track).cloned().flatten())
     }
 
+    /// Part `index` (0-based) of segment `number` of `track`, if available.
+    /// Covers both the parts of a completed segment and those of the segment in
+    /// progress (whose number is [`Self::latest_segment`] + 1).
+    pub fn part(&self, track: usize, number: u64, index: u64) -> Option<Arc<Vec<u8>>> {
+        if number == self.next_number {
+            return self
+                .parts
+                .get(track)
+                .and_then(|p| p.get(usize::try_from(index).ok()?))
+                .map(|p| p.data.clone());
+        }
+        self.segments
+            .iter()
+            .find(|s| s.number == number)
+            .and_then(|s| s.parts.get(track)?.get(usize::try_from(index).ok()?))
+            .map(|p| p.data.clone())
+    }
+
+    /// Number of parts published for the segment in progress (`0` when parts
+    /// are disabled or nothing has been published yet).
+    pub fn latest_part(&self) -> u64 {
+        self.part_index
+    }
+
     fn window(&self) -> impl Iterator<Item = &Segment> {
         let skip = self.segments.len().saturating_sub(self.opts.window);
         self.segments.iter().skip(skip)
@@ -430,19 +587,63 @@ impl LivePackager {
 
     /// The media playlist of `track` (sliding window; `EXT-X-ENDLIST` once finished).
     pub fn media_playlist(&self, track: usize) -> Option<String> {
+        self.media_playlist_for(track, &PlaylistRequest::default())
+    }
+
+    /// The media playlist of `track`, honouring a low-latency reload request.
+    ///
+    /// With `req.msn` set, the returned playlist starts at the requested media
+    /// sequence number (waiting for it to appear is the caller's job — see
+    /// [`Self::satisfies`]); `req.skip` asks for a delta playlist. Both are
+    /// ignored when parts are disabled, where a full playlist is returned.
+    pub fn media_playlist_for(&self, track: usize, req: &PlaylistRequest) -> Option<String> {
         self.tracks.get(track)?;
         let first = self.window().next()?;
+        let parts = self.parts_enabled();
         let max = self
             .window()
             .map(|s| s.seconds[track])
             .fold(self.opts.segment_seconds, f64::max);
-        let mut out = format!(
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
-            max.ceil() as u64,
+        let version = if parts { 9 } else { 7 };
+        // Delta playlist: start at the first segment the client still wants, which
+        // must not be older than the retained window.
+        let oldest = self.segments.front().map_or(0, |s| s.number);
+        let start = if parts {
+            req.msn
+                .or(req.skip)
+                .map(|n| n.max(oldest).max(first.number))
+                .unwrap_or(first.number)
+        } else {
             first.number
+        };
+        let mut out = format!(
+            "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{start}\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
+            max.ceil() as u64,
         );
-        for s in self.window() {
-            if s.data.get(track).is_some_and(Option::is_some) {
+        if parts {
+            let part_target = self.opts.part_seconds.unwrap_or(0.0);
+            let _ = write!(
+                out,
+                "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={},CAN-SKIP-UNTIL={:.3}\n#EXT-X-PART-INF:PART-TARGET={part_target:.5}\n",
+                // Keep one part of each track per segment available beyond the window.
+                ((self.opts.segment_seconds / part_target).ceil() as u64).max(1) * 2,
+                self.opts.segment_seconds * self.opts.window as f64,
+            );
+        }
+        let skipped = start.saturating_sub(oldest);
+        if parts && skipped > 0 {
+            let _ = writeln!(out, "#EXT-X-SKIP:SKIPPED-SEGMENTS={skipped}");
+        }
+        for s in self.segments.iter().filter(|s| s.number >= start) {
+            let has = s.data.get(track).is_some_and(Option::is_some);
+            if parts {
+                if let Some(ps) = s.parts.get(track) {
+                    for (i, p) in ps.iter().enumerate() {
+                        part_tag(&mut out, track, s.number, i as u64, p);
+                    }
+                }
+            }
+            if has {
                 let _ = writeln!(
                     out,
                     "#EXTINF:{:.6},\nseg-{track}-{}.m4s",
@@ -450,10 +651,44 @@ impl LivePackager {
                 );
             }
         }
+        if parts && !self.finished && self.is_ready() {
+            // The segment in progress: its published parts, then a hint for the next.
+            let in_progress = self.next_number;
+            if let Some(ps) = self.parts.get(track) {
+                for (i, p) in ps.iter().enumerate() {
+                    part_tag(&mut out, track, in_progress, i as u64, p);
+                }
+            }
+            let _ = writeln!(
+                out,
+                "#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part-{track}-{in_progress}-{}.mp4\"",
+                self.part_index
+            );
+        }
         if self.finished {
             out.push_str("#EXT-X-ENDLIST\n");
         }
         Some(out)
+    }
+
+    /// Whether a blocking playlist request `req` can now be answered: the
+    /// segment (and, if given, the part) it waits for exists. `track` only
+    /// matters when a part index is requested, since parts are per track.
+    pub fn satisfies(&self, track: usize, req: &PlaylistRequest) -> bool {
+        if self.finished {
+            return true;
+        }
+        let Some(msn) = req.msn else {
+            return true;
+        };
+        // The next segment to be published must be the one asked for (or later).
+        if msn >= self.next_number {
+            return false;
+        }
+        match req.part {
+            Some(p) => self.part(track, msn, p).is_some(),
+            None => msn < self.next_number,
+        }
     }
 
     /// The master playlist.

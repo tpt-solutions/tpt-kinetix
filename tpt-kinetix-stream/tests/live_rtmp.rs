@@ -235,6 +235,7 @@ async fn start() -> (u16, u16) {
     let server = LiveServer::new(LiveOptions {
         segment_seconds: 2.0,
         window: 100,
+        part_seconds: None,
     });
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rtmp = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -137,6 +137,7 @@ async fn decode_matches(name: &str, vcodec: &[&str]) {
     let port = start(LiveOptions {
         segment_seconds: 2.0,
         window: 100,
+        part_seconds: None,
     })
     .await;
 
@@ -218,6 +219,7 @@ async fn playlist_is_live_while_publishing_and_complete_afterwards() {
     let port = start(LiveOptions {
         segment_seconds: 1.0,
         window: 3,
+        part_seconds: None,
     })
     .await;
     let mut child = publish_cmd(&src, port, "rt", true).spawn().unwrap();
@@ -275,6 +277,95 @@ async fn playlist_is_live_while_publishing_and_complete_afterwards() {
     let (code, seg) = http(port, "GET", &format!("/rt/{last}"), b"").await;
     assert_eq!(code, 200);
     assert_eq!(&seg[4..8], b"moof");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Low-latency HLS over HTTP: the served playlist advertises parts, every
+/// advertised part URI fetches a fragment, and a blocking reload
+/// (`_HLS_msn`) is answered only once its segment exists.
+/// Multi-threaded: this test blocks on `std::process::Child::wait`, which would
+/// starve the server task that has to drain the publish socket on a
+/// current-thread runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ll_hls_parts_are_served_and_blocking_reload_resolves() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livelld_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(
+        &dir,
+        &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"],
+        10,
+    ) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let port = start(LiveOptions {
+        segment_seconds: 2.0,
+        window: 6,
+        part_seconds: Some(1.0 / 3.0),
+    })
+    .await;
+
+    // A blocking reload for a segment far in the future must not answer instantly
+    // with the current playlist: it waits, then resolves once the publish gets
+    // there (or gives up and returns 404, which the test accepts as "blocked").
+    let blocking = tokio::spawn(async move {
+        http(port, "GET", "/ll/track-0.m3u8?_HLS_msn=3&_HLS_part=0", b"").await
+    });
+    let mut child = publish_cmd(&src, port, "ll", true).spawn().unwrap();
+    let started = Instant::now();
+    let mut saw_parts = false;
+    let mut preload = false;
+    while child.try_wait().unwrap().is_none() && started.elapsed() < Duration::from_secs(30) {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (code, body) = http(port, "GET", "/ll/track-0.m3u8", b"").await;
+        if code != 200 {
+            continue;
+        }
+        let pl = String::from_utf8(body).unwrap();
+        if !pl.contains("#EXT-X-PART:") {
+            continue;
+        }
+        saw_parts = true;
+        preload |= pl.contains("#EXT-X-PRELOAD-HINT:TYPE=PART");
+        // Every part the playlist advertises must be fetchable right now. The
+        // preload hint deliberately names the *next*, not-yet-published part.
+        let uris: Vec<String> = pl
+            .lines()
+            .filter(|l| l.starts_with("#EXT-X-PART:"))
+            .filter_map(|l| l.split("URI=\"").nth(1))
+            .filter_map(|l| l.split('"').next())
+            .filter(|u| u.starts_with("part-"))
+            .map(str::to_string)
+            .collect();
+        assert!(!uris.is_empty(), "{pl}");
+        for u in &uris {
+            let (code, data) = http(port, "GET", &format!("/ll/{u}"), b"").await;
+            assert_eq!(code, 200, "{u} (status {code})\nplaylist:\n{pl}");
+            assert_eq!(&data[4..8], b"moof", "{u} is not a fragment");
+        }
+        break;
+    }
+    assert!(child.wait().unwrap().success());
+    assert!(saw_parts, "no playlist with parts was served");
+    assert!(preload, "no preload hint was served");
+
+    // The blocked request resolved: either the playlist at msn=3, or a 404 after
+    // the wait — never an immediate stale playlist.
+    match tokio::time::timeout(Duration::from_secs(10), blocking).await {
+        Ok(Ok((code, body))) => {
+            assert!(code == 200 || code == 404, "status {code}");
+            if code == 200 {
+                let pl = String::from_utf8(body).unwrap();
+                assert!(pl.contains("#EXT-X-PART:"), "{pl}");
+            }
+        }
+        Ok(Err(e)) => panic!("blocking reload task failed: {e}"),
+        Err(_) => panic!("the blocking reload never completed"),
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

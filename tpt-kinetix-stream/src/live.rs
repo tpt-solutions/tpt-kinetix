@@ -25,10 +25,30 @@ use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tpt_kinetix_demux::mkv_stream::{MkvEvent, MkvStream};
-use tpt_kinetix_package::{LiveOptions, LivePackager};
+use tpt_kinetix_package::{LiveOptions, LivePackager, PlaylistRequest};
 
 /// Largest header block accepted from a client.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+/// How long a blocking playlist reload holds a connection open before giving up.
+const MAX_BLOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+/// How often a blocked playlist request re-checks the packager.
+const BLOCK_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Parses the low-latency reload query (`_HLS_msn`, `_HLS_part`, `_HLS_skip`).
+fn playlist_request(query: &str) -> PlaylistRequest {
+    let mut req = PlaylistRequest::default();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let Ok(n) = v.parse::<u64>() else { continue };
+        match k {
+            "_HLS_msn" => req.msn = Some(n),
+            "_HLS_part" => req.part = Some(n),
+            "_HLS_skip" => req.skip = Some(n),
+            _ => {}
+        }
+    }
+    req
+}
 
 pub(crate) type Shared = Arc<Mutex<LivePackager>>;
 
@@ -117,11 +137,14 @@ impl LiveServer {
             .filter_map(|l| l.split_once(':'))
             .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
             .collect();
-        let path = target.split('?').next().unwrap_or("/").to_string();
+        let (path, query) = match target.split_once('?') {
+            Some((p, q)) => (p.to_string(), q.to_string()),
+            None => (target.clone(), String::new()),
+        };
 
         match method.as_str() {
             "GET" | "HEAD" => {
-                let reply = self.playback(&path);
+                let reply = self.playback(&path, &query).await;
                 respond(r.get_mut(), reply, method == "HEAD").await
             }
             "POST" | "PUT" => {
@@ -140,18 +163,19 @@ impl LiveServer {
         }
     }
 
-    fn playback(&self, path: &str) -> Reply {
+    async fn playback(&self, path: &str, query: &str) -> Reply {
         let Some((key, name)) = path.trim_start_matches('/').split_once('/') else {
             return Reply::text(404, "expected /<key>/<resource>");
         };
         let Some(live) = self.streams.lock().unwrap().get(key).cloned() else {
             return Reply::text(404, "no such stream");
         };
-        let live = live.lock().unwrap();
         let num = |s: &str| s.parse::<usize>().ok();
         let not_ready = || Reply::text(404, "the stream is not ready yet; retry shortly");
         if name == "master.m3u8" {
             return live
+                .lock()
+                .unwrap()
                 .master_playlist()
                 .map_or_else(not_ready, |p| Reply::playlist(p.into_bytes()));
         }
@@ -160,8 +184,14 @@ impl LiveServer {
             .and_then(|s| s.strip_suffix(".m3u8"))
             .and_then(num)
         {
+            let req = playlist_request(query);
+            if req.msn.is_some() && !self.await_request(&live, t, &req).await {
+                return Reply::text(404, "no such segment yet; retry shortly");
+            }
             return live
-                .media_playlist(t)
+                .lock()
+                .unwrap()
+                .media_playlist_for(t, &req)
                 .map_or_else(not_ready, |p| Reply::playlist(p.into_bytes()));
         }
         if let Some(t) = name
@@ -170,6 +200,8 @@ impl LiveServer {
             .and_then(num)
         {
             return live
+                .lock()
+                .unwrap()
                 .init_segment(t)
                 .map_or_else(not_ready, |b| Reply::media("video/mp4", b));
         }
@@ -179,14 +211,48 @@ impl LiveServer {
         {
             if let Some((t, n)) = rest.split_once('-') {
                 if let (Some(t), Ok(n)) = (num(t), n.parse::<u64>()) {
-                    return live.segment(t, n).map_or_else(
+                    return live.lock().unwrap().segment(t, n).map_or_else(
                         || Reply::text(404, "no such segment"),
                         |b| Reply::media("video/iso.segment", b.to_vec()),
                     );
                 }
             }
         }
+        if let Some(rest) = name
+            .strip_prefix("part-")
+            .and_then(|s| s.strip_suffix(".mp4"))
+        {
+            if let Some((t, rest)) = rest.split_once('-') {
+                if let Some((n, i)) = rest.split_once('-') {
+                    if let (Some(t), Ok(n), Ok(i)) = (num(t), n.parse::<u64>(), i.parse::<u64>()) {
+                        return live.lock().unwrap().part(t, n, i).map_or_else(
+                            || Reply::text(404, "no such part"),
+                            |b| Reply::media("video/iso.segment", b.to_vec()),
+                        );
+                    }
+                }
+            }
+        }
         Reply::text(404, "no such resource")
+    }
+
+    /// Blocks until the media `req` asks for exists, the stream ends, or
+    /// `MAX_BLOCK_WAIT` elapses. Returns whether the request can be answered.
+    ///
+    /// This is the low-latency HLS blocking playlist reload: a player reloads
+    /// with `_HLS_msn`/`_HLS_part` while it is still behind and the connection is
+    /// held open, so a new part costs one request instead of a poll cycle.
+    async fn await_request(&self, live: &Shared, track: usize, req: &PlaylistRequest) -> bool {
+        let deadline = tokio::time::Instant::now() + MAX_BLOCK_WAIT;
+        loop {
+            if live.lock().unwrap().satisfies(track, req) {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(BLOCK_POLL).await;
+        }
     }
 
     async fn ingest(
