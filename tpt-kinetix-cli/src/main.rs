@@ -894,8 +894,14 @@ fn write_ivf(
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&32u16.to_le_bytes());
     out.extend_from_slice(b"AV01");
-    out.extend_from_slice(&width.to_le_bytes());
-    out.extend_from_slice(&height.to_le_bytes());
+    // The IVF geometry fields are 16-bit. Writing the `u32`s shifted every
+    // following field by two bytes, so the frame count and the rate/scale pair
+    // were misread and players rejected the file ("Picture size 0x0").
+    let (Ok(w), Ok(h)) = (u16::try_from(width), u16::try_from(height)) else {
+        anyhow::bail!("IVF stores 16-bit geometry, but the frame is {width}x{height}");
+    };
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
     out.extend_from_slice(&fps_num.to_le_bytes());
     out.extend_from_slice(&fps_den.to_le_bytes());
     out.extend_from_slice(&(packets.len() as u32).to_le_bytes());

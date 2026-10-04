@@ -537,6 +537,17 @@ fn build_y_mask(f: &mut SbFilter, unit: usize, shift_y: usize) {
     build_masks(f, unit, shift_y, 0, false);
 }
 
+/// The chroma edge mask for a superblock whose last row has `rows` MI rows.
+///
+/// Reference `vp9_adjust_mask`: `const uint16_t mask_uv = 1U << ((((rows + 1) >> 1) << 2));`
+/// — a 32-bit shift whose result is then truncated to 16 bits. Doing the shift
+/// in `u16` instead overflows at `rows == 7` (shift 16), which is the last
+/// superblock of any frame whose MI height is not a multiple of 8.
+fn chroma_edge_mask_uv(rows: usize) -> u16 {
+    debug_assert!(rows < 8, "caller only masks a partial superblock row");
+    ((1u32 << (((rows + 1) >> 1) << 2)) as u16).wrapping_sub(1)
+}
+
 /// Reference `vp9_adjust_mask`.
 pub fn adjust_mask(f: &mut SbFilter, mi_row: usize, mi_col: usize, mi_rows: usize, mi_cols: usize) {
     f.left_y[2] |= f.left_y[3];
@@ -556,7 +567,11 @@ pub fn adjust_mask(f: &mut SbFilter, mi_row: usize, mi_col: usize, mi_rows: usiz
     if mi_row + 8 > mi_rows {
         let rows = mi_rows - mi_row;
         let mask_y = (1u64 << (rows << 3)).wrapping_sub(1);
-        let mask_uv = (1u16 << (((rows + 1) >> 1) << 2)).wrapping_sub(1);
+        // The reference writes `1U << ...` — an *unsigned* (32-bit) shift — and
+        // only then assigns to a `uint16_t`. Computing in `u16` directly is not
+        // equivalent: with `rows == 7` the shift is 16, which overflows `u16`.
+        // Truncating the 32-bit result reproduces the reference exactly.
+        let mask_uv = chroma_edge_mask_uv(rows);
         for i in 0..3 {
             f.left_y[i] &= mask_y;
             f.above_y[i] &= mask_y;
@@ -1071,6 +1086,51 @@ pub fn loopfilter_sb(
             m4 >>= 4;
             m4i >>= 4;
             r += 2;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shift overflowed in `u16` for every value the reference computes in
+    /// 32 bits and truncates. Each of these is a whole frame height in pixels
+    /// whose MI row count ends in 7, i.e. a last superblock row of 7 MI rows.
+    #[test]
+    fn chroma_edge_mask_uv_matches_the_reference_and_never_overflows() {
+        // Reference, transcribed literally: `1U << ((((rows + 1) >> 1) << 2))`.
+        let reference =
+            |rows: usize| -> u16 { ((1u32 << (((rows + 1) >> 1) << 2)) as u16).wrapping_sub(1) };
+        for rows in 1..=7 {
+            assert_eq!(
+                chroma_edge_mask_uv(rows),
+                reference(rows),
+                "rows={rows} differs from the reference"
+            );
+        }
+        // The specific value that used to panic: rows=7 is a shift of 16.
+        assert_eq!(chroma_edge_mask_uv(7), u16::MAX);
+        // A 120px-tall frame: 15 MI rows, so the last superblock row has 7.
+        assert_eq!(chroma_edge_mask_uv(15 - 8), chroma_edge_mask_uv(7));
+    }
+
+    /// `adjust_mask` runs for every partial-superblock row count, including the
+    /// one that used to kill the thread. Before the fix this panicked here.
+    #[test]
+    fn adjust_mask_survives_every_partial_superblock_row() {
+        for rows in 1..=7 {
+            let mi_rows = 8 + rows;
+            let mut f = SbFilter::default();
+            // Values must be masked, not merely not-panic.
+            f.left_uv[0] = u16::MAX;
+            f.above_uv[1] = u16::MAX;
+            f.left_y[0] = u64::MAX;
+            adjust_mask(&mut f, 8, 0, mi_rows, 20);
+            assert!(
+                f.above_uv[1] & !chroma_edge_mask_uv(rows) == 0,
+                "rows={rows}: chroma bits outside the mask survived"
+            );
         }
     }
 }

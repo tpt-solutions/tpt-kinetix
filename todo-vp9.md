@@ -782,27 +782,31 @@ dumps, and remember the file is CRLF (patch scripts must preserve it).
 3. Profile-1/4:4:4 and 10/12-bit remain out of scope (rejected in strict
    mode with `KinetixError::Unsupported`).
 
-## Found 2026-10-04 (via `todo-io.md`): loop-filter bottom/right edge panics
+## Fixed 2026-10-04: loop-filter chroma mask overflowed on the last superblock row
 
-`tpt-kinetix-vp9/src/loop_filter.rs:559`:
+`tpt-kinetix-vp9/src/loop_filter.rs`, in `vp9_adjust_mask`'s bottom-edge branch:
 
 ```rust
-if mi_row + 8 > mi_rows {
-    let rows = mi_rows - mi_row;
-    let mask_y = (1u64 << (rows << 3)).wrapping_sub(1);
+let rows = mi_rows - mi_row;
+let mask_uv = (1u16 << (((rows + 1) >> 1) << 2)).wrapping_sub(1);
 ```
 
-`rows << 3` can reach >= 64, so the shift overflows and kills the thread. This is
-reachable from `tpt-kinetix transcode --vcodec av1` on any ffmpeg-encoded VP9
-(reproduces on a 160x120 testsrc2 clip), so the royalty-free transcode path is
-currently broken for its own input format. The guard `mi_row + 8 > mi_rows` is
-meant to bound `rows` to < 8 but does not: the two conditions are independent.
+The shift was done in `u16`. At `rows == 7` the shift is 16, which overflows and
+kills the thread. Any frame whose MI height is not a multiple of 8 has such a
+last superblock row — a 120px-tall frame is 15 MI rows, so its last superblock
+row has 7. This was reachable from `tpt-kinetix transcode --vcodec av1` on any
+ffmpeg-encoded VP9, so the royalty-free transcode path was broken for its own
+input format.
 
-Needs the right edge condition too (the left/above edges look handled) and a
-properly clamped mask, then a regression test on a clip that triggers it —
-likely a frame whose last MI row is partial. The conformance corpus in
-`docs/CONFORMANCE.md` evidently does not cover it, which is itself worth
-fixing.
+**Fixed** by shifting in `u32` and truncating, which is exactly what the C
+reference does (`const uint16_t mask_uv = 1U << ((((rows + 1) >> 1) << 2));` —
+`1U` is 32-bit). Regression tests in `loop_filter.rs` pin the value against the
+reference for rows 1..=7 and confirm `adjust_mask` survives every
+partial-superblock row. Confirmed pre-existing at `a73aa41`; not caused by the
+`ReadAt`/pipeline migration in the same session. The VP9 conformance suite is
+unchanged by the fix: 13 pass byte-exact, and the 3 `#[ignore]`d failures above
+still fail exactly as before.
 
-Confirmed pre-existing at `a73aa41`; not caused by the `ReadAt`/pipeline
-migration in the same session.
+`mask_y` on the line above (`1u64 << (rows << 3)`) is fine — `rows < 8` there, so
+the shift is at most 56. The column branch below it shifts by at most 4 into
+`u16`. Neither needed changing.

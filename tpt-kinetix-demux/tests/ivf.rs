@@ -180,3 +180,64 @@ fn a_truncated_tail_keeps_the_intact_prefix() {
     assert!(n >= whole - 1, "kept {n} of {whole} frames");
     assert!(n < whole, "truncation should have dropped a frame");
 }
+
+/// The IVF header stores 16-bit geometry. A writer that emits `u32` width/height
+/// shifts every later field by two bytes, and the resulting file is unreadable —
+/// `ffprobe` reports a 0x0 picture and libdav1d rejects it with "No sequence
+/// header available".
+///
+/// This checks the header layout a writer must produce, by round-tripping through
+/// [`IvfDemuxer`] — the same reader `probe` uses.
+#[test]
+fn a_written_header_round_trips_through_the_reader() {
+    use tpt_kinetix_core::codec::CodecId as C;
+    use tpt_kinetix_demux::ivf::{IVF_FRAME_HEADER_LEN, IVF_HEADER_LEN};
+
+    let frames: [&[u8]; 3] = [b"first", b"second", b"third"];
+    let (width, height, rate, scale) = (320u16, 240u16, 30u32, 1u32);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"DKIF");
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(IVF_HEADER_LEN as u16).to_le_bytes());
+    out.extend_from_slice(b"AV01");
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&scale.to_le_bytes());
+    out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for (i, f) in frames.iter().enumerate() {
+        out.extend_from_slice(&(f.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(i as u64).to_le_bytes());
+        out.extend_from_slice(f);
+    }
+    assert_eq!(
+        out.len(),
+        IVF_HEADER_LEN
+            + frames
+                .iter()
+                .map(|f| IVF_FRAME_HEADER_LEN + f.len())
+                .sum::<usize>()
+    );
+
+    let mut d = IvfDemuxer::new(out).unwrap();
+    let info = d.stream_info();
+    assert_eq!(info.codec, C::Av1);
+    assert_eq!(
+        info.width,
+        u32::from(width),
+        "width must survive the round trip"
+    );
+    assert_eq!(
+        info.height,
+        u32::from(height),
+        "height must survive the round trip"
+    );
+    assert_eq!(info.timescale, rate, "timescale is the header's rate");
+    assert_eq!(d.frame_count(), 3);
+    let got: Vec<Vec<u8>> = std::iter::from_fn(|| d.read_packet().unwrap())
+        .map(|p| p.data)
+        .collect();
+    assert_eq!(got, frames.iter().map(|f| f.to_vec()).collect::<Vec<_>>());
+}

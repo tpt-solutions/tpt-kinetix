@@ -111,12 +111,22 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       never resident; the geometry and codec probes each take their own short-lived handle. A test
       pins that a file-backed source yields byte-identical packets to an in-memory one. The
       whole-buffer reads left in `probe` are inherent — `TsDemuxer` and `IvfDemuxer` take a slice.
-- [!] **Found, not fixed: `transcode` panics on real VP9 input.** `tpt-kinetix-vp9/src/loop_filter.rs:559`
-      — `1u64 << (rows << 3)` overflows, killing a stage thread, so `transcode --vcodec av1` on any
-      ffmpeg-encoded VP9 fails. Confirmed pre-existing (reproduces identically at `a73aa41`).
-      `rows = mi_rows - mi_row`, and the guard `mi_row + 8 > mi_rows` does not actually bound `rows`
-      below 8, so the shift can reach >= 64. Belongs in `todo-vp9.md`; left alone here rather than
-      half-fixed from the I/O side.
+- [x] **`transcode` no longer panics on real VP9 input.** Two bugs, both pre-existing
+      (`a73aa41`), both fixed. (1) `loop_filter.rs`: the chroma edge mask shifted in `u16` where the
+      reference shifts in `u32` and truncates — a shift of 16 overflowed and killed the stage thread.
+      See `todo-vp9.md`. (2) `write_ivf` wrote `u32` width/height into 16-bit IVF fields, shifting
+      every later header field by two bytes; `probe` then reported `160x0` and libdav1d rejected the
+      file with "No sequence header available". Both fixed with regression tests.
+      `transcode` now completes and emits a valid AV1 IVF whose geometry (160x120), frame count (25)
+      and clean decode all match `ffprobe`.
+- [!] **Open: transcode output pixels are still wrong.** The AV1 file is now well-formed and decodes
+      without error, but its pixels do not match the source (PSNR ~11 dB against the original, where
+      an ffmpeg reference encode gets ~40 dB). I could **not** attribute this to a cause: a raw-YUV
+      dump I took through the pipeline said VP9 *decode* was garbage at every frame size, but that
+      contradicts the VP9 conformance suite, which decodes 320x240 "real content" byte-exact against
+      the libvpx reference. Since my own instrumentation disagreed with the authoritative harness, I
+      did not trust it far enough to report a decoder bug, and I did not guess a fix. Needs someone to
+      settle which measurement is wrong first.
 
 ### D. Evidence, quality, tooling
 
