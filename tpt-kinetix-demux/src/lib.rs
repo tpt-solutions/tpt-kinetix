@@ -15,7 +15,9 @@
 #[cfg(feature = "http")]
 pub mod http;
 pub mod mkv;
+pub mod mkv_stream;
 pub mod mp4;
+pub mod rfconfig;
 pub mod source;
 pub mod ts;
 #[cfg(feature = "wasm")]

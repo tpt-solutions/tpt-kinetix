@@ -21,9 +21,10 @@ tracing = { workspace = true }
 tokio = { version = "1.38", features = ["full"] }
 bytes = "1.5"
 nom = { workspace = true }
+tpt-kinetix-demux = { workspace = true }
+tpt-kinetix-package = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
 tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
 tpt-kinetix-core = { workspace = true }
-tpt-kinetix-demux = { path = "../tpt-kinetix-demux", version = "0.1.0" }

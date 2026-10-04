@@ -11,7 +11,8 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 
-const [chrome, libs, base, secs = "5"] = process.argv.slice(2);
+// specs: comma-separated `kind:path` pairs (default: both VOD manifests).
+const [chrome, libs, base, secs = "5", specs = "hls:master.m3u8,dash:manifest.mpd"] = process.argv.slice(2);
 
 function runOne(kind, url) {
   return new Promise((resolve) => {
@@ -58,7 +59,7 @@ function runOne(kind, url) {
 
 (async () => {
   let failed = false;
-  for (const [kind, file] of [["hls", "master.m3u8"], ["dash", "manifest.mpd"]]) {
+  for (const [kind, file] of specs.split(",").map((s) => s.split(":"))) {
     const r = await runOne(kind, `${base}/${file}`);
     const good = r.ok && r.videoWidth > 0 && (r.errors || []).length === 0 && (r.decodedFrames || 0) > 20;
     console.log(

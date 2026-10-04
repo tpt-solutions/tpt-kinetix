@@ -20,11 +20,13 @@
 mod codecs;
 mod dash;
 mod hls;
+pub mod live;
 mod plan;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
 pub use codecs::codec_string;
+pub use live::{LiveError, LiveOptions, LivePackager};
 pub use plan::{Segment, SegmentPlan};
 
 use std::ops::Range;

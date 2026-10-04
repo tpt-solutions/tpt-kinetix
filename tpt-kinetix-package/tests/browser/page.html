@@ -37,7 +37,13 @@
   }
 
   v.addEventListener("error", () => errors.push("video element error " + (v.error && v.error.message)));
-  v.addEventListener("timeupdate", () => { if (v.currentTime >= want) report({ ok: true }); });
+  // Progress is measured from where playback first started: a live stream begins
+  // near the live edge, not at 0.
+  let origin = null;
+  v.addEventListener("timeupdate", () => {
+    if (origin === null && v.currentTime > 0) origin = v.currentTime;
+    if (origin !== null && v.currentTime - origin >= want) report({ ok: true, origin });
+  });
   setTimeout(() => report({ ok: false, timeout: true }), 40000);
 
   if (kind === "hls") {

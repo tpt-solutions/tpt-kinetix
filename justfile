@@ -216,3 +216,7 @@ edge-worker-test:
 # hls.js and dash.js playing the just-in-time output in headless Chrome.
 browser-package-test:
     bash tools/browser-package-test.sh
+
+# Publish AV1/VP9 + Opus live and play it with hls.js in headless Chrome mid-stream.
+live-browser-test:
+    bash tools/live-browser-test.sh

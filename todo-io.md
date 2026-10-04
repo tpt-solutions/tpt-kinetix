@@ -57,7 +57,7 @@ Known/qualitative, to be measured before claiming:
 - [x] **M3 — Streaming muxer.** *(done 2026-10-04: progressive multi-track MP4, faststart, fragmented MP4/CMAF writer, `remux`; see "M3 progress" below. Non-MP4 outputs and metadata copy remain.)* `Write`-based MP4 muxer: multi-track, faststart, edit lists,
   and **fragmented MP4 / CMAF**. Remux (`tpt-kinetix remux in out`) round-trips vs
   `ffprobe`/`ffmpeg -c copy` byte-for-semantics.
-- [~] **M4 — Packaging.** *(VOD just-in-time HLS-fMP4 + DASH done 2026-10-04 (`tpt-kinetix-package`, CLI `package`/`serve`); live sliding window, low-latency parts, RTMP/SRT ingest with audio still open.)* HLS with fMP4 segments + DASH (on top of M3), live sliding window,
+- [~] **M4 — Packaging.** *(VOD just-in-time HLS-fMP4 + DASH done; live HLS from WebM-over-HTTP (AV1/VP9+Opus) done 2026-10-04; low-latency parts, dynamic DASH, Enhanced RTMP/WHIP ingest still open.)* HLS with fMP4 segments + DASH (on top of M3), live sliding window,
   low-latency parts; RTMP/SRT ingest -> package, audio included.
 - [ ] **M5 — Probe service.** `probe --json` matching ffprobe's field names for the common
   cases; HTTP-range remote probing; WASM build kept working.
@@ -209,3 +209,37 @@ Tests: `tests/http_range.rs` (real TCP server, request/byte bounds, non-Range se
   (83,708 KiB of 83,708 KiB), and a cold segment costs ~7 requests (index + its own ~6 MB).
 * **Not done / not verified:** a real Cloudflare deployment (no account here), real R2, Workers CPU/memory limits
   under load, `Range` on segment responses, a segment cache layer inside the Worker, Safari/hardware players.
+
+### Live, royalty-free first (2026-10-04) — AV1 / VP9 / Opus
+
+Direction change from the user: H.264/AAC are secondary; lead with **AV1, VP9, Opus** (see the memory note).
+First confirmed the existing VOD packager is already exact for them: AV1+Opus and VP9+Opus `package`d output
+decodes in ffmpeg to **frame-MD5-identical** video (300/300) and audio (601/601), and plays in hls.js and dash.js in
+Chrome (135 frames, 0 dropped, 0 errors, HLS and DASH).
+
+* **`demux::mkv_stream::MkvStream`** — sans-IO incremental WebM/Matroska parser for live ingest: any chunking,
+  unknown-size `Segment`/`Cluster`, `SimpleBlock` and `BlockGroup`, laced blocks rejected, element and buffering
+  caps. Emits `StreamInfo` with MP4-ready config records: `av1C` straight from `CodecPrivate`, **`vpcC` built from
+  the first VP9 key-frame header** (`rfconfig::vp9_config_from_frame`, level from picture size), **`dOps` from
+  `OpusHead`** (`opus_head_to_dops`; pre-skip becomes the edit-list media time). Opus packet durations come from the
+  TOC byte (`opus_packet_samples`). Verified against `ffprobe` frame-for-frame on real AV1+Opus and VP9+Opus WebM
+  as a file, as unknown-size (live) layout, as ffmpeg's live pipe (VP9), byte-at-a-time and at odd chunk sizes,
+  plus a never-panics proptest. (ffmpeg 6.1 cannot write AV1 to a *live* WebM; the unknown-size AV1 case is a
+  size-patched copy of the finite file.)
+* **`package::live::LivePackager`** — pure, codec-agnostic live fMP4 HLS state machine: lead track = first video,
+  cuts at key frames >= target length, sliding window (`EXT-X-MEDIA-SEQUENCE`, retains window+3), `ENDLIST` on
+  finish, init/segment/master/media playlists. Video 90 kHz; Opus 48 kHz with TOC-derived durations and synthesised
+  gapless timestamps (re-anchor at 100 ms drift); audio that arrives before the first video key frame is buffered
+  and pruned by timestamp (a bug found by test: it used to be dropped by arrival order).
+* **`stream::LiveServer`** (tokio, `tpt-kinetix live --port N`): `POST|PUT /ingest/<key>` takes a WebM (chunked,
+  length-delimited or until EOF, `Expect: 100-continue`), `GET /<key>/master.m3u8|track-N.m3u8|init-N.mp4|seg-N-M.m4s`.
+  CORS enabled; one publisher per key.
+* **Verified with real tools:** ffmpeg publishing AV1+Opus and VP9+Opus over HTTP POST -> the served HLS decodes
+  to **250/250 identical video frames** and identical audio (all but the final frame, whose Matroska
+  `DiscardPadding` trim a passthrough fMP4 does not carry); a real-time (`-re`) publish shows the playlist
+  *live* mid-stream (no `ENDLIST`, window <= 3 slides) and complete afterwards; and **hls.js in headless Chrome
+  plays the stream while it is still being published** (VP9 and AV1: 130 frames, 0 dropped, no errors;
+  `just live-browser-test`).
+* **Not done:** low-latency HLS (`EXT-X-PART`, blocking reload) so latency is ~3 segments; a *dynamic* DASH MPD;
+  Enhanced RTMP ingest (FourCC `av01`/`vp09`; ffmpeg 6.1 sends no Opus over RTMP) and WHIP/WebRTC; multiple renditions;
+  DVR/recording; auth on `/ingest`; HTTP/2 (browser `fetch` upload streaming needs it); a Worker/edge live variant.

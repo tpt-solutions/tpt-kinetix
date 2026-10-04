@@ -65,6 +65,25 @@ enum Commands {
         #[arg(long, default_value_t = 6.0)]
         segment_seconds: f64,
     },
+    /// Run a live server: publish AV1/VP9 + Opus WebM over HTTP, play it as live HLS.
+    ///
+    /// Publishers `POST` a WebM to `/ingest/<key>` (for example `ffmpeg -re -i in
+    /// -c copy -f webm -method POST http://host:8080/ingest/cam`); viewers open
+    /// `/<key>/master.m3u8`. Royalty-free codecs only: AV1 or VP9 video, Opus audio.
+    Live {
+        /// Port to listen on.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Target segment length in seconds (cut at the next video key frame).
+        #[arg(long, default_value_t = 2.0)]
+        segment_seconds: f64,
+        /// Segments listed in a playlist.
+        #[arg(long, default_value_t = 6)]
+        window: usize,
+        /// Listen on all interfaces instead of localhost only.
+        #[arg(long)]
+        public: bool,
+    },
     /// Serve an MP4 as HLS and DASH, packaged just in time (nothing is pre-processed).
     Serve {
         /// Input MP4 (path or http(s) URL).
@@ -155,6 +174,23 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Probe { input } => probe(&input),
+        Commands::Live {
+            port,
+            segment_seconds,
+            window,
+            public,
+        } => {
+            let host = if public { "0.0.0.0" } else { "127.0.0.1" };
+            println!(
+                "live server on http://{host}:{port}\n  publish: POST a WebM (AV1/VP9 + Opus) to /ingest/<key>\n  play   : http://{host}:{port}/<key>/master.m3u8"
+            );
+            tpt_kinetix_stream::LiveServer::new(tpt_kinetix_package::LiveOptions {
+                segment_seconds,
+                window,
+            })
+            .bind_and_serve(&format!("{host}:{port}"))
+            .await
+        }
         Commands::Package {
             input,
             output,

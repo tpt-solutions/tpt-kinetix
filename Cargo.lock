@@ -1753,6 +1753,7 @@ dependencies = [
  "tokio-test",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
+ "tpt-kinetix-package",
  "tpt-kinetix-test-utils",
  "tracing",
 ]
