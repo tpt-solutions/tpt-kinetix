@@ -810,3 +810,36 @@ still fail exactly as before.
 `mask_y` on the line above (`1u64 << (rows << 3)`) is fine — `rows < 8` there, so
 the shift is at most 56. The column branch below it shifts by at most 4 into
 `u16`. Neither needed changing.
+## Open 2026-10-04: decode is byte-exact ONLY on the conformance corpus's own parameters
+
+`transcode` produces visibly corrupted output (vertically smeared, ~9-12 dB PSNR).
+Bisected as far as evidence allows, and the picture is sharper than "the decoder
+is broken":
+
+**The decoder is genuinely correct on the corpus.** Decoding
+`tpt_vp9_conf_real320_testsrc_320x240_8_mdeadline_good_mcpumused_4_mlagminmframes_0.ivf`
+through `Vp9Decoder` gives **Infinity dB** — bit-exact against libvpx.
+
+**But ordinary clips corrupt.** Verified corrupt (rendering the decoded frame as a
+PNG shows the smear directly):
+- 160x120, 25 fps, `-g 25 -b:v 200k` — corrupt, ~11.3 dB
+- 320x248, 25 fps — corrupt, ~9.5 dB
+- the same clips with `-lag-in-frames 0 -auto-alt-ref 0` — still corrupt, so
+  alt-ref frames are *not* the cause
+- the same clip as MP4 and as IVF — identical corruption, so `Mp4Reader` is not
+  the cause; the encoder is not the cause either (rendering the *decoded* frame
+  reproduces the exact same smear)
+
+**Not the loop filter.** I specifically tested the `rows == 7` path fixed above
+by forcing its chroma mask to 0 as well: PSNR unchanged at 9.46 dB.
+
+So the trigger is something about ordinary libvpx encodes that the corpus does
+not reproduce. The corpus is narrow on purpose — it pins 4:2:0 8-bit, uses
+`-mdeadline good -mcpumused 4 -mlagminmframes 0`, `rate=10`, and at most 8
+frames — and `transcode` on a normal clip lands nowhere near it.
+
+Next step is to widen the conformance matrix (more rates, more frame counts,
+`-cpu-used 9` speed presets, constrained bitrate) and find the first clip that
+goes red; that turns "some clips corrupt" into a specific failing case. Do NOT
+relax the byte-exact assertion to make this go away — the current corpus is
+correctly passing.
