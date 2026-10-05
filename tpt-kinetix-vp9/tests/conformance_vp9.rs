@@ -288,31 +288,13 @@ fn check_clip_tagged(
     );
 }
 
-/// **Known pre-existing gap — `#[ignore]`d so CI stays green. Remove the
-/// `#[ignore]` when fixed.**
-///
-/// The rest of this file verifies byte-exactness only on clips up to 256x144,
-/// on synthetic sources (`color=black`, tiny gradients, solid fills). That
-/// leaves real-content decoding at realistic frame sizes completely unverified,
-/// and it is not merely unverified — it is wrong.
-///
-/// `just bench-ffmpeg` found that the VP9 decoder does not match libvpx on the
-/// perf corpus at 320x240 (diverges at frame 128), 1280x720 (frame 38) and
-/// 1920x1080 (**frame 0**). Measured on 1920x1080 frame 0: 866 of 3,110,400
-/// samples differ (0.028%), concentrated in only 20 of the 8,100 16x16 luma
-/// blocks, with deltas up to +/-170 and a PSNR of 46.59 dB. So it is visually
-/// transparent but genuinely not bit-exact.
-///
-/// Ruled out while isolating this: it is **not** motion compensation (frame 0
-/// has none), and **not** the loop filter — `TPT_VP9_NO_LF=1` makes it ten times
-/// worse (26,304 differing samples vs 866), so deblocking is doing its job and
-/// the residual error is in prediction or the inverse transform.
-///
-/// Reproduced here with the perf corpus's exact encoder settings so the gap is
-/// caught by `cargo test -p tpt-kinetix-vp9` once fixed, instead of only by a
-/// 32-minute benchmark harness.
+/// Real-content regression at the perf-corpus envelope. This used to be the
+/// `#[ignore]`d "known pre-existing gap" reproduction (diverges from frame 128
+/// of the 300-frame perf clip); the sub-8x8 mode/MV bugs it exposed are fixed,
+/// so it asserts byte-exactness like the rest of the file. The two larger
+/// real-content cases below remain `#[ignore]`d on the residual luma-only
+/// loop-filter edge divergence (see `fixtures/div128/README.md`).
 #[test]
-#[ignore = "VP9 decode is not byte-exact vs libvpx at >=320x240 on real content (pre-existing)"]
 fn conformance_vp9_320x240_real_content() {
     check_clip_tagged(
         "realtestsrc_320x240",
@@ -326,14 +308,14 @@ fn conformance_vp9_320x240_real_content() {
 }
 
 /// **Known pre-existing gap — `#[ignore]`d. See
-/// `conformance_vp9_320x240_real_content` for the analysis.**
+/// `fixtures/div128/README.md` for the isolation state.**
 ///
-/// The 1080p case diverges from **frame 0**, which rules out motion compensation
-/// entirely and isolates the defect to intra prediction or the inverse
-/// transform. Kept separate because it is the cheapest reproduction: one frame,
-/// no reference frames involved.
+/// Down to 748 differing luma samples (was whole-frame corruption before the
+/// sub-8x8/MV fixes): a per-edge loop-filter level divergence at
+/// skip-8x8/4x4-partitioned boundaries, luma ±1. Chroma is nearly exact
+/// (u_bad=17, v_bad=23).
 #[test]
-#[ignore = "VP9 decode is not byte-exact vs libvpx at >=320x240 on real content (pre-existing)"]
+#[ignore = "VP9 luma loop-filter edge divergence vs libvpx on real content (pre-existing, see fixtures/div128)"]
 fn conformance_vp9_1920x1080_keyframe_intra() {
     check_clip_tagged(
         "realtestsrc_1920x1080",
@@ -347,24 +329,12 @@ fn conformance_vp9_1920x1080_keyframe_intra() {
 }
 
 /// **Known pre-existing gap — `#[ignore]`d. See
-/// `conformance_vp9_320x240_real_content` for the analysis.**
+/// `fixtures/div128/README.md` for the isolation state.**
 ///
-/// Included because it disproves the obvious hypothesis. 640x360 is small and
-/// 8-aligned on both axes, so it was expected to pass and act as a control
-/// proving the defect was about large frames. It does not: it fails harder
-/// still — 36,470 differing luma samples at **PSNR Y=35.47 dB**, versus 866
-/// samples at 46.59 dB for 1920x1080. So the defect is not a function of frame
-/// size at all.
-///
-/// It also yields the sharpest clue so far: **chroma is bit-exact** in every
-/// failing case (`u_bad=0`, `v_bad=0`, PSNR U/V=99 dB = identical) while luma is
-/// wrong. That rules out the shared machinery — the bool decoder, the mode
-/// parsing, the segmentation map and the loop filter are all common to both
-/// planes and evidently correct. The defect is in a **luma-only** path: the
-/// 4x4 WHT-vs-DCT transform selection, luma dequantisation, or luma intra
-/// prediction edge handling.
+/// Same residual as the 1080p case: luma-only, ±1-2 deltas at 35.5 dB after
+/// the sub-8x8/MV fixes; chroma is bit-exact (`u_bad=0`, `v_bad=0`).
 #[test]
-#[ignore = "VP9 luma decode is not byte-exact vs libvpx on real content (pre-existing)"]
+#[ignore = "VP9 luma loop-filter edge divergence vs libvpx on real content (pre-existing, see fixtures/div128)"]
 fn conformance_vp9_640x360_real_content() {
     check_clip_tagged(
         "realtestsrc_640x360",
@@ -374,6 +344,68 @@ fn conformance_vp9_640x360_real_content() {
         "testsrc",
         4,
         &["-deadline", "good", "-cpu-used", "4", "-lag-in-frames", "0"],
+    );
+}
+
+/// The conformance corpus pinned `-deadline good -cpu-used 4` encodes, which
+/// never emit `TX_MODE_SELECT`. Ordinary encodes (`-cpu-used` 0-3, or
+/// `-deadline realtime`) do, and decoding them used to corrupt from the first
+/// keyframe: the per-block tx-size read was skipped (`bs >= BS_8X8` guard
+/// inverted for this crate's descending block-size ids) and, for inter
+/// frames, read after the mode info instead of before it. These four cases
+/// pin the fixed paths: TX_MODE_SELECT keyframe, TX_MODE_SELECT inter (with
+/// sub-8x8 blocks, whose chroma MC must be one full 4x4 and whose NEARMV
+/// sub-blocks must consult the differing-MV scan), cpu-used 0, and realtime
+/// deadline.
+#[test]
+fn conformance_vp9_tx_select_keyframe() {
+    check_clip_tagged(
+        "txselect_kf_testsrc_160x120",
+        "txskf",
+        160,
+        120,
+        "testsrc",
+        1,
+        &["-deadline", "good", "-cpu-used", "2", "-lag-in-frames", "0"],
+    );
+}
+
+#[test]
+fn conformance_vp9_tx_select_inter() {
+    check_clip_tagged(
+        "txselect_inter_testsrc_160x120",
+        "txsint",
+        160,
+        120,
+        "testsrc",
+        8,
+        &["-deadline", "good", "-cpu-used", "1", "-lag-in-frames", "0"],
+    );
+}
+
+#[test]
+fn conformance_vp9_cpu0() {
+    check_clip_tagged(
+        "cpu0_testsrc_160x120",
+        "cpu0",
+        160,
+        120,
+        "testsrc",
+        8,
+        &["-deadline", "good", "-cpu-used", "0", "-lag-in-frames", "0"],
+    );
+}
+
+#[test]
+fn conformance_vp9_realtime() {
+    check_clip_tagged(
+        "realtime_testsrc_160x120",
+        "rt8",
+        160,
+        120,
+        "testsrc",
+        8,
+        &["-deadline", "realtime", "-cpu-used", "8"],
     );
 }
 

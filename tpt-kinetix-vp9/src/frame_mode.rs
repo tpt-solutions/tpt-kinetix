@@ -37,12 +37,25 @@ impl<'a> TileDecoder<'a> {
 
         self.parse_segmentation_and_skip(bc, w4, h4, have_a, have_l, is_key_or_intra)?;
 
-        // tx size — intra blocks read it now; inter blocks read it AFTER the
-        // inter mode/MV info (reference read_inter_frame_mode_info order).
+        // tx size — read for every block right after the segment/skip/is-inter
+        // bits (reference read_inter_frame_mode_info: `read_tx_size(cm, xd,
+        // !skip || !inter_block)` precedes read_inter_block_mode_info). Reading
+        // it after the inter mode/MV info desyncs the bool decoder whenever
+        // tx_mode == TX_MODE_SELECT.
         let max_tx = MAX_TX_FOR_BS[bs];
         let txfm_switchable = self.hdr.txfm_mode == crate::header::TxfmMode::Switchable;
         if is_key_or_intra || self.b.intra {
             self.parse_tx_size(bc, bs, max_tx, txfm_switchable, have_a, have_l, true);
+        } else {
+            self.parse_tx_size(
+                bc,
+                bs,
+                max_tx,
+                txfm_switchable,
+                have_a,
+                have_l,
+                !self.b.skip,
+            );
         }
         if is_key_or_intra {
             self.b.comp = false;
@@ -52,17 +65,27 @@ impl<'a> TileDecoder<'a> {
             self.b.comp = false;
             self.b.ref_ = [0; 2];
             if bs > BS_8X8 {
-                for i in 0..4 {
-                    let m = crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[0]);
-                    self.b.mode[i] = m;
-                    self.counts.y_mode[0][m] += 1;
-                }
-                if bs == BS_8X4 {
-                    self.b.mode[1] = self.b.mode[0];
-                    self.b.mode[3] = self.b.mode[2];
-                } else if bs == BS_4X8 {
-                    self.b.mode[2] = self.b.mode[0];
-                    self.b.mode[3] = self.b.mode[1];
+                // Sub-8x8 intra blocks read ONE y-mode tree per distinct
+                // sub-block pair: 4x4 reads four, but 8x4 and 4x8 read TWO
+                // and replicate (reference read_intra_block_mode_info).
+                // Reading four for the paired shapes desyncs the decoder.
+                if bs == BS_4X4 {
+                    for i in 0..4 {
+                        let m =
+                            crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[0]);
+                        self.b.mode[i] = m;
+                        self.counts.y_mode[0][m] += 1;
+                    }
+                } else {
+                    let m0 = crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[0]);
+                    self.counts.y_mode[0][m0] += 1;
+                    let m1 = crate::mv::read_tree(bc, &INTRAMODE_TREE, &self.probs.mode.y_mode[0]);
+                    self.counts.y_mode[0][m1] += 1;
+                    if bs == BS_8X4 {
+                        self.b.mode = [m0, m0, m1, m1];
+                    } else {
+                        self.b.mode = [m0, m1, m0, m1];
+                    }
                 }
             } else {
                 let sz = INTRA_SIZE_GROUP[bs];
@@ -75,16 +98,6 @@ impl<'a> TileDecoder<'a> {
             self.counts.uv_mode[self.b.mode[3]][self.b.uvmode] += 1;
         } else {
             self.parse_inter_mode_info(bc, have_a, have_l)?;
-            // reference: read_tx_size(cm, xd, !skip || !inter, r)
-            self.parse_tx_size(
-                bc,
-                bs,
-                max_tx,
-                txfm_switchable,
-                have_a,
-                have_l,
-                !self.b.skip,
-            );
         }
 
         self.set_ctxs(have_a, have_l, w4, h4);
@@ -105,7 +118,10 @@ impl<'a> TileDecoder<'a> {
         have_l: bool,
         allow_select: bool,
     ) {
-        if allow_select && txfm_switchable && bs >= BS_8X8 {
+        // Block-size ids run opposite to libvpx's (0 = 64x64 … 9 = 8x8,
+        // 10+ = sub-8x8), so "bsize >= BLOCK_8X8" reads `bs <= BS_8X8` here:
+        // sub-8x8 blocks cannot select a transform size (they are always 4x4).
+        if allow_select && txfm_switchable && bs <= BS_8X8 {
             let col = self.col;
             let row7 = self.row7;
             let c: usize = if have_a {
@@ -770,12 +786,14 @@ impl<'a> TileDecoder<'a> {
             let m0 = crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
             self.counts.mv_mode[c][m0] += 1;
             self.b.mode[0] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m0];
-            self.fill_mv(bc, 0, m0);
+            // fill_mv compares against the mapped mode ids (NEARMV=11 etc.),
+            // not the tree leaf, so pass the mapped value.
+            self.fill_mv(bc, 0, self.b.mode[0]);
             if bs != BS_8X4 {
                 let m1 = crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
                 self.counts.mv_mode[c][m1] += 1;
                 self.b.mode[1] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m1];
-                self.fill_mv(bc, 1, m1);
+                self.fill_mv(bc, 1, self.b.mode[1]);
             } else {
                 self.b.mode[1] = self.b.mode[0];
                 self.b.mv[1] = self.b.mv[0];
@@ -784,13 +802,13 @@ impl<'a> TileDecoder<'a> {
                 let m2 = crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
                 self.counts.mv_mode[c][m2] += 1;
                 self.b.mode[2] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m2];
-                self.fill_mv(bc, 2, m2);
+                self.fill_mv(bc, 2, self.b.mode[2]);
                 if bs != BS_8X4 {
                     let m3 =
                         crate::mv::read_tree(bc, &INTER_MODE_TREE, &self.probs.mode.mv_mode[c]);
                     self.counts.mv_mode[c][m3] += 1;
                     self.b.mode[3] = [ZEROMV, NEARESTMV, NEARMV, NEWMV][m3];
-                    self.fill_mv(bc, 3, m3);
+                    self.fill_mv(bc, 3, self.b.mode[3]);
                 } else {
                     self.b.mode[3] = self.b.mode[2];
                     self.b.mv[3] = self.b.mv[2];

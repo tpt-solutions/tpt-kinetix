@@ -843,3 +843,60 @@ Next step is to widen the conformance matrix (more rates, more frame counts,
 goes red; that turns "some clips corrupt" into a specific failing case. Do NOT
 relax the byte-exact assertion to make this go away — the current corpus is
 correctly passing.
+## CLOSED 2026-10-06: "decode is byte-exact ONLY on the conformance corpus's own parameters"
+
+Widening the matrix (one parameter at a time around the passing envelope)
+found the trigger immediately: **`-cpu-used` 0-3 with `-deadline good`**
+(i.e. every ordinary libvpx encode) corrupts from the first keyframe, while
+`-cpu-used` >= 4 and the whole conformance corpus pass. Root-caused against a
+re-built instrumented libvpx v1.13.1 oracle (`/tmp/libvpx`, raw `SYMP`
+per-bool dumps + per-element `EL` labels + per-block `EL blk` mode/MV dumps;
+see git history of this session) and **five real decoder bugs were found and
+fixed**:
+
+1. `parse_tx_size` guard inverted: block-size ids in this crate descend
+   (0 = 64x64 ... 9 = 8x8, 10+ = sub-8x8), so the guard written as
+   `bs >= BS_8X8` skipped the per-block tx-size tree read for every block
+   LARGER than 8x8 whenever `tx_mode == TX_MODE_SELECT` (frame_mode.rs).
+   Silent whenever the stream pins a fixed tx mode, which is exactly what the
+   cpu-used >= 4 corpus does. Fixed to `bs <= BS_8X8`.
+2. Inter frames read the block's tx size AFTER the mode/MV info; spec §8.4
+   (`read_inter_frame_mode_info`) reads it BEFORE
+   (`read_tx_size(!skip || !inter)` right after the intra/inter bit). Under
+   TX_MODE_SELECT this desynced every non-skip inter block (frame_mode.rs).
+3. Sub-8x8 `fill_mv` was passed the raw inter-mode TREE LEAF (0..3) while it
+   compares against the mapped mode ids (NEARMV = 11, NEWMV = 13), so every
+   sub-8x8 block took the "not NEAR, not NEW" path: NEARMV degenerated to
+   NEAREST (wrong MV, no bitstream difference - it only corrupts the MV
+   candidate state) and a sub-8x8 NEWMV would have skipped its MV delta bits
+   entirely (latent desync) (frame_mode.rs).
+4. Sub-8x8 chroma motion compensation used the block's chroma shape (4x2 /
+   2x4 / 2x2); the reference predicts ONE FULL 4x4 chroma block per sub-8x8
+   8x8 area with the q4 average of all four sub-block MVs
+   (`build_inter_predictors_for_planes` asserts `bsize == BLOCK_8X8`). The
+   un-predicted rows stayed zero (frame_recon.rs).
+5. Intra blocks in inter frames read FOUR y-mode trees for every sub-8x8
+   shape; the reference reads TWO for 8x4/4x8 (replicating) and four only for
+   4x4 - over-reading desynced from the first paired-shape intra block
+   (frame_mode.rs).
+
+Evidence after the fixes: a 15-case encoder-parameter matrix (defaults,
+good/cu0..8, realtime/cu8, lag variants, alt-ref off, bitrate) decodes
+byte-exact; an ordinary 25-frame 160x120 default-settings clip decodes
+byte-exact; `perf-corpus/vp9_320x240.ivf` (300 frames) now diverges ONLY from
+frame 128 - the documented `fixtures/div128` loop-filter edge bug, which is
+now the **sole remaining VP9 decode gap** (luma-only, propagates through
+inter frames). The conformance suite gained four TX_SELECT/realtime/cpu0
+cases and un-ignored `conformance_vp9_320x240_real_content`; the 640x360 and
+1080p real-content cases improved from whole-frame corruption to tiny
+luma-only residuals and stay `#[ignore]`d on the div128 loop-filter bug.
+
+Method note for the next session: the oracle diff technique (raw per-bool
+`SYMP` streams, then labeled `EL` element dumps, then per-block `EL blk`
+mode/MV comparisons, then hand-computed prediction vs residual separation)
+found each of the five bugs in minutes once the streams were labeled. The
+instrumented libvpx tree at /tmp/libvpx has all the dumps; rebuild recipe in
+`fixtures/div128/README.md` (plus `VP9SY` raw-symbol and `EL` labels added
+this session). Watch out: our stderr frame markers print AFTER each frame's
+decode, libvpx's FRAME markers print BEFORE - align the windows or the
+diff lies to you.

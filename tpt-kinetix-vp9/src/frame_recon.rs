@@ -652,21 +652,27 @@ impl<'a> TileDecoder<'a> {
             } else {
                 match bs {
                     10 => {
-                        // BS_8x4: two 8x4 luma, one averaged chroma 4x2
+                        // BS_8x4: two 8x4 luma; chroma is ONE full 4x4 with
+                        // the q4 average of all four sub-block MVs (the
+                        // reference predicts the whole 8x8's chroma plane
+                        // block for every sub-8x8 shape, `assert(bsize ==
+                        // BLOCK_8X8)` in build_inter_predictors_for_planes).
                         self.mc_luma(self.b.mv[0][r], &frame_rc, ref_slot, px, py, 8, 4, avg)?;
                         self.mc_luma(self.b.mv[2][r], &frame_rc, ref_slot, px, py + 4, 8, 4, avg)?;
                         let uvmv = avg_mv2(self.b.mv[0][r], self.b.mv[2][r]);
-                        self.mc_chroma(uvmv, &frame_rc, ref_slot, px >> 1, py >> 1, 4, 2, avg)?;
+                        self.mc_chroma(uvmv, &frame_rc, ref_slot, px >> 1, py >> 1, 4, 4, avg)?;
                     }
                     11 => {
-                        // BS_4x8: two 4x8 luma, one averaged chroma 2x4
+                        // BS_4x8: two 4x8 luma; chroma as above.
                         self.mc_luma(self.b.mv[0][r], &frame_rc, ref_slot, px, py, 4, 8, avg)?;
                         self.mc_luma(self.b.mv[1][r], &frame_rc, ref_slot, px + 4, py, 4, 8, avg)?;
                         let uvmv = avg_mv2(self.b.mv[0][r], self.b.mv[1][r]);
-                        self.mc_chroma(uvmv, &frame_rc, ref_slot, px >> 1, py >> 1, 2, 4, avg)?;
+                        self.mc_chroma(uvmv, &frame_rc, ref_slot, px >> 1, py >> 1, 4, 4, avg)?;
                     }
                     _ => {
-                        // BS_4x4: four 4x4 luma, one averaged chroma 2x2
+                        // BS_4x4: four 4x4 luma, one averaged chroma 4x4 (the
+                        // q4 average of all four sub-block MVs, like the
+                        // reference's average_split_mvs for 4:2:0)
                         self.mc_luma(self.b.mv[0][r], &frame_rc, ref_slot, px, py, 4, 4, avg)?;
                         self.mc_luma(self.b.mv[1][r], &frame_rc, ref_slot, px + 4, py, 4, 4, avg)?;
                         self.mc_luma(self.b.mv[2][r], &frame_rc, ref_slot, px, py + 4, 4, 4, avg)?;
@@ -686,7 +692,7 @@ impl<'a> TileDecoder<'a> {
                             self.b.mv[2][r],
                             self.b.mv[3][r],
                         );
-                        self.mc_chroma(uvmv, &frame_rc, ref_slot, px >> 1, py >> 1, 2, 2, avg)?;
+                        self.mc_chroma(uvmv, &frame_rc, ref_slot, px >> 1, py >> 1, 4, 4, avg)?;
                     }
                 }
             }

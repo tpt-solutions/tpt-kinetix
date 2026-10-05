@@ -5,7 +5,7 @@
 //! source of truth (see `docs/realtime-codec-design.md` DECISION 7).
 //!
 //! The reader keeps a lazily-refilled 64-bit window so the per-bit primitives
-//! ([`Self::read_bit`]) pay no per-call bounds check: the window is refilled
+//! ([`BitReader::read_bit`]) pay no per-call bounds check: the window is refilled
 //! once per 64 bits (or at end-of-buffer), and the absolute bit position is a
 //! single `usize`. The window is a pure prefetch cache — `pos` is the only
 //! source of truth, and every slow path invalidates the cache rather than

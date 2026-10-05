@@ -119,14 +119,18 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       file with "No sequence header available". Both fixed with regression tests.
       `transcode` now completes and emits a valid AV1 IVF whose geometry (160x120), frame count (25)
       and clean decode all match `ffprobe`.
-- [!] **Open: transcode output pixels are still wrong.** The AV1 file is now well-formed and decodes
-      without error, but its pixels do not match the source (PSNR ~11 dB against the original, where
-      an ffmpeg reference encode gets ~40 dB). I could **not** attribute this to a cause: a raw-YUV
-      dump I took through the pipeline said VP9 *decode* was garbage at every frame size, but that
-      contradicts the VP9 conformance suite, which decodes 320x240 "real content" byte-exact against
-      the libvpx reference. Since my own instrumentation disagreed with the authoritative harness, I
-      did not trust it far enough to report a decoder bug, and I did not guess a fix. Needs someone to
-      settle which measurement is wrong first.
+- [x] **transcode output pixels FIXED 2026-10-06.** The earlier raw-YUV dump that said VP9 *decode*
+      was garbage was right; the conformance suite only looked narrow because the corpus pinned
+      `-cpu-used 4` encodes, which never emit `TX_MODE_SELECT`. Widening the matrix showed every
+      ordinary libvpx encode (`-cpu-used` 0-3, realtime) corrupted from the first keyframe, and an
+      instrumented-libvpx symbol diff root-caused **five** decoder bugs: the inverted `bs >= BS_8X8`
+      tx-size guard, the inter tx-size read after (not before) the mode info, sub-8x8 `fill_mv`
+      comparing a tree leaf against mapped mode ids, sub-8x8 chroma MC sized to the block shape
+      instead of one full 4x4, and intra-in-inter sub-8x8 reading four y-mode trees where 8x4/4x8
+      read two. All fixed; a 15-case encoder-parameter matrix, ordinary 25-frame clips and the VP9
+      suite decode byte-exact. Four new corpus cases pin the paths (see todo-vp9.md). Remaining:
+      the `fixtures/div128` luma loop-filter edge divergence (300-frame perf clip diverges from
+      frame 128 only) — luma ±1, pre-existing, tracked in `fixtures/div128/README.md`.
 
 ### D. Evidence, quality, tooling
 

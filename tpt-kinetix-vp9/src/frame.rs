@@ -666,6 +666,28 @@ impl<'a> TileDecoder<'a> {
                 self.b.tx,
                 self.b.filter
             );
+            // Sub-8x8 per-sub-block modes/MVs, mirroring the instrumented
+            // libvpx oracle's "EL blk ... [mode y x y x]x4" suffix.
+            if self.b.bs > BS_8X8 {
+                let mut bmi = String::new();
+                for i in 0..4 {
+                    bmi.push_str(&format!(
+                        " [{} {} {} {} {}]",
+                        self.b.mode[i],
+                        self.b.mv[i][0].y,
+                        self.b.mv[i][0].x,
+                        self.b.mv[i][1].y,
+                        self.b.mv[i][1].x
+                    ));
+                }
+                eprintln!(
+                    "BLK3 r={} c={} bs={} bmi{}",
+                    self.row,
+                    self.col,
+                    12 - self.b.bs,
+                    bmi
+                );
+            }
         }
         self.record_filter_edges(w4, h4);
 

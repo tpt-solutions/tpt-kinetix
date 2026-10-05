@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 /// Parse Criterion's output into `{benchmark id: mean value}`.
 ///
 /// The value is the middle (point) estimate of the `thrpt:` line when the
-/// benchmark's group declared a [`criterion::Throughput`], otherwise the
+/// benchmark's group declared a `criterion::Throughput`, otherwise the
 /// `time:` line, so duration-only benchmarks still appear in a scraped table.
 pub fn parse_benches(stderr: &str, stdout: &str) -> BTreeMap<String, String> {
     let ids = bench_ids(stderr);

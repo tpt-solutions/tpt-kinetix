@@ -97,8 +97,8 @@ fn fetch_head(input: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// WebM/Matroska passthrough: read every frame with [`MkvReader`] and write it
-/// with [`WebmWriter`], keeping the codec configuration intact.
+/// WebM/Matroska passthrough: read every frame with [`tpt_kinetix_demux::MkvReader`] and write it
+/// with [`tpt_kinetix_mux::WebmWriter`], keeping the codec configuration intact.
 fn remux_webm(input: &str, output: &Path, remote: bool) -> Result<()> {
     if remote {
         let src = tpt_kinetix_demux::http::open_url(input);

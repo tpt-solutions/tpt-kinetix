@@ -82,16 +82,19 @@ impl Vp9Decoder {
             supports_inter_prediction: true,
             supports_deblocking: true,
             // Scoped deliberately: `pixel_exact` is verified on the conformance
-            // corpus only, which is synthetic sources at <=256x144. Real content
-            // at >=320x240 is **not** byte-exact -- the luma plane diverges from
-            // libvpx (see `conformance_vp9_640x360_real_content`: 36,470 samples,
-            // PSNR Y=35.47 dB) while chroma stays exact. Read this flag as "no
-            // known lossiness in the tested subset", not "bit-exact on arbitrary
-            // input".
+            // corpus plus real-content 320x240 at every libvpx speed preset
+            // (see `conformance_vp9_320x240_real_content` and the cpu0/1/2/
+            // realtime cases). Long real-content clips still diverge luma-only
+            // from the mid-clip keyframe on a per-edge loop-filter level
+            // difference (`fixtures/div128/README.md`); 640x360 and 1080p
+            // keyframes keep tiny luma residuals from the same bug. Read this
+            // flag as "no known lossiness in the tested subset", not
+            // "bit-exact on arbitrary input".
             notes: "profile 0 (8-bit 4:2:0) decode; byte-exact vs ffmpeg/libvpx on the \
-synthetic conformance corpus (<=256x144: lossless/lossy, intra/inter, odd sizes, tiles). \
-Known gap: on real-content testsrc at >=320x240 the luma plane is not byte-exact vs \
-libvpx (chroma is); the divergence is intra-only and pre-dates Phase 3",
+synthetic conformance corpus (<=256x144: lossless/lossy, intra/inter, odd sizes, tiles) \
+and on 320x240 real content at all encoder speed presets. Known gap: long real-content \
+clips diverge luma-only from the mid-clip keyframe (loop-filter edge level derivation, \
+see fixtures/div128); chroma stays exact",
         }
     }
 
