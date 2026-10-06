@@ -220,3 +220,11 @@ browser-package-test:
 # Publish AV1/VP9 + Opus live and play it with hls.js in headless Chrome mid-stream.
 live-browser-test:
     bash tools/live-browser-test.sh
+
+# Real-browser publish: headless Chrome -> MediaRecorder -> WebSocket ingest -> live HLS.
+browser-publish-test:
+    bash tools/browser-publish-test.sh
+
+# True glass-to-glass latency of live HLS (parts on/off) in headless Chrome + hls.js.
+latency-test:
+    bash tools/latency-test.sh

@@ -738,3 +738,98 @@ fn a_changed_configuration_is_not_a_reconnect() {
     }
     assert!(live.set_tracks(tracks).is_err());
 }
+
+/// A blocking-reload query never shortens or marks up the playlist; only an
+/// explicit `_HLS_skip` does. (hls.js crashed on an `EXT-X-SKIP` it had not
+/// asked for, which stalled every low-latency player after a few seconds.)
+#[test]
+fn ll_playlist_tags_follow_the_spec() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_llspec_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let webm = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let Some(webm) = webm else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    // A window longer than 6 target durations, so a delta update has something to skip.
+    let mut live = LivePackager::new(LiveOptions {
+        segment_seconds: 1.0,
+        window: 20,
+        part_seconds: Some(1.0 / 3.0),
+    });
+    let mut parser = MkvStream::new();
+    for chunk in webm.chunks(4096) {
+        for e in parser.push(chunk).unwrap() {
+            match e {
+                MkvEvent::Tracks(t) => live.set_tracks(t).unwrap(),
+                MkvEvent::Frame(f) => live
+                    .push(f.stream, f.pts_ms, f.key, f.data, f.duration_ms)
+                    .unwrap(),
+                MkvEvent::Cue(_) => {}
+            }
+        }
+    }
+    // Still live (not finished): the playlist is the one a player reloads.
+    let full = live.media_playlist(0).unwrap();
+    let seg_lines = |p: &str| p.lines().filter(|l| l.starts_with("seg-")).count();
+    let n = seg_lines(&full);
+    assert!(n >= 8, "need a long window: {n} segments");
+    let first_msn: u64 = full
+        .lines()
+        .find_map(|l| l.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // msn / part only block; the playlist is identical and has no EXT-X-SKIP.
+    let blocking = live
+        .media_playlist_for(
+            0,
+            &PlaylistRequest {
+                msn: Some(first_msn + 3),
+                part: Some(0),
+                skip: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(blocking, full, "a blocking reload must not change the playlist");
+    assert!(!full.contains("#EXT-X-SKIP"), "{full}");
+
+    // An explicit delta request skips the oldest segments, keeping >= CAN-SKIP-UNTIL.
+    let delta = live
+        .media_playlist_for(
+            0,
+            &PlaylistRequest {
+                msn: None,
+                part: None,
+                skip: Some(1),
+            },
+        )
+        .unwrap();
+    let skipped: usize = delta
+        .lines()
+        .find_map(|l| l.strip_prefix("#EXT-X-SKIP:SKIPPED-SEGMENTS="))
+        .expect("a delta playlist states what it skipped")
+        .parse()
+        .unwrap();
+    assert!(skipped > 0 && skipped + seg_lines(&delta) == n, "{delta}");
+    // The media sequence stays that of the *full* playlist's first segment.
+    assert!(delta.contains(&format!("#EXT-X-MEDIA-SEQUENCE:{first_msn}\n")), "{delta}");
+
+    // PART-TARGET bounds every part, and PART-HOLD-BACK is at least 3 targets.
+    let num = |p: &str, tag: &str| -> f64 {
+        p.split(tag).nth(1).unwrap().split(|c| c == ',' || c == '\n').next().unwrap().parse().unwrap()
+    };
+    let target = num(&full, "PART-TARGET=");
+    let hold = num(&full, "PART-HOLD-BACK=");
+    assert!(hold >= 3.0 * target - 1e-9, "hold-back {hold} vs target {target}");
+    for l in full.lines().filter(|l| l.starts_with("#EXT-X-PART:")) {
+        let d = num(l, "DURATION=");
+        assert!(d <= target + 1e-9, "part of {d}s exceeds PART-TARGET {target}: {l}");
+    }
+}

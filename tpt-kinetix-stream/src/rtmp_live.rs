@@ -34,12 +34,53 @@ struct Queued {
     data: Vec<u8>,
 }
 
+/// Activity bookkeeping shared with the idle watchdog of one publish.
+struct Watch {
+    began: std::time::Instant,
+    /// Milliseconds since `began` of the last event from the publisher.
+    last_ms: std::sync::atomic::AtomicU64,
+    /// The watchdog cut the publish off; later frames are ignored.
+    cut: std::sync::atomic::AtomicBool,
+    /// The publish ended normally; the watchdog stops.
+    done: std::sync::atomic::AtomicBool,
+}
+
+impl Watch {
+    fn new() -> Self {
+        Self {
+            began: std::time::Instant::now(),
+            last_ms: std::sync::atomic::AtomicU64::new(0),
+            cut: std::sync::atomic::AtomicBool::new(false),
+            done: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn touch(&self) {
+        self.last_ms.store(
+            self.began.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn idle_for(&self) -> std::time::Duration {
+        let last = self.last_ms.load(std::sync::atomic::Ordering::Relaxed);
+        self.began
+            .elapsed()
+            .saturating_sub(std::time::Duration::from_millis(last))
+    }
+}
+
 /// The state of one RTMP publisher.
 pub struct RtmpLiveSession {
+    watch: std::sync::Arc<Watch>,
     server: LiveServer,
     live: Option<Shared>,
     /// The stream key being published, for recording.
     key: String,
+    /// Holds this publisher's slot in the server's live-stream set.
+    guard: std::sync::Arc<std::sync::Mutex<Option<crate::policy::ActiveGuard>>>,
+    started: std::time::Instant,
+    received: u64,
     video: Option<StreamInfo>,
     audio: Option<StreamInfo>,
     /// VP9 needs a key frame to learn the picture size (and, without a
@@ -56,9 +97,13 @@ impl RtmpLiveSession {
     /// A session that publishes into `server`.
     pub fn new(server: LiveServer) -> Self {
         Self {
+            watch: std::sync::Arc::new(Watch::new()),
             server,
             live: None,
             key: String::new(),
+            guard: Default::default(),
+            started: std::time::Instant::now(),
+            received: 0,
             video: None,
             audio: None,
             vp9_needs_frame: false,
@@ -77,6 +122,10 @@ impl RtmpLiveSession {
 
     /// Handles one event from the connection.
     pub fn on_event(&mut self, event: &RtmpMediaEvent) {
+        self.watch.touch();
+        if self.watch.cut.load(std::sync::atomic::Ordering::Relaxed) {
+            return; // the idle watchdog already ended this publish
+        }
         let ts = match event {
             RtmpMediaEvent::PublishStart {
                 stream_key,
@@ -151,12 +200,60 @@ impl RtmpLiveSession {
 
     fn start(&mut self, key: &str) {
         self.stop();
-        let live = self.server.begin(key);
+        // The key may carry a publish token (`name?token=...`); only the name is kept.
+        let (live, key, guard) = match self.server.begin(key) {
+            Some((key, live, guard)) => (Some(live), key, Some(guard)),
+            None => (None, key.split('?').next().unwrap_or_default().to_string(), None),
+        };
         *self = Self {
             live,
-            key: key.to_string(),
+            key,
+            guard: std::sync::Arc::new(std::sync::Mutex::new(guard)),
             ..Self::new(self.server.clone())
         };
+        self.spawn_idle_watchdog();
+    }
+
+    /// Ends a publisher that stops sending (a dead encoder or a cut cable keeps
+    /// the TCP connection open), when the policy sets an idle timeout: the
+    /// presentation is completed and the publisher's slot released. The
+    /// connection itself is left to the RTMP server.
+    fn spawn_idle_watchdog(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (Some(idle), Some(live), Ok(rt)) = (
+            self.server.idle_timeout(),
+            self.live.clone(),
+            tokio::runtime::Handle::try_current(),
+        ) else {
+            return;
+        };
+        let (watch, guard, server, key) = (
+            self.watch.clone(),
+            self.guard.clone(),
+            self.server.clone(),
+            self.key.clone(),
+        );
+        rt.spawn(async move {
+            let tick = (idle / 4).clamp(
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(1),
+            );
+            loop {
+                tokio::time::sleep(tick).await;
+                if watch.done.load(Relaxed) {
+                    return;
+                }
+                if watch.idle_for() >= idle {
+                    watch.cut.store(true, Relaxed);
+                    tracing::warn!(%key, "RTMP publisher idle for too long; ending the publish");
+                    let _ = live.lock().unwrap().finish();
+                    server.record(&key, &live, true);
+                    server.count_idle_cut();
+                    *guard.lock().unwrap() = None;
+                    return;
+                }
+            }
+        });
     }
 
     fn stop(&mut self) {
@@ -169,6 +266,10 @@ impl RtmpLiveSession {
             self.server.record(&self.key, &live, true);
             tracing::info!("RTMP publish finished");
         }
+        self.watch
+            .done
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *self.guard.lock().unwrap() = None;
     }
 
     fn unsupported(&mut self, what: &str) {
@@ -279,6 +380,20 @@ impl RtmpLiveSession {
     }
 
     fn deliver(&mut self, q: Queued) {
+        if self.live.is_none() {
+            return;
+        }
+        self.received += q.data.len() as u64;
+        self.server.count_publish_bytes(q.data.len() as u64);
+        if let Err(why) = self
+            .server
+            .check_rtmp_progress(self.started.elapsed(), self.received)
+        {
+            tracing::warn!(key = %self.key, "RTMP publish cut off: {why}");
+            // What was already published stays playable; the slot is released.
+            self.stop();
+            return;
+        }
         let Some(live) = &self.live else { return };
         let track = usize::from(q.audio);
         let result = live

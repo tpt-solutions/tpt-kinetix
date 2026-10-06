@@ -21,14 +21,37 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       sessions; frames decode identically to the WebM source (hand-written client, AV1 and VP9) and a stock ffmpeg
       publishes VP9/AV1 end to end. Also fixed two RTMP chunk-stream bugs found on the way (SetChunkSize applied late
       within a read; type-1/2 header delta applied twice when a payload arrived in pieces).
-      Open follow-ups: Enhanced `Multitrack` and `Metadata` (HDR colour info) packets, the E-RTMP v2 capability exchange
-      (`videoFourCcInfoMap`), extended timestamps on continuation chunks, RTMPS (TLS), and a real OBS pass.
-- [ ] **Low-latency HLS**: DONE 2026-10-04 — `EXT-X-PART` partial segments, `EXT-X-SERVER-CONTROL`, blocking
-      playlist reload (`_HLS_msn`/`_HLS_part`), `EXT-X-SKIP` delta playlists, `EXT-X-PRELOAD-HINT`
-      (`LiveOptions::part_seconds`, default 1/3 s, 0 disables; `live --part-seconds`). Parts of a
-      segment concatenate to exactly that segment's samples. Target glass-to-glass is now ~1 part
-      rather than ~3 segments (6 s). NOT measured against a real player yet — hls.js latency numbers
-      still to be recorded.
+      Extended timestamps on continuation chunks are handled and tested (`chunk.rs`). RTMP publishers are now held to the
+      ingest policy too (2026-10-06): token in the stream key (`name?token=...`, the OBS convention), stream-count /
+      concurrency limits, and byte / bitrate / duration cut-offs, with the cut-off publish still finishing its playlists
+      (`live_rtmp.rs::rtmp_publish_honours_token_and_limits`). Open follow-ups: Enhanced `Multitrack` and `Metadata`
+      (HDR colour info) packets, the E-RTMP v2 capability exchange (`videoFourCcInfoMap`; another session has started
+      it), RTMPS (TLS; in progress elsewhere), and a real OBS pass. RTMP idle timeout DONE 2026-10-06 (a per-publisher watchdog in `rtmp_live.rs` completes the
+      presentation and frees the slot when a publisher goes silent with the socket open; `rtmp_idle_publisher_is_ended`).
+- [ ] **Low-latency HLS** built 2026-10-04; **first real-player measurement 2026-10-06** (`just latency-test`,
+      `tools/latency-test.sh`: headless Chrome publishes a wall-clock barcode through MediaRecorder + WebSocket, plays the
+      served HLS with hls.js 1.7.3 and decodes the barcode from the playing frame, so the number is true
+      glass-to-glass: capture, VP9 encode, ingest, packaging, HTTP, decode). Same box, 2 s segments:
+      parts off, hls.js default: **~4.2 s** (tight, p95 ≈ p50); parts 0.333 s + `lowLatencyMode`: **~1.6-1.8 s** at best.
+      **It found four real server bugs, all fixed:** (1) a blocking reload for a *part of the segment in progress*
+      waited for the whole segment (`satisfies` returned false for `msn == next`); (2) `_HLS_msn` was treated as a
+      delta request, so every LL playlist carried an unrequested `EXT-X-SKIP` that crashed hls.js ("Previous playlist
+      missing segments skipped", ~4 s in) — `_HLS_skip=YES|v2` is now parsed and is the only thing that skips, with
+      `MEDIA-SEQUENCE` staying the full playlist's first segment and `CAN-SKIP-UNTIL` = 6 target durations;
+      (3) `PART-HOLD-BACK` was 12 *seconds* — now 3 x `PART-TARGET`, and `PART-TARGET` covers the longest published
+      part (parts ran 0.36 s against a 0.333 s target); (4) the `EXT-X-PRELOAD-HINT` part URL answered 404 instead of
+      blocking until published. Regression tests: `ll_playlist_tags_follow_the_spec`, `ll_hls_parts_are_served_*`.
+      **STILL OPEN — intermittent stalls.** Even with a steady `ffmpeg -re` publisher (so not the in-browser encoder),
+      hls.js in LL mode shows 2-4 `bufferStalledError` per 30 s (playhead reaches the buffer end), after which it
+      re-syncs further behind and the median drifts to 4-10 s; non-LL playback is steadier. Ruled out: server part
+      availability (measured directly: median 344 ms between parts, max 523 ms, none > 550 ms), part contents (59 parts
+      checked: durations match the playlist and chain with no gap), publisher gaps (none, `ws.bufferedAmount` ~4 KB),
+      hold-back distance (`liveSyncDuration` 1.5-3.5 s did not remove them), hls.js catch-up speed-up
+      (`maxLiveSyncPlaybackRate=1` did not). Stalls line up with the 2 s keyframe boundaries in the one debug log
+      captured. Not yet tried: a different player (Safari, Shaka, AVPlayer), a quieter machine (this box also runs other
+      work), a fixed GOP/part alignment, or `fragGap`/`GAP` events seen once (hls.js `addAsGap` when a fragment's
+      buffered range is shorter than declared). Treat 1.6-1.8 s as the floor and ~4 s as the dependable number until
+      this is understood. Harness knobs: `EXTERNAL=1 KEY=..` (play an ffmpeg publisher), `SYNC`, `RATE`, `DEBUG_HLS`.
 - [x] **Dynamic DASH MPD** for live, 2026-10-04: `LivePackager::dash_mpd()` emits `type="dynamic"` with
       `availabilityStartTime`, a `minimumUpdatePeriod` (half a segment), `minBufferTime`, and a
       `SegmentTimeline` over the current sliding window with `t` on the first entry — no
@@ -39,15 +62,26 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       names is fetchable and `moof`/`styp`-headed. Low-latency DASH (CMAF chunks) is still open.
 - [ ] **WHIP (WebRTC-HTTP ingest)** — browsers publish VP9/AV1 + Opus natively; needs ICE/DTLS/SRTP (large; evaluate a
       memory-safe Rust WebRTC stack vs. scope).
-- [ ] Browser publish via `MediaRecorder` + streaming `fetch` (needs HTTP/2 or WebSocket ingest) and a demo page.
-- [ ] **Ingest hardening** — HTTP ingest DONE 2026-10-06 (`IngestPolicy`, `LiveServer::with_policy`, `policy.rs`; CLI
+- [x] **Browser publish** DONE 2026-10-06: chose **WebSocket ingest** over streaming `fetch` (Chrome's upload streaming
+      needs HTTP/2 over TLS, which the server does not speak). `GET /ingest/<key>` with `Upgrade: websocket` feeds binary
+      messages into the same ingest path as HTTP POST, so tokens (`?token=`, since browsers cannot set WebSocket
+      headers), limits, reconnect/discontinuity, recording and metrics all apply; refusals are plain HTTP errors (a
+      failed handshake) and an ended publish sends a close frame (1000 ok / 1007 bad data / 1008 policy / 1009 size).
+      Hand-written RFC 6455 server side (`ws.rs`, no new dependency; SHA-1 + base64 checked against the RFC's
+      vector). The server serves a ready-made page at **`/publish`** (camera or screen -> `MediaRecorder` AV1/VP9 +
+      Opus, 250 ms chunks). VERIFIED with a real browser: `just browser-publish-test` runs headless Chrome with a fake
+      camera/mic, which publishes AV1 + Opus; the live HLS appears, `/metrics` shows the publisher, and the segments
+      decode in ffmpeg (303 frames from the first 3). Rust-level tests in `tests/ws_ingest.rs`. OPEN: `wss://` (needs
+      TLS termination in front or `rustls` on the HTTP port), WebSocket ping keep-alive from the server, compressed
+      frames (permessage-deflate is not offered), publishing from non-Chromium browsers (Firefox/Safari
+      MediaRecorder does not produce AV1/VP9 WebM everywhere).
+- [ ] **Ingest hardening** — HTTP/WebSocket/RTMP ingest DONE 2026-10-06 (`IngestPolicy`, `LiveServer::with_policy`, `policy.rs`; CLI
       `live --publish-token/--idle-timeout/--max-streams/--max-bitrate-kbps/--reject-concurrent`): bearer/`?token=`
       auth (global + per-key, constant-time compare) -> 401; idle timeout -> 408; max duration -> 408; max bytes ->
       413; sustained-bitrate cap (after a 2 s grace) -> 429; max live streams -> 503; optional 409 on a second
       publisher for a live key; `GET /metrics` (Prometheus text: active publishers, started/refused/cut-off
       counters, bytes in, playback requests). A cut-off publish still finishes its playlists. Tested over real
-      HTTP in `tests/ingest_policy.rs`. STILL OPEN: apply the same policy to RTMP ingest (only the
-      `publishes_started` counter is wired there), per-key bitrate/duration overrides, bounded memory under
+      HTTP in `tests/ingest_policy.rs`. STILL OPEN: per-key bitrate/duration overrides, bounded memory under
       slow *viewers* (responses are whole buffers today), auth on `/metrics`.
 - [x] **Reconnect handling (HTTP ingest)** DONE 2026-10-06: a publisher that drops and re-POSTs under the same key with
       the same codec configuration *resumes* the presentation — `LivePackager::set_tracks` on a finished stream reopens
@@ -67,7 +101,9 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       HTTP and RTMP ingest. Test: `live_webm.rs::recording_serves_a_vod_after_the_publish_ends` (tiny live
       window, full recording, reconnect, ffmpeg decodes the concatenated recording). Retention DONE: `RecordingLimits` (`--record-depth-secs` rolling DVR
       depth: oldest segments deleted + playlist slides, `--keep-generations` prunes old generations; tested in
-      `recording_depth_and_generations_are_bounded`). OPEN: byte-size cap, DASH static MPD for the recording,
+      `recording_depth_and_generations_are_bounded`). Byte budget DONE (`RecordingLimits::max_bytes`, `live --record-max-mb`:
+      oldest segments across tracks deleted, newest per track always kept; `recording_byte_budget_trims_oldest_segments`).
+      OPEN: DASH static MPD for the recording,
       listing generations, serving older generations,
       recording survives restart only as files (no in-memory index rebuilt, so a restarted server serves
       the newest generation's files but does not extend it).

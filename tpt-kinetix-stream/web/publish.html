@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Publish to TPT Kinetix</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  video { width: 100%; background: #000; border-radius: 6px; }
+  label { display: block; margin: .6rem 0 .2rem; font-size: .85rem; }
+  input, select { width: 100%; padding: .4rem; box-sizing: border-box; }
+  button { margin: .8rem .5rem .8rem 0; padding: .5rem 1.2rem; }
+  #log { font: .8rem ui-monospace, monospace; white-space: pre-wrap; opacity: .85; }
+</style>
+</head>
+<body>
+<h1>Publish</h1>
+<p>Streams your camera and microphone to this server as WebM (AV1 or VP9 + Opus)
+over a WebSocket. Viewers play it as HLS.</p>
+<video id="preview" muted playsinline autoplay></video>
+<label for="key">Stream key</label>
+<input id="key" value="cam1" pattern="[A-Za-z0-9._-]+">
+<label for="token">Publish token (if the server requires one)</label>
+<input id="token" type="password" autocomplete="off">
+<label for="source">Source</label>
+<select id="source"><option value="camera">Camera + microphone</option><option value="screen">Screen</option></select>
+<div>
+  <button id="start">Start publishing</button>
+  <button id="stop" disabled>Stop</button>
+</div>
+<p id="watch"></p>
+<div id="log"></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+if (params.has("key")) $("key").value = params.get("key");
+if (params.has("token")) $("token").value = params.get("token");
+const logEl = $("log");
+const log = (m) => { logEl.textContent += m + "\n"; window.__publishLog = (window.__publishLog || []).concat(m); };
+
+// Only the royalty-free codecs the server accepts; VP8 is not ingested.
+const MIME_CANDIDATES = [
+  "video/webm;codecs=av1,opus",
+  "video/webm;codecs=vp9,opus",
+];
+let recorder, socket, stream, sent = 0;
+
+async function start() {
+  const mimeType = MIME_CANDIDATES.find((m) => MediaRecorder.isTypeSupported(m));
+  if (!mimeType) { log("This browser's MediaRecorder cannot produce AV1 or VP9 + Opus WebM."); return; }
+  const key = $("key").value.trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(key)) { log("Invalid stream key."); return; }
+  stream = $("source").value === "screen"
+    ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+    : await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 }, audio: true });
+  $("preview").srcObject = stream;
+
+  // Browsers cannot set headers on a WebSocket, so the token travels in the query.
+  const token = $("token").value;
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${scheme}://${location.host}/ingest/${key}` + (token ? `?token=${encodeURIComponent(token)}` : "");
+  socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
+  socket.onclose = (e) => { log(`closed: ${e.code} ${e.reason}`); stop(false); };
+  socket.onerror = () => log("connection failed (wrong token, key in use, or limit reached?)");
+  await new Promise((res, rej) => { socket.onopen = res; socket.addEventListener("error", rej, { once: true }); });
+
+  recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 64_000 });
+  recorder.ondataavailable = async (e) => {
+    if (e.data.size && socket.readyState === WebSocket.OPEN) {
+      socket.send(await e.data.arrayBuffer());
+      sent += e.data.size;
+      window.__publishedBytes = sent;
+    }
+  };
+  recorder.start(250); // a chunk every 250 ms keeps latency low
+  $("start").disabled = true; $("stop").disabled = false;
+  const base = `${location.origin}/${key}/master.m3u8`;
+  $("watch").innerHTML = `Playing at <a href="${base}">${base}</a>`;
+  log(`publishing as ${mimeType}`);
+  window.__publishing = true;
+}
+
+function stop(closeSocket = true) {
+  if (recorder && recorder.state !== "inactive") recorder.stop();
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (closeSocket && socket && socket.readyState === WebSocket.OPEN) socket.close(1000, "done");
+  $("start").disabled = false; $("stop").disabled = true;
+  window.__publishing = false;
+}
+
+$("start").onclick = () => start().catch((e) => log("error: " + e.message));
+$("stop").onclick = () => stop();
+if (params.get("auto") === "1") start().catch((e) => log("error: " + e.message));
+</script>
+</body>
+</html>

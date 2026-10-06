@@ -10,6 +10,7 @@ pub mod hls;
 pub mod live;
 pub mod policy;
 pub mod record;
+pub mod ws;
 pub mod rtmp;
 pub mod rtmp_live;
 

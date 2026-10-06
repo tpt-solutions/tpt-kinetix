@@ -1,0 +1,153 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>glass-to-glass latency probe</title>
+<body style="margin:0;background:#222">
+<canvas id="src" width="640" height="360"></canvas>
+<video id="v" muted playsinline style="width:640px;height:360px"></video>
+<canvas id="probe" width="640" height="360" style="display:none"></canvas>
+<script src="/hls.js"></script>
+<script src="/dash.js"></script>
+<script>
+"use strict";
+// One page, one clock. The publisher draws Date.now() (low 32 bits) as a barcode
+// onto a canvas, MediaRecorder encodes it, a WebSocket carries it to the live
+// server, hls.js plays the served HLS back, and every 250 ms the *playing* frame is
+// read back and its barcode decoded. latency = now - decoded capture time: true
+// glass-to-glass through capture, encode, ingest, packaging, HTTP and decode.
+const q = new URLSearchParams(location.search);
+const live = q.get("live");               // e.g. http://127.0.0.1:8890
+const key = q.get("key") || "lat";
+const ll = q.get("ll") === "1";           // hls.js lowLatencyMode
+const secs = Number(q.get("seconds") || 30);
+const warmup = Number(q.get("warmup") || 12);
+const player = q.get("player") || "hls"; // hls | dash
+const external = q.get("external") === "1"; // someone else publishes (ffmpeg); only play back
+const mime = q.get("mime") || "video/webm;codecs=vp9,opus";
+const BITS = 32, CELL = 20;
+const errors = [];
+window.addEventListener("error", (e) => errors.push(String(e.message)));
+
+const src = document.getElementById("src"), sctx = src.getContext("2d");
+function drawStamp() {
+  sctx.fillStyle = "#808080"; sctx.fillRect(0, 0, 640, 360);
+  const t = Date.now() >>> 0;
+  for (let i = 0; i < BITS; i++) {
+    sctx.fillStyle = (t >>> (BITS - 1 - i)) & 1 ? "#fff" : "#000";
+    sctx.fillRect(i * CELL, 0, CELL, CELL);
+  }
+  // Something moving so the encoder has real work to do.
+  sctx.fillStyle = "#4a90d9";
+  sctx.fillRect((t / 8) % 600, 120, 40, 40);
+}
+setInterval(drawStamp, 1000 / 30);
+drawStamp();
+
+function decode(video) {
+  if (!video.videoWidth) return null;
+  const c = document.getElementById("probe"), x = c.getContext("2d", { willReadFrequently: true });
+  c.width = video.videoWidth; c.height = video.videoHeight;
+  x.drawImage(video, 0, 0);
+  const sx = video.videoWidth / 640, sy = video.videoHeight / 360;
+  let v = 0;
+  for (let i = 0; i < BITS; i++) {
+    const p = x.getImageData(Math.floor((i * CELL + CELL / 2) * sx), Math.floor((CELL / 2) * sy), 1, 1).data;
+    v = (v * 2 + ((p[0] + p[1] + p[2]) / 3 > 128 ? 1 : 0)) >>> 0;
+  }
+  return v;
+}
+
+function finish(result) {
+  fetch("/result", { method: "POST", body: JSON.stringify(result) });
+}
+
+async function main() {
+  // --- publish ---
+  let rec, ws;
+  if (!external) {
+  const stream = src.captureStream(30);
+  const ac = new AudioContext(), osc = ac.createOscillator(), dest = ac.createMediaStreamDestination();
+  osc.connect(dest); osc.start();
+  dest.stream.getAudioTracks().forEach((t) => stream.addTrack(t));
+  if (!MediaRecorder.isTypeSupported(mime)) throw new Error("unsupported " + mime);
+  ws = new WebSocket(live.replace(/^http/, "ws") + "/ingest/" + key);
+  ws.binaryType = "arraybuffer";
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error("ws failed")); });
+  rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2_000_000, audioBitsPerSecond: 64_000 });
+  let lastChunk = performance.now();
+  window.__chunkGaps = []; window.__maxBuffered = 0;
+  rec.ondataavailable = async (e) => {
+    const now = performance.now();
+    if (now - lastChunk > 400) window.__chunkGaps.push(Math.round(now - lastChunk));
+    lastChunk = now;
+    if (e.data.size && ws.readyState === 1) {
+      ws.send(await e.data.arrayBuffer());
+      window.__maxBuffered = Math.max(window.__maxBuffered, ws.bufferedAmount);
+    }
+  };
+  rec.start(100); // small chunks: the capture side should not dominate the number
+  }
+
+  // --- play back ---
+  const video = document.getElementById("v");
+  let hls;
+  const started = Date.now();
+  // Wait for the playlist to exist.
+  for (;;) {
+    const r = await fetch(`${live}/${key}/${player === "dash" ? "manifest.mpd" : "master.m3u8"}`).catch(() => null);
+    if (r && r.ok) break;
+    await new Promise((r) => setTimeout(r, 200));
+    if (Date.now() - started > 20000) throw new Error("no playlist");
+  }
+  const sync = Number(q.get("sync") || 0); // seconds behind the live edge; 0 = follow PART-HOLD-BACK
+  if (player === "dash") {
+    // dash.js on the DASH manifest: low-latency mode follows the CMAF chunks the
+    // server streams while a segment is still being published.
+    window.__hlsEvents = [];
+    const dp = dashjs.MediaPlayer().create();
+    dp.updateSettings({ debug: { logLevel: q.get("debug") === "1" ? 4 : 1 }, streaming: {
+      delay: { liveDelay: Number(q.get("sync")) || undefined },
+      liveCatchup: { enabled: ll },
+      buffer: { fastSwitchEnabled: true },
+    } });
+    dp.on("error", (e) => { window.__hlsEvents.push("dash:" + (e.error && e.error.message)); errors.push("dash error " + (e.error && e.error.code)); });
+    dp.initialize(video, `${live}/${key}/manifest.mpd`, true);
+    hls = { get latency() { try { return dp.getCurrentLiveLatency(); } catch (e) { return 0; } } };
+  } else
+  hls = new Hls(ll ? { debug: q.get("debug") === "1", lowLatencyMode: true, backBufferLength: 10, ...(sync ? { liveSyncDuration: sync } : {}), ...(q.get("rate") ? { maxLiveSyncPlaybackRate: Number(q.get("rate")) } : {}) } : { lowLatencyMode: false, backBufferLength: 10 });
+  if (player !== "dash") {
+  window.__hlsEvents = [];
+  hls.on(Hls.Events.ERROR, (_, d) => window.__hlsEvents.push(d.details + (d.fatal ? "!" : "") + (d.error ? ": " + d.error.message + " @ " + String(d.error.stack).split("\n").slice(1,4).join(" | ") : "") + (d.reason ? " (" + d.reason + ")" : "")));
+  hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) errors.push(d.type + "/" + d.details); });
+  hls.loadSource(`${live}/${key}/master.m3u8`);
+  hls.attachMedia(video);
+  }
+  video.muted = true;
+  let waits = 0;
+  video.addEventListener("waiting", () => waits++);
+  window.__waits = () => waits;
+  video.play().catch((e) => errors.push("play: " + e.message));
+
+  const samples = [], playerLatency = [];
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    const t = Date.now();
+    const stamped = decode(video);
+    if (stamped !== null && !video.paused && (t - t0) / 1000 > warmup) {
+      const ms = ((t >>> 0) - stamped) >>> 0;
+      if (ms < 60000) samples.push(ms); // a wrapped / garbled read is not a sample
+      if (hls.latency) playerLatency.push(hls.latency * 1000);
+    }
+    if ((t - t0) / 1000 > warmup + secs) {
+      clearInterval(timer);
+      if (rec) { rec.stop(); ws.close(1000, "done"); }
+      const b = video.buffered;
+      finish({ samples, playerLatency, errors,
+        currentTime: video.currentTime, readyState: video.readyState,
+        bufferedEnd: b.length ? b.end(b.length - 1) : null, bufferedStart: b.length ? b.start(0) : null,
+        hlsEvents: window.__hlsEvents || [], chunkGaps: window.__chunkGaps, waits: window.__waits(), maxBuffered: window.__maxBuffered, videoWidth: video.videoWidth, decodedFrames: video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().totalVideoFrames : 0 });
+    }
+  }, 250);
+}
+main().catch((e) => finish({ samples: [], errors: [String(e.message)] }));
+</script>
+</body>

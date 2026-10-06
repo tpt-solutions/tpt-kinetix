@@ -78,7 +78,8 @@ pub struct PlaylistRequest {
     pub msn: Option<u64>,
     /// Last part index within that segment (`_HLS_part`).
     pub part: Option<u64>,
-    /// First segment the client wants (`_HLS_skip`), for delta updates.
+    /// A delta update was requested (`_HLS_skip=YES|v2`); the value is not used.
+    /// Only then may the playlist replace old segments with `EXT-X-SKIP`.
     pub skip: Option<u64>,
 }
 
@@ -113,6 +114,9 @@ struct Segment {
     /// Per track; `None` when the track had no samples in this segment.
     data: Vec<Option<Arc<Vec<u8>>>>,
     seconds: Vec<f64>,
+    /// Per track: decode time (track ticks) of the segment's first sample, i.e. its
+    /// `tfdt`, which a DASH `SegmentTimeline` must state exactly.
+    start_ticks: Vec<u64>,
     /// The parts this segment was published as, per track, so a client that is
     /// part-way through the segment can still fetch the earlier ones.
     parts: Vec<Vec<Part>>,
@@ -142,6 +146,9 @@ pub struct LivePackager {
     /// Segments finished but not yet drained, when recording is on.
     completed: Vec<CompletedSegment>,
     recording: bool,
+    /// Wall-clock time (ms since the Unix epoch) of media time 0, fixed when the
+    /// first segment completes: DASH `availabilityStartTime`.
+    ast_ms: Option<i64>,
     opts: LiveOptions,
     tracks: Vec<Track>,
     lead: usize,
@@ -186,6 +193,12 @@ fn part_tag(out: &mut String, track: usize, segment: u64, index: u64, p: &Part) 
     );
 }
 
+/// The `mfhd` sequence number of part `index` of segment `number`: increasing
+/// across a track's fragments, as CMAF requires.
+fn part_sequence(number: u64, index: u64) -> u64 {
+    number.saturating_mul(1000).saturating_add(index)
+}
+
 fn build_fragment(
     info: &StreamInfo,
     samples: &[Sample],
@@ -219,6 +232,7 @@ impl LivePackager {
         Self {
             completed: Vec::new(),
             recording: false,
+            ast_ms: None,
             opts,
             tracks: Vec::new(),
             lead: 0,
@@ -503,7 +517,11 @@ impl LivePackager {
                 ticks as f64 / rate as f64
             };
             let independent = t.info.media_type != MediaType::Video || taken[0].key;
-            let data = Arc::new(build_fragment(&t.info, &taken, number)?);
+            let data = Arc::new(build_fragment(
+                &t.info,
+                &taken,
+                part_sequence(number, self.part_index),
+            )?);
             self.part_samples[i].extend(taken);
             self.parts[i].push(Part {
                 data,
@@ -532,6 +550,7 @@ impl LivePackager {
         }
         let mut data = Vec::with_capacity(self.tracks.len());
         let mut seconds = Vec::with_capacity(self.tracks.len());
+        let mut start_ticks = Vec::with_capacity(self.tracks.len());
         for (i, t) in self.tracks.iter_mut().enumerate() {
             let rate = u64::from(t.info.timescale);
             let mut current = if t.info.media_type == MediaType::Video {
@@ -550,18 +569,32 @@ impl LivePackager {
             };
             // Samples already published as parts come first (earlier decode times).
             let mut prefix = std::mem::take(&mut self.part_samples[i]);
+            // With parts, the segment is the concatenation of its parts' fragments
+            // (plus one more fragment for any samples that missed the last part):
+            // what a player gets from the parts so far is then a true prefix of the
+            // finished segment, which low-latency DASH serves as CMAF chunks.
+            let part_bytes: Vec<u8> = if prefix.is_empty() {
+                Vec::new()
+            } else {
+                self.parts[i].iter().flat_map(|p| p.data.iter().copied()).collect()
+            };
+            let tail_only = !part_bytes.is_empty();
+            let tail = if tail_only { std::mem::take(&mut current) } else { Vec::new() };
             prefix.append(&mut current);
             let current = prefix;
-            if current.is_empty() {
+            if current.is_empty() && tail.is_empty() {
                 data.push(None);
                 seconds.push(0.0);
+                start_ticks.push(0);
                 continue;
             }
+            start_ticks.push(current.first().or(tail.first()).map_or(0, |s| s.dts));
             let ticks: u64 = if i == self.lead {
                 0
             } else {
                 current
                     .iter()
+                    .chain(tail.iter())
                     .map(|s| u64::from(s.duration.unwrap_or(0)))
                     .sum()
             };
@@ -570,7 +603,15 @@ impl LivePackager {
             } else {
                 ticks as f64 / rate as f64
             });
-            data.push(Some(Arc::new(build_fragment(&t.info, &current, number)?)));
+            if tail_only {
+                let mut bytes = part_bytes;
+                if !tail.is_empty() {
+                    bytes.extend(build_fragment(&t.info, &tail, part_sequence(number, 999))?);
+                }
+                data.push(Some(Arc::new(bytes)));
+            } else {
+                data.push(Some(Arc::new(build_fragment(&t.info, &current, number)?)));
+            }
         }
         let discontinuity = std::mem::take(&mut self.pending_discontinuity);
         if self.recording {
@@ -595,9 +636,17 @@ impl LivePackager {
             number,
             data,
             seconds,
+            start_ticks,
             parts,
             discontinuity,
         });
+        if self.ast_ms.is_none() {
+            // The wall clock now is media time `end_ms`: that fixes the origin.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0i64, |d| d.as_millis() as i64);
+            self.ast_ms = Some(now_ms - end_ms);
+        }
         self.next_number += 1;
         // Keep a little beyond the window so a slow client can still fetch it.
         while self.segments.len() > self.opts.window + 3 {
@@ -798,41 +847,62 @@ impl LivePackager {
             .map(|s| s.seconds[track])
             .fold(self.opts.segment_seconds, f64::max);
         let version = if parts { 9 } else { 7 };
-        // Delta playlist: start at the first segment the client still wants, which
-        // must not be older than the retained window.
-        let oldest = self.segments.front().map_or(0, |s| s.number);
-        let start = if parts {
-            req.msn
-                .or(req.skip)
-                .map(|n| n.max(oldest).max(first.number))
-                .unwrap_or(first.number)
-        } else {
-            first.number
-        };
+        // The playlist always lists the whole window. `_HLS_msn`/`_HLS_part` only
+        // say how long the reload blocks (see `satisfies`); they never shorten it.
+        // Only an explicit delta request (`_HLS_skip`) may replace the oldest
+        // segments with `EXT-X-SKIP`, and never ones within CAN-SKIP-UNTIL of the
+        // end of the playlist.
+        // RFC 8216bis 4.4.3.8: at least 6 target durations.
+        let can_skip_until = 6.0 * max.ceil();
+        let mut start = first.number;
+        if parts && req.skip.is_some() {
+            let mut kept = 0.0;
+            let mut keep_from = first.number;
+            for s in self.window().collect::<Vec<_>>().into_iter().rev() {
+                keep_from = s.number;
+                kept += s.seconds[track];
+                if kept >= can_skip_until {
+                    break;
+                }
+            }
+            start = keep_from;
+        }
         let mut out = format!(
-            "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{start}\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
+            "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
             max.ceil() as u64,
+            first.number,
         );
         let disc_seq = self.discontinuities_dropped
             + self
                 .segments
                 .iter()
-                .filter(|s| s.number < start && s.discontinuity)
+                .filter(|s| s.number < first.number && s.discontinuity)
                 .count() as u64;
         if disc_seq > 0 {
             let _ = writeln!(out, "#EXT-X-DISCONTINUITY-SEQUENCE:{disc_seq}");
         }
         if parts {
-            let part_target = self.opts.part_seconds.unwrap_or(0.0);
+            // PART-TARGET is the *maximum* part duration. Parts are cut at the first
+            // frame past the configured length, so they run a little over it; the
+            // advertised target must cover the longest one actually published.
+            let longest = self
+                .window()
+                .flat_map(|s| s.parts.get(track).into_iter().flatten())
+                .chain(self.parts.get(track).into_iter().flatten())
+                .map(|p| p.seconds)
+                .fold(self.opts.part_seconds.unwrap_or(0.0), f64::max);
+            let part_target = (longest * 1000.0).ceil() / 1000.0;
             let _ = write!(
                 out,
-                "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={},CAN-SKIP-UNTIL={:.3}\n#EXT-X-PART-INF:PART-TARGET={part_target:.5}\n",
-                // Keep one part of each track per segment available beyond the window.
-                ((self.opts.segment_seconds / part_target).ceil() as u64).max(1) * 2,
-                self.opts.segment_seconds * self.opts.window as f64,
+                // PART-HOLD-BACK is how far behind the live edge a player stays: at
+                // least 3 part targets (RFC 8216bis 4.4.3.8). This is the number
+                // that sets low-latency playback latency.
+                "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={:.3},CAN-SKIP-UNTIL={:.3}\n#EXT-X-PART-INF:PART-TARGET={part_target:.3}\n",
+                part_target * 3.0,
+                can_skip_until,
             );
         }
-        let skipped = start.saturating_sub(oldest);
+        let skipped = start.saturating_sub(first.number);
         if parts && skipped > 0 {
             let _ = writeln!(out, "#EXT-X-SKIP:SKIPPED-SEGMENTS={skipped}");
         }
@@ -889,12 +959,13 @@ impl LivePackager {
         let Some(msn) = req.msn else {
             return true;
         };
-        // The next segment to be published must be the one asked for (or later).
-        if msn >= self.next_number {
-            return false;
-        }
         match req.part {
-            Some(p) => self.part(track, msn, p).is_some(),
+            // A part of the segment in progress (`msn == next_number`) is
+            // answerable as soon as that part is published: that is the point of
+            // a low-latency blocking reload. Waiting for the whole segment would
+            // hold the player for up to a segment duration.
+            Some(p) => msn <= self.next_number && self.part(track, msn, p).is_some(),
+            // A whole segment: it must be complete.
             None => msn < self.next_number,
         }
     }
@@ -987,63 +1058,58 @@ impl LivePackager {
         if !self.is_ready() {
             return None;
         }
-        // ISO 8601 duration, as DASH requires.
-        let update = format!("PT{:.3}S", (self.opts.segment_seconds / 2.0).max(0.5));
-        // The live edge as an offset from the start of the window.
-        let edge_ms: i64 = self
-            .window()
-            .map(|s| (s.seconds[self.lead] * 1000.0) as i64)
-            .sum();
-        // `availabilityStartTime` must be a real date-time. Using the wall clock
-        // is what a live DASH server does; the epoch here is a stand-in that keeps
-        // the manifest deterministic for tests, and a player still only uses the
-        // difference against its own clock.
-        let now = std::time::SystemTime::now()
+        let ast_ms = self.ast_ms?;
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0i64, |d| d.as_secs() as i64);
-        let ast_secs = now - edge_ms / 1000;
-        let ast = format!(
-            "1970-01-01T{:02}:{:02}:{:02}Z",
-            ast_secs / 3600 % 24,
-            ast_secs / 60 % 60,
-            ast_secs % 60
-        );
+            .map_or(0i64, |d| d.as_millis() as i64);
+        let seg = self.opts.segment_seconds;
+        let window_secs = seg * self.opts.window as f64;
+        let low_latency = self.parts_enabled();
         let mut out = String::new();
         out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        // Low-latency DASH (CMAF chunks): when parts are enabled the manifest
-        // advertises `availabilityTimeOffset` so a player may request a segment
-        // before it is complete and receive its CMAF chunks as they arrive
-        // (`availabilityTimeComplete="false"`). Without parts the attribute is
-        // omitted and playback is plain segment-latency DASH.
-        let ato = self
-            .parts_enabled()
-            .then(|| {
-                format!(
-                    " availabilityTimeOffset=\"{:.3}\" availabilityTimeComplete=\"false\"",
-                    self.opts.segment_seconds.max(0.5)
-                )
-            })
-            .unwrap_or_default();
-        // Built in pieces: the attribute line has no newline of its own, so
-        // `write!` is correct here and clippy's `writeln!` suggestion is not.
-        let _ = write!(
+        let delay = if low_latency {
+            String::new()
+        } else {
+            format!(" suggestedPresentationDelay=\"PT{:.3}S\"", seg * 2.0)
+        };
+        let _ = writeln!(
             out,
             "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" \
              profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" type=\"dynamic\" \
-             availabilityStartTime=\"{ast}\" minimumUpdatePeriod=\"{update}\" \
-             minBufferTime=\"PT{:.3}S\"{ato}>",
-            (self.opts.segment_seconds / 3.0).max(0.5)
+             availabilityStartTime=\"{}\" publishTime=\"{}\" \
+             minimumUpdatePeriod=\"PT{:.3}S\" timeShiftBufferDepth=\"PT{window_secs:.3}S\" \
+             maxSegmentDuration=\"PT{:.3}S\" minBufferTime=\"PT{:.3}S\"{delay}>",
+            iso8601_utc(ast_ms),
+            iso8601_utc(now_ms),
+            (seg / 2.0).max(0.5),
+            seg.max(0.5) + 1.0,
+            (seg / 3.0).max(0.5),
         );
-        out.push('\n');
+        if low_latency {
+            // The latency a player should hold (and may catch up to): a couple of
+            // parts behind the live edge, never below a second.
+            let part = self.opts.part_seconds.unwrap_or(seg);
+            let target = ((seg * 0.75).max(part * 3.0) * 1000.0).round();
+            let _ = writeln!(
+                out,
+                "  <ServiceDescription id=\"0\">\n    \
+                 <Latency target=\"{target}\" min=\"{}\" max=\"{}\"/>\n    \
+                 <PlaybackRate min=\"0.96\" max=\"1.04\"/>\n  </ServiceDescription>",
+                (target / 2.0).round(),
+                (target * 2.0).round()
+            );
+        }
+        // Lets a player whose clock differs from ours still find the live edge.
+        let _ = writeln!(
+            out,
+            "  <UTCTiming schemeIdUri=\"urn:mpeg:dash:utc:direct:2014\" value=\"{}\"/>",
+            iso8601_utc(now_ms)
+        );
         let _ = writeln!(out, "  <Period id=\"0\" start=\"PT0S\">");
-        for (i, t) in self.tracks.iter().enumerate() {
-            let Some(codec) = codec_string(&t.info) else {
-                continue;
-            };
-            let kind = match t.info.media_type {
-                MediaType::Video => "video",
-                _ => "audio",
-            };
+
+        let representation = |out: &mut String, i: usize| -> Option<()> {
+            let t = &self.tracks[i];
+            let codec = codec_string(&t.info)?;
             let mut bytes = 0u64;
             let mut secs = 0.0f64;
             for s in self.window() {
@@ -1063,19 +1129,10 @@ impl LivePackager {
                 bandwidth.max(1)
             );
             if t.info.media_type == MediaType::Video {
-                let _ = write!(
-                    rep,
-                    " width=\"{}\" height=\"{}\"",
-                    t.info.width, t.info.height
-                );
+                let _ = write!(rep, " width=\"{}\" height=\"{}\"", t.info.width, t.info.height);
             } else {
                 let _ = write!(rep, " audioSamplingRate=\"{}\"", t.info.sample_rate);
             }
-            let _ = writeln!(
-                out,
-                "    <AdaptationSet id=\"{i}\" contentType=\"{kind}\" \
-                 segmentAlignment=\"true\" startWithSAP=\"1\" mimeType=\"{kind}/mp4\">"
-            );
             let _ = writeln!(out, "      <Representation {rep}>");
             if t.info.media_type == MediaType::Audio {
                 let _ = writeln!(
@@ -1087,34 +1144,86 @@ impl LivePackager {
                 );
             }
             let scale = u64::from(t.info.timescale.max(1));
+            // Low-latency DASH: a segment may be requested from its start and is
+            // then streamed as its CMAF chunks are published. Segments are
+            // normally available when they end, so the offset is a whole segment.
+            let ll = if low_latency {
+                format!(" availabilityTimeOffset=\"{seg:.3}\" availabilityTimeComplete=\"false\"")
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 out,
                 "        <SegmentTemplate timescale=\"{scale}\" initialization=\"init-{i}.mp4\" \
-                 media=\"seg-{i}-$Number$.m4s\" startNumber=\"{}\">",
+                 media=\"seg-{i}-$Number$.m4s\" startNumber=\"{}\"{ll}>",
                 self.window().next().map_or(1, |s| s.number)
             );
             let _ = writeln!(out, "          <SegmentTimeline>");
-            // Times advance by the segment's own duration, in track ticks. A track
-            // with no samples in a segment (it ended early) is skipped.
-            let mut t_ticks = 0u64;
-            let mut first = true;
+            // `t` is each segment's real decode time (its `tfdt`), stated on every
+            // entry so a track that skipped a segment cannot drift. A track with
+            // no samples in a segment is skipped.
             for s in self.window() {
                 let d = (s.seconds[i] * scale as f64) as u64;
                 if d == 0 {
                     continue;
                 }
-                let t_attr = if first {
-                    format!(" t=\"{t_ticks}\"")
-                } else {
-                    String::new()
-                };
-                first = false;
-                let _ = writeln!(out, "            <S{t_attr} d=\"{d}\"/>");
-                t_ticks += d;
+                let _ = writeln!(
+                    out,
+                    "            <S t=\"{}\" d=\"{d}\"/>",
+                    s.start_ticks.get(i).copied().unwrap_or(0)
+                );
+            }
+            // Low-latency DASH: the segment still being published is listed too,
+            // starting exactly where the last finished one ended and with its
+            // expected length (the next refresh states the true one). Without it a
+            // player could only ever ask for segments that are already complete.
+            if low_latency && !self.finished {
+                if let Some(last) = self.window().last() {
+                    let d_last = (last.seconds[i] * scale as f64) as u64;
+                    if d_last > 0 {
+                        let _ = writeln!(
+                            out,
+                            "            <S t=\"{}\" d=\"{}\"/>",
+                            last.start_ticks.get(i).copied().unwrap_or(0) + d_last,
+                            (seg * scale as f64) as u64
+                        );
+                    }
+                }
             }
             let _ = writeln!(out, "          </SegmentTimeline>");
             let _ = writeln!(out, "        </SegmentTemplate>");
             let _ = writeln!(out, "      </Representation>");
+            Some(())
+        };
+
+        // All video tracks are renditions of one picture: one AdaptationSet with a
+        // Representation each, which is what lets a player switch between them.
+        let videos: Vec<usize> = (0..self.tracks.len())
+            .filter(|&i| self.tracks[i].info.media_type == MediaType::Video)
+            .collect();
+        if !videos.is_empty() {
+            let _ = writeln!(
+                out,
+                "    <AdaptationSet id=\"0\" contentType=\"video\" segmentAlignment=\"true\" \
+                 startWithSAP=\"1\" mimeType=\"video/mp4\">"
+            );
+            for &i in &videos {
+                representation(&mut out, i)?;
+            }
+            let _ = writeln!(out, "    </AdaptationSet>");
+        }
+        let mut set_id = 1;
+        for i in 0..self.tracks.len() {
+            if self.tracks[i].info.media_type == MediaType::Video {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "    <AdaptationSet id=\"{set_id}\" contentType=\"audio\" segmentAlignment=\"true\" \
+                 startWithSAP=\"1\" mimeType=\"audio/mp4\">"
+            );
+            set_id += 1;
+            representation(&mut out, i)?;
             let _ = writeln!(out, "    </AdaptationSet>");
         }
         out.push_str("  </Period>\n</MPD>\n");
@@ -1123,9 +1232,49 @@ impl LivePackager {
 }
 
 /// XML-escapes a value for an MPD attribute.
+/// `ms` since the Unix epoch as an ISO 8601 UTC date-time (`2026-10-07T01:27:55.123Z`).
+fn iso8601_utc(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let milli = ms.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{milli:03}Z",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
+}
+
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod iso_tests {
+    use super::iso8601_utc;
+
+    #[test]
+    fn iso8601_matches_known_instants() {
+        assert_eq!(iso8601_utc(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso8601_utc(1_000_000_000_000), "2001-09-09T01:46:40.000Z");
+        // Leap days, including the century one (2000 is a leap year).
+        assert_eq!(iso8601_utc(951_782_400_000), "2000-02-29T00:00:00.000Z");
+        assert_eq!(iso8601_utc(1_709_208_000_123), "2024-02-29T12:00:00.123Z");
+        // Before the epoch rounds toward the earlier second.
+        assert_eq!(iso8601_utc(-1), "1969-12-31T23:59:59.999Z");
+    }
 }

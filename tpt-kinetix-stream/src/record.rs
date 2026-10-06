@@ -27,9 +27,14 @@ pub struct RecordingLimits {
     /// Generations kept per key, newest first (`None` keeps all). A generation is
     /// one continuous presentation; older ones are deleted when a new one starts.
     pub keep_generations: Option<usize>,
+    /// Segment bytes kept per generation, across all tracks: when exceeded the
+    /// oldest segments are deleted, like `max_duration` (the newest segment of
+    /// each track is always kept, so one oversized segment can exceed it).
+    pub max_bytes: Option<u64>,
 }
 
 struct Entry {
+    bytes: u64,
     number: u64,
     seconds: f64,
     discontinuity: bool,
@@ -139,6 +144,7 @@ impl Recorder {
         {
             write(&dir.join(format!("seg-{track}-{number}.m4s")), &data)?;
             rec.tracks[track].push(Entry {
+                bytes: data.len() as u64,
                 number,
                 seconds,
                 discontinuity,
@@ -154,6 +160,30 @@ impl Recorder {
                     rec.trimmed_discontinuities[t] += u64::from(old.discontinuity);
                     rec.trimmed = true;
                     let _ = std::fs::remove_file(dir.join(format!("seg-{t}-{}.m4s", old.number)));
+                }
+            }
+        }
+        if let Some(max) = self.limits.max_bytes {
+            loop {
+                let total: u64 = rec.tracks.iter().flatten().map(|e| e.bytes).sum();
+                // The oldest segment number that can still be dropped (every
+                // track keeps its newest one).
+                let oldest = rec
+                    .tracks
+                    .iter()
+                    .filter(|t| t.len() > 1)
+                    .map(|t| t[0].number)
+                    .min();
+                let Some(oldest) = oldest.filter(|_| total > max) else {
+                    break;
+                };
+                for (t, entries) in rec.tracks.iter_mut().enumerate() {
+                    if entries.len() > 1 && entries[0].number == oldest {
+                        let old = entries.remove(0);
+                        rec.trimmed_discontinuities[t] += u64::from(old.discontinuity);
+                        rec.trimmed = true;
+                        let _ = std::fs::remove_file(dir.join(format!("seg-{t}-{}.m4s", old.number)));
+                    }
                 }
             }
         }
@@ -264,11 +294,13 @@ mod tests {
     fn playlist_event_then_vod() {
         let entries = vec![
             Entry {
+                bytes: 1,
                 number: 1,
                 seconds: 2.0,
                 discontinuity: false,
             },
             Entry {
+                bytes: 1,
                 number: 2,
                 seconds: 2.5,
                 discontinuity: true,

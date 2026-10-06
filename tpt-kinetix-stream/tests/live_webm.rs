@@ -372,6 +372,19 @@ async fn ll_hls_parts_are_served_and_blocking_reload_resolves() {
             assert_eq!(code, 200, "{u} (status {code})\nplaylist:\n{pl}");
             assert_eq!(&data[4..8], b"moof", "{u} is not a fragment");
         }
+        // The preload hint names a part that does not exist yet. A player requests
+        // it at once; the server must hold the request until the part is
+        // published (RFC 8216bis 6.2.5.2), not answer 404 (which made hls.js treat
+        // the part as a gap and stall).
+        let hint = pl
+            .lines()
+            .find_map(|l| l.strip_prefix("#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\""))
+            .and_then(|l| l.split('"').next())
+            .expect("a preload hint")
+            .to_string();
+        let (code, data) = http(port, "GET", &format!("/ll/{hint}"), b"").await;
+        assert_eq!(code, 200, "preload hint {hint} must block, not 404");
+        assert_eq!(&data[4..8], b"moof", "{hint} is not a fragment");
         break;
     }
     assert!(child.wait().unwrap().success());
@@ -595,6 +608,7 @@ async fn recording_depth_and_generations_are_bounded() {
     let limits = tpt_kinetix_stream::RecordingLimits {
         max_duration: Some(Duration::from_secs(5)),
         keep_generations: Some(1),
+        ..Default::default()
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -633,5 +647,188 @@ async fn recording_depth_and_generations_are_bounded() {
     assert_eq!(http(port2, "POST", "/ingest/cam", &webm).await.0, 200);
     assert!(rec_dir.join("cam").join("g2").exists());
     assert!(!g1.exists(), "generation 1 should have been pruned");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A byte budget trims the oldest recorded segments (across tracks) and keeps the
+/// playlist and the files on disk in step.
+#[tokio::test]
+async fn recording_byte_budget_trims_oldest_segments() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_live_bytes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"], 8) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let webm = std::fs::read(&src).unwrap();
+    let rec_dir = dir.join("rec");
+    let budget = 60_000u64;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(
+        LiveServer::new(LiveOptions {
+            segment_seconds: 2.0,
+            window: 50,
+            part_seconds: None,
+        })
+        .with_recording_limits(
+            &rec_dir,
+            tpt_kinetix_stream::RecordingLimits {
+                max_bytes: Some(budget),
+                ..Default::default()
+            },
+        )
+        .serve(listener),
+    );
+    assert_eq!(http(port, "POST", "/ingest/cam", &webm).await.0, 200);
+
+    let g1 = rec_dir.join("cam").join("g1");
+    let seg_bytes: u64 = std::fs::read_dir(&g1)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("seg-"))
+        .map(|e| e.metadata().unwrap().len())
+        .sum();
+    // At most the budget, plus slack for the one segment per track that is always kept.
+    assert!(seg_bytes < budget * 3, "{seg_bytes} bytes kept for a {budget} budget");
+    let (_, pl) = http(port, "GET", "/cam/dvr/track-0.m3u8", b"").await;
+    let pl = String::from_utf8(pl).unwrap();
+    assert!(!pl.contains("MEDIA-SEQUENCE:1
+"), "the head must have been trimmed: {pl}");
+    assert!(pl.contains("#EXT-X-ENDLIST"), "{pl}");
+    // Every segment the playlist still names is on disk and served.
+    for l in pl.lines().filter(|l| l.starts_with("seg-")) {
+        assert_eq!(http(port, "GET", &format!("/cam/dvr/{l}"), b"").await.0, 200, "{l}");
+    }
+    // Nothing the playlist dropped is left behind.
+    let named: Vec<&str> = pl.lines().filter(|l| l.starts_with("seg-0-")).collect();
+    let on_disk = std::fs::read_dir(&g1)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("seg-0-"))
+        .count();
+    assert_eq!(on_disk, named.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reads one chunked HTTP response from `s`, calling `on_chunk(len, elapsed)` as
+/// each chunk arrives; returns the de-chunked body.
+async fn read_chunked(
+    s: &mut TcpStream,
+    started: Instant,
+    mut on_chunk: impl FnMut(usize, Duration),
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 16 * 1024];
+    let mut body = Vec::new();
+    let mut pos = None;
+    loop {
+        // Parse what is complete in `buf`.
+        loop {
+            let p = *pos.get_or_insert_with(|| {
+                buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+            });
+            let Some(mut at) = p else { break };
+            // `at` is the start of the next chunk-size line.
+            let Some(eol) = buf[at..].windows(2).position(|w| w == b"\r\n") else { break };
+            let size = usize::from_str_radix(std::str::from_utf8(&buf[at..at + eol]).unwrap(), 16).unwrap();
+            let data_start = at + eol + 2;
+            if buf.len() < data_start + size + 2 {
+                break;
+            }
+            if size == 0 {
+                return body;
+            }
+            on_chunk(size, started.elapsed());
+            body.extend_from_slice(&buf[data_start..data_start + size]);
+            at = data_start + size + 2;
+            buf.drain(..at);
+            pos = Some(Some(0));
+        }
+        let n = s.read(&mut tmp).await.unwrap();
+        if n == 0 {
+            return body;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if pos.is_some() && pos != Some(Some(0)) {
+            pos = None; // header not seen yet; retry the search
+        }
+    }
+}
+
+/// Low-latency DASH: a segment requested while it is still being published is
+/// streamed as its CMAF chunks appear (the first arrives long before the segment
+/// completes), and the streamed bytes equal the finished segment exactly.
+#[tokio::test]
+async fn ll_dash_segment_streams_while_it_is_published() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_lldash_stream_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"], 10) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let port = start(LiveOptions {
+        segment_seconds: 2.0,
+        window: 20,
+        part_seconds: Some(1.0 / 3.0),
+    })
+    .await;
+    let mut child = publish_cmd(&src, port, "ll", true).spawn().unwrap();
+
+    // Wait for the first complete segment, then ask for the next, in-progress one.
+    let started = Instant::now();
+    let mut last_stats = String::new();
+    let latest = loop {
+        let (code, body) = http(port, "GET", "/ll/_stats", b"").await;
+        if code == 200 {
+            let j = String::from_utf8(body).unwrap();
+            last_stats = j.clone();
+            let n: u64 = j
+                .split("\"latest_segment\":")
+                .nth(1)
+                .and_then(|r| r.split([',', '}']).next())
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0);
+            if n >= 1 {
+                break n;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "no segment appeared (last _stats: {last_stats:?}, publisher: {:?}, last status {code})",
+            child.try_wait()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let target = latest + 1;
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(format!("GET /ll/seg-0-{target}.m4s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let t0 = Instant::now();
+    let mut arrivals: Vec<(usize, Duration)> = Vec::new();
+    let streamed = read_chunked(&mut s, t0, |n, at| arrivals.push((n, at))).await;
+    let total = t0.elapsed();
+    assert!(arrivals.len() >= 3, "expected several CMAF chunks, got {}", arrivals.len());
+    let first = arrivals[0].1;
+    assert!(
+        total - first >= Duration::from_millis(500),
+        "the response was not streamed: first chunk at {first:?}, end at {total:?}"
+    );
+    // The streamed bytes are the finished segment.
+    let (code, whole) = http(port, "GET", &format!("/ll/seg-0-{target}.m4s"), b"").await;
+    assert_eq!(code, 200);
+    assert_eq!(streamed, whole, "streamed chunks differ from the completed segment");
+    assert_eq!(&whole[4..8], b"moof");
+    let _ = child.kill();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -27,8 +27,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tpt_kinetix_demux::mkv_stream::{MkvEvent, MkvStream};
 use tpt_kinetix_package::{LiveOptions, LivePackager, PlaylistRequest};
 
-use crate::policy::{ActiveSet, IngestPolicy, Metrics, Refusal};
+use crate::policy::{ActiveGuard, ActiveSet, IngestPolicy, Metrics, Refusal};
 use crate::record::Recorder;
+use crate::ws;
+
+/// The browser publishing demo served at `/publish`.
+const PUBLISH_PAGE: &str = include_str!("../web/publish.html");
 
 /// Largest header block accepted from a client.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -42,11 +46,11 @@ fn playlist_request(query: &str) -> PlaylistRequest {
     let mut req = PlaylistRequest::default();
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let Ok(n) = v.parse::<u64>() else { continue };
         match k {
-            "_HLS_msn" => req.msn = Some(n),
-            "_HLS_part" => req.part = Some(n),
-            "_HLS_skip" => req.skip = Some(n),
+            "_HLS_msn" => req.msn = v.parse().ok(),
+            "_HLS_part" => req.part = v.parse().ok(),
+            // A delta update is asked for with `YES` (or `v2`), not a number.
+            "_HLS_skip" if v == "YES" || v == "v2" => req.skip = Some(1),
             _ => {}
         }
     }
@@ -120,13 +124,30 @@ impl LiveServer {
         self
     }
 
-    /// Registers a new presentation under `key`, replacing any earlier one;
-    /// `None` when `key` is not a valid stream key.
-    pub(crate) fn begin(&self, key: &str) -> Option<Shared> {
+    /// Registers a new presentation for an RTMP publisher, replacing any earlier
+    /// one. `raw_key` is the stream key as the encoder sent it, optionally
+    /// carrying the publish token the way OBS and ffmpeg users commonly append it
+    /// (`cam1?token=s3cret`). `None` when the key is invalid or the
+    /// [`IngestPolicy`] refuses the publish.
+    pub(crate) fn begin(&self, raw_key: &str) -> Option<(String, Shared, ActiveGuard)> {
+        let (key, query) = raw_key.split_once('?').unwrap_or((raw_key, ""));
         if !valid_key(key) {
             tracing::warn!(key, "rejecting an invalid stream key");
             return None;
         }
+        if let Err(refusal) = self.policy.authorize(key, &HashMap::new(), query) {
+            self.metrics.count_refusal(refusal);
+            tracing::warn!(key, "RTMP publish refused: {}", refusal.message());
+            return None;
+        }
+        let guard = match self.active.enter(key, &self.policy) {
+            Ok(g) => g,
+            Err(refusal) => {
+                self.metrics.count_refusal(refusal);
+                tracing::warn!(key, "RTMP publish refused: {}", refusal.message());
+                return None;
+            }
+        };
         // A new presentation restarts segment numbering: keep the old recording.
         if let Some(rec) = &self.recorder {
             rec.next_generation(key);
@@ -138,7 +159,40 @@ impl LiveServer {
             .insert(key.to_string(), live.clone());
         tracing::info!(key, "publish started");
         Metrics::inc(&self.metrics.publishes_started);
-        Some(live)
+        Some((key.to_string(), live, guard))
+    }
+
+    /// Whether an RTMP publisher that has run `elapsed` and sent `bytes` is still
+    /// within the policy; counts the cut-off in the metrics when not.
+    pub(crate) fn check_rtmp_progress(
+        &self,
+        elapsed: std::time::Duration,
+        bytes: u64,
+    ) -> Result<(), &'static str> {
+        match self.policy.check_progress(elapsed, bytes) {
+            Ok(()) => Ok(()),
+            Err(refusal) => {
+                self.metrics.count_refusal(refusal);
+                Err(refusal.message())
+            }
+        }
+    }
+
+    /// The configured idle timeout, if any.
+    pub(crate) fn idle_timeout(&self) -> Option<std::time::Duration> {
+        self.policy.idle_timeout
+    }
+
+    /// Counts an idle cut-off in `/metrics`.
+    pub(crate) fn count_idle_cut(&self) {
+        self.metrics.count_refusal(Refusal::Idle);
+    }
+
+    /// Counts RTMP payload bytes in `/metrics`.
+    pub(crate) fn count_publish_bytes(&self, n: u64) {
+        self.metrics
+            .publish_bytes
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Accepts connections on `listener` forever.
@@ -200,6 +254,24 @@ impl LiveServer {
         };
 
         match method.as_str() {
+            "GET" if path.starts_with("/ingest/") && ws::upgrade_key(&headers).is_some() => {
+                // Browser publishing: MediaRecorder chunks as binary WebSocket messages.
+                let Some(key) = path.strip_prefix("/ingest/").filter(|k| valid_key(k)) else {
+                    return respond(r.get_mut(), Reply::text(404, "publish to /ingest/<key>"), false)
+                        .await;
+                };
+                if let Err(refusal) = self.policy.authorize(key, &headers, &query) {
+                    self.metrics.count_refusal(refusal);
+                    tracing::warn!(key, "publish refused: {}", refusal.message());
+                    return respond(
+                        r.get_mut(),
+                        Reply::text(refusal.status(), refusal.message()),
+                        false,
+                    )
+                    .await;
+                }
+                self.ingest(r, key.to_string(), &headers, true).await
+            }
             "GET" | "HEAD" => {
                 if path == "/metrics" {
                     let body = self.metrics.render(self.active.len()).into_bytes();
@@ -208,8 +280,20 @@ impl LiveServer {
                     reply.content_type = "text/plain; version=0.0.4";
                     return respond(r.get_mut(), reply, method == "HEAD").await;
                 }
+                if path == "/publish" {
+                    // A ready-made browser publisher (camera -> MediaRecorder -> WebSocket).
+                    let mut reply = Reply::text(200, "");
+                    reply.body = PUBLISH_PAGE.as_bytes().to_vec();
+                    reply.content_type = "text/html; charset=utf-8";
+                    return respond(r.get_mut(), reply, method == "HEAD").await;
+                }
                 Metrics::inc(&self.metrics.playback_requests);
-                let reply = self.playback(&path, &query).await;
+                let mut reply = self.playback(&path, &query).await;
+                if let Some((live, t, n)) = reply.stream.take() {
+                    if method == "GET" {
+                        return self.stream_segment(r.get_mut(), live, t, n).await;
+                    }
+                }
                 respond(r.get_mut(), reply, method == "HEAD").await
             }
             "POST" | "PUT" => {
@@ -231,7 +315,7 @@ impl LiveServer {
                     )
                     .await;
                 }
-                self.ingest(r, key.to_string(), &headers).await
+                self.ingest(r, key.to_string(), &headers, false).await
             }
             "OPTIONS" => respond(r.get_mut(), Reply::text(204, ""), false).await,
             _ => respond(r.get_mut(), Reply::text(405, "method not allowed"), false).await,
@@ -325,16 +409,24 @@ impl LiveServer {
         {
             if let Some((t, n)) = rest.split_once('-') {
                 if let (Some(t), Ok(n)) = (num(t), n.parse::<u64>()) {
+                    let shared = live.clone();
                     let live = live.lock().unwrap();
-                    // Low-latency DASH: a player may request the segment in
-                    // progress early (`availabilityTimeOffset`); serve the CMAF
-                    // chunks published so far with chunked framing. A completed
-                    // segment is served whole as before.
                     if let Some(b) = live.segment(t, n) {
                         return Reply::media("video/iso.segment", b.to_vec());
                     }
-                    if let Some(prefix) = live.segment_prefix(t, n) {
-                        return Reply::chunk(prefix);
+                    // Low-latency DASH: a player may request the segment in
+                    // progress early (`availabilityTimeOffset`). It is streamed:
+                    // each CMAF chunk goes out as it is published and the
+                    // response ends when the segment completes.
+                    if live.part_seconds().is_some()
+                        && !live.is_finished()
+                        && n == live.latest_segment() + 1
+                    {
+                        let mut reply = Reply::text(200, "");
+                        reply.content_type = "video/iso.segment";
+                        reply.cache = "no-cache";
+                        reply.stream = Some((shared, t, n));
+                        return reply;
                     }
                     return Reply::text(404, "no such segment");
                 }
@@ -347,7 +439,11 @@ impl LiveServer {
             if let Some((t, rest)) = rest.split_once('-') {
                 if let Some((n, i)) = rest.split_once('-') {
                     if let (Some(t), Ok(n), Ok(i)) = (num(t), n.parse::<u64>(), i.parse::<u64>()) {
-                        return live.lock().unwrap().part(t, n, i).map_or_else(
+                        // The playlist's EXT-X-PRELOAD-HINT names the next part before
+                        // it exists, and the player requests it at once: hold the
+                        // request open until the part is published (RFC 8216bis 6.2.5.2).
+                        let part = self.await_part(&live, t, n, i).await;
+                        return part.map_or_else(
                             || Reply::text(404, "no such part"),
                             |b| Reply::media("video/iso.segment", b.to_vec()),
                         );
@@ -356,6 +452,90 @@ impl LiveServer {
             }
         }
         Reply::text(404, "no such resource")
+    }
+
+    /// Streams segment `number` of `track` while it is still being published
+    /// (low-latency DASH): headers first, then every CMAF chunk as it appears with
+    /// HTTP chunked framing, then whatever the finished segment adds after its last
+    /// part, so the bytes received equal the completed segment exactly.
+    async fn stream_segment(
+        &self,
+        s: &mut TcpStream,
+        live: Shared,
+        track: usize,
+        number: u64,
+    ) -> Result<()> {
+        s.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: video/iso.segment\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        )
+        .await?;
+        let budget = std::time::Duration::from_secs_f64(
+            live.lock().unwrap().segment_seconds() * 3.0 + 5.0,
+        );
+        let deadline = tokio::time::Instant::now() + budget;
+        let (mut next_part, mut sent) = (0u64, 0usize);
+        loop {
+            let (parts, whole, gone) = {
+                let l = live.lock().unwrap();
+                let mut parts = Vec::new();
+                while let Some(p) = l.part(track, number, next_part + parts.len() as u64) {
+                    parts.push(p);
+                }
+                let whole = l.segment(track, number);
+                (parts, whole, number <= l.latest_segment() || l.is_finished())
+            };
+            for p in &parts {
+                write_http_chunk(s, p).await?;
+                next_part += 1;
+                sent += p.len();
+            }
+            if let Some(seg) = whole {
+                // Samples that missed the last part form the segment's tail.
+                if seg.len() > sent {
+                    write_http_chunk(s, &seg[sent..]).await?;
+                }
+                break;
+            }
+            if gone || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(BLOCK_POLL).await;
+        }
+        s.write_all(b"0\r\n\r\n").await?;
+        s.flush().await?;
+        let _ = s.shutdown().await;
+        Ok(())
+    }
+
+    /// The part `track`/`number`/`index`, waiting up to `MAX_BLOCK_WAIT` for a part
+    /// that is about to be published (a preload hint); `None` for one that never
+    /// will be (a finished stream, a completed segment without it, or one too far
+    /// ahead to be a hint).
+    async fn await_part(
+        &self,
+        live: &Shared,
+        track: usize,
+        number: u64,
+        index: u64,
+    ) -> Option<Vec<u8>> {
+        let deadline = tokio::time::Instant::now() + MAX_BLOCK_WAIT;
+        loop {
+            {
+                let live = live.lock().unwrap();
+                if let Some(p) = live.part(track, number, index) {
+                    return Some(p.to_vec());
+                }
+                // Only the in-progress segment (or the one a hint will open next)
+                // can still gain parts.
+                if live.is_finished() || number <= live.latest_segment() || number > live.latest_segment() + 2 {
+                    return None;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(BLOCK_POLL).await;
+        }
     }
 
     /// Blocks until the media `req` asks for exists, the stream ends, or
@@ -382,6 +562,7 @@ impl LiveServer {
         mut r: BufReader<TcpStream>,
         key: String,
         headers: &HashMap<String, String>,
+        ws: bool,
     ) -> Result<()> {
         let _guard = match self.active.enter(&key, &self.policy) {
             Ok(g) => g,
@@ -396,7 +577,14 @@ impl LiveServer {
                 .await;
             }
         };
-        if headers
+        if ws {
+            // The refusals above are plain HTTP errors, which a WebSocket client
+            // sees as a failed handshake; from here the connection is a WebSocket.
+            let client_key = ws::upgrade_key(headers).unwrap_or_default();
+            r.get_mut()
+                .write_all(ws::handshake_response(client_key).as_bytes())
+                .await?;
+        } else if headers
             .get("expect")
             .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"))
         {
@@ -425,7 +613,7 @@ impl LiveServer {
         tracing::info!(%key, "publish started");
         Metrics::inc(&self.metrics.publishes_started);
 
-        let mut body = Body::new(headers);
+        let mut body = if ws { Body::WebSocket } else { Body::new(headers) };
         let mut parser = MkvStream::new();
         let mut result: Result<()> = Ok(());
         let mut cut_off: Option<Refusal> = None;
@@ -434,13 +622,22 @@ impl LiveServer {
         'read: loop {
             let next = match self.policy.idle_timeout {
                 Some(idle) => match tokio::time::timeout(idle, body.next(&mut r)).await {
-                    Ok(n) => n?,
+                    Ok(n) => n,
                     Err(_) => {
                         cut_off = Some(Refusal::Idle);
                         break 'read;
                     }
                 },
-                None => body.next(&mut r).await?,
+                None => body.next(&mut r).await,
+            };
+            // A broken body ends the publish like any other error: what was
+            // received stays playable and the playlists are completed below.
+            let next = match next {
+                Ok(n) => n,
+                Err(e) => {
+                    result = Err(e);
+                    break 'read;
+                }
             };
             let Some(chunk) = next else { break 'read };
             received += chunk.len() as u64;
@@ -469,10 +666,10 @@ impl LiveServer {
             // Keep what was already published playable, then say why it stopped.
             let _ = live.lock().unwrap().finish();
             self.record(&key, &live, true);
-            return respond(
-                r.get_mut(),
+            return end_publish(
+                &mut r,
+                ws,
                 Reply::text(refusal.status(), refusal.message()),
-                false,
             )
             .await;
         }
@@ -488,11 +685,11 @@ impl LiveServer {
         match result {
             Ok(()) => {
                 tracing::info!(%key, "publish finished");
-                respond(r.get_mut(), Reply::text(200, "ok"), false).await
+                end_publish(&mut r, ws, Reply::text(200, "ok")).await
             }
             Err(e) => {
                 tracing::warn!(%key, error = %e, "publish rejected");
-                respond(r.get_mut(), Reply::text(400, &e.to_string()), false).await
+                end_publish(&mut r, ws, Reply::text(400, &e.to_string())).await
             }
         }
     }
@@ -564,6 +761,7 @@ fn apply(live: &Shared, events: Vec<MkvEvent>) -> Result<()> {
 /// A request body: chunked, length-delimited, or until the peer closes.
 enum Body {
     Chunked,
+    WebSocket,
     Length(u64),
     UntilEof,
     Done,
@@ -587,6 +785,13 @@ impl Body {
     async fn next(&mut self, r: &mut BufReader<TcpStream>) -> Result<Option<Vec<u8>>> {
         match self {
             Body::Done => Ok(None),
+            Body::WebSocket => {
+                let chunk = ws::next_chunk(r).await?;
+                if chunk.is_none() {
+                    *self = Body::Done;
+                }
+                Ok(chunk)
+            }
             Body::UntilEof => {
                 let mut buf = vec![0u8; 64 * 1024];
                 let n = r.read(&mut buf).await?;
@@ -650,6 +855,9 @@ struct Reply {
     content_type: &'static str,
     cache: &'static str,
     body: Vec<u8>,
+    /// Set for a segment still being published: the body is streamed as the
+    /// parts appear (low-latency DASH) instead of being sent whole.
+    stream: Option<(Shared, usize, u64)>,
 }
 
 impl Reply {
@@ -659,6 +867,7 @@ impl Reply {
             content_type: "text/plain",
             cache: "no-store",
             body: msg.as_bytes().to_vec(),
+            stream: None,
         }
     }
 
@@ -668,6 +877,7 @@ impl Reply {
             content_type: "application/vnd.apple.mpegurl",
             cache: "no-cache",
             body,
+            stream: None,
         }
     }
 
@@ -678,6 +888,7 @@ impl Reply {
             // A live manifest must never be cached: it describes a sliding window.
             cache: "no-cache",
             body,
+            stream: None,
         }
     }
 
@@ -687,6 +898,7 @@ impl Reply {
             content_type: "application/json",
             cache: "no-cache",
             body,
+            stream: None,
         }
     }
 
@@ -696,27 +908,34 @@ impl Reply {
             content_type,
             cache: "public, max-age=60",
             body,
+            stream: None,
         }
     }
+}
 
-    /// A low-latency DASH CMAF chunk response: the segment in progress is
-    /// served with `Transfer-Encoding: chunked` semantics (signalled here via
-    /// `chunked: true`; [`respond`] switches to chunked framing), so a player
-    /// that requested with `availabilityTimeOffset` starts receiving chunks
-    /// before the segment completes.
-    fn chunk(body: Vec<u8>) -> Self {
-        Self {
-            status: 200,
-            content_type: "video/iso.segment",
-            cache: "no-cache",
-            body,
-        }
+async fn end_publish(r: &mut BufReader<TcpStream>, ws: bool, reply: Reply) -> Result<()> {
+    if !ws {
+        return respond(r.get_mut(), reply, false).await;
     }
+    let code = match reply.status {
+        200 => 1000,
+        400 => 1007,
+        413 => 1009,
+        _ => 1008,
+    };
+    let reason = String::from_utf8_lossy(&reply.body).to_string();
+    ws::send_close(r.get_mut(), code, &reason).await?;
+    let _ = r.get_mut().shutdown().await;
+    Ok(())
+}
 
-    /// Whether this reply must use HTTP chunked framing (LL-DASH chunks).
-    fn is_chunk(&self) -> bool {
-        self.content_type == "video/iso.segment" && self.cache == "no-cache"
-    }
+/// One HTTP/1.1 chunk of a chunked response.
+async fn write_http_chunk(s: &mut TcpStream, data: &[u8]) -> Result<()> {
+    s.write_all(format!("{:X}\r\n", data.len()).as_bytes()).await?;
+    s.write_all(data).await?;
+    s.write_all(b"\r\n").await?;
+    s.flush().await?;
+    Ok(())
 }
 
 async fn respond(s: &mut TcpStream, r: Reply, head_only: bool) -> Result<()> {
@@ -734,34 +953,16 @@ async fn respond(s: &mut TcpStream, r: Reply, head_only: bool) -> Result<()> {
         503 => "Service Unavailable",
         _ => "Error",
     };
-    // Low-latency DASH chunks stream with chunked framing so the player starts
-    // receiving CMAF chunks before the segment completes.
-    let head = if r.is_chunk() && !head_only {
-        format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
-            r.status, r.content_type, r.cache
-        )
-    } else {
-        format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
-            r.status,
-            r.content_type,
-            r.body.len(),
-            r.cache
-        )
-    };
+    let head = format!(
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
+        r.status,
+        r.content_type,
+        r.body.len(),
+        r.cache
+    );
     s.write_all(head.as_bytes()).await?;
     if !head_only {
-        if r.is_chunk() {
-            // One chunk is enough: the packager hands over every CMAF chunk
-            // published so far, and the terminating zero-chunk closes it.
-            let len = format!("{:X}\r\n", r.body.len());
-            s.write_all(len.as_bytes()).await?;
-            s.write_all(&r.body).await?;
-            s.write_all(b"\r\n0\r\n\r\n").await?;
-        } else {
-            s.write_all(&r.body).await?;
-        }
+        s.write_all(&r.body).await?;
     }
     s.flush().await?;
     let _ = s.shutdown().await;

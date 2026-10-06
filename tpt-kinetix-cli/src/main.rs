@@ -122,6 +122,9 @@ enum Commands {
         /// Recorded generations kept per stream key (default: keep all).
         #[arg(long, requires = "record_dir")]
         keep_generations: Option<usize>,
+        /// Recorded megabytes kept per stream: the oldest segments are deleted beyond it (default: keep all).
+        #[arg(long, requires = "record_dir")]
+        record_max_mb: Option<u64>,
     },
     /// Serve an MP4 as HLS and DASH, packaged just in time (nothing is pre-processed).
     Serve {
@@ -228,6 +231,7 @@ async fn main() -> Result<()> {
             record_dir,
             record_depth_secs,
             keep_generations,
+            record_max_mb,
         } => {
             let host = if public { "0.0.0.0" } else { "127.0.0.1" };
             println!(
@@ -254,6 +258,7 @@ async fn main() -> Result<()> {
                         tpt_kinetix_stream::RecordingLimits {
                             max_duration: record_depth_secs.map(std::time::Duration::from_secs_f64),
                             keep_generations,
+                            max_bytes: record_max_mb.map(|m| m * 1_000_000),
                         },
                     )
                 }

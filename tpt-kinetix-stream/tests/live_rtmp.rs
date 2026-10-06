@@ -109,6 +109,22 @@ fn opus_head(dops: &[u8]) -> Vec<u8> {
 
 /// Publishes `src` over Enhanced RTMP to `port` under `key`, then disconnects.
 async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config: bool) {
+    publish_inner(port, key, src, with_audio_config, None).await
+}
+
+/// Like [`publish`], but after the last frame the connection stays open and
+/// silent for `stall` instead of closing cleanly (a dead encoder).
+async fn publish_then_stall(port: u16, key: &str, src: &std::path::Path, stall: Duration) {
+    publish_inner(port, key, src, true, Some(stall)).await
+}
+
+async fn publish_inner(
+    port: u16,
+    key: &str,
+    src: &std::path::Path,
+    with_audio_config: bool,
+    stall: Option<Duration>,
+) {
     const CHUNK: usize = 4096;
     // Demux the WebM into tracks and frames.
     let mut parser = MkvStream::new();
@@ -242,6 +258,11 @@ async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config:
         };
         wr.write_all(&msg).await.unwrap();
     }
+    if let Some(stall) = stall {
+        wr.flush().await.unwrap();
+        tokio::time::sleep(stall).await;
+        return;
+    }
     wr.write_all(&cmd(&[
         Amf0Value::String("deleteStream".into()),
         Amf0Value::Number(3.0),
@@ -256,11 +277,16 @@ async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config:
 }
 
 async fn start() -> (u16, u16) {
+    start_with(tpt_kinetix_stream::IngestPolicy::default()).await
+}
+
+async fn start_with(policy: tpt_kinetix_stream::IngestPolicy) -> (u16, u16) {
     let server = LiveServer::new(LiveOptions {
         segment_seconds: 2.0,
         window: 100,
         part_seconds: None,
-    });
+    })
+    .with_policy(policy);
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rtmp = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ports = (
@@ -520,4 +546,94 @@ async fn capability_exchange_reaches_publish_start() {
         )),
         "multitrack event missing: {events:?}"
     );
+}
+
+/// RTMP publishers are held to the same ingest policy as HTTP ones: a token
+/// carried in the stream key (`name?token=...`, the OBS convention) and limits.
+#[tokio::test]
+async fn rtmp_publish_honours_token_and_limits() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livertmp_policy_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"], 10) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+
+    // Token required: a publish without one never appears, one with it does.
+    let (http, rtmp) = start_with(tpt_kinetix_stream::IngestPolicy {
+        token: Some("tok".into()),
+        ..Default::default()
+    })
+    .await;
+    publish(rtmp, "denied", &src, true).await;
+    publish(rtmp, "denied?token=wrong", &src, true).await;
+    assert_eq!(http_get(http, "/denied/master.m3u8").await.0, 404);
+    publish(rtmp, "ok?token=tok", &src, true).await;
+    let pl = wait_complete(http, "ok").await;
+    let full = pl.matches("#EXTINF").count();
+    assert!(full >= 4, "{pl}");
+    let (_, metrics) = http_get(http, "/metrics").await;
+    let metrics = String::from_utf8(metrics).unwrap();
+    assert!(metrics.contains("kinetix_publishes_refused_auth_total 2"), "{metrics}");
+
+    // A byte limit cuts the publish off: what arrived stays playable, but it is
+    // much shorter than the source.
+    let (http, rtmp) = start_with(tpt_kinetix_stream::IngestPolicy {
+        max_bytes: Some(120_000),
+        ..Default::default()
+    })
+    .await;
+    publish(rtmp, "cut", &src, true).await;
+    let pl = wait_complete(http, "cut").await;
+    let cut = pl.matches("#EXTINF").count();
+    assert!(cut >= 1 && cut < full, "cut at {cut} segments vs {full} in full");
+    let (_, metrics) = http_get(http, "/metrics").await;
+    let metrics = String::from_utf8(metrics).unwrap();
+    assert!(metrics.contains("kinetix_publishes_cut_off_total 1"), "{metrics}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A publisher that stops sending without closing the connection is ended by the
+/// idle timeout: the presentation completes and the slot is released.
+#[tokio::test]
+async fn rtmp_idle_publisher_is_ended() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livertmp_idle_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"], 6) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let (http, rtmp) = start_with(tpt_kinetix_stream::IngestPolicy {
+        idle_timeout: Some(Duration::from_millis(600)),
+        reject_concurrent: true,
+        ..Default::default()
+    })
+    .await;
+    // All frames go out in one burst, then silence with the socket still open.
+    // The playlist must complete well before the stall ends.
+    let publisher = tokio::spawn({
+        let src = src.clone();
+        async move { publish_then_stall(rtmp, "cam", &src, Duration::from_secs(8)).await }
+    });
+    let started = Instant::now();
+    let pl = wait_complete(http, "cam").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(7),
+        "completed only when the connection closed, not by the idle timeout"
+    );
+    assert!(pl.matches("#EXTINF").count() >= 2, "{pl}");
+    let (_, metrics) = http_get(http, "/metrics").await;
+    let metrics = String::from_utf8(metrics).unwrap();
+    assert!(metrics.contains("kinetix_publishes_cut_off_total 1"), "{metrics}");
+    assert!(metrics.contains("kinetix_publishers_active 0"), "{metrics}");
+    publisher.abort();
+    let _ = std::fs::remove_dir_all(&dir);
 }
