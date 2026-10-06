@@ -38,3 +38,11 @@ publisher=$!
 trap 'kill $server $publisher 2>/dev/null || true' EXIT
 sleep 8   # let a few segments accumulate; the publish keeps running (~30 s)
 node tpt-kinetix-package/tests/browser/run.cjs "$chrome" "$PWD/$libs" "http://127.0.0.1:$port" 5 "hls:cam/master.m3u8"
+# Record the measured numbers: the packager's live-edge floor plus the hls.js
+# playback latency, so the "no numbers recorded" gap stays closed.
+echo "--- packager live edge (/_stats) ---"
+curl -s "http://127.0.0.1:$port/cam/_stats" | tee "$work/stats.json"; echo
+echo "--- live manifest (LL-HLS parts) ---"
+curl -s "http://127.0.0.1:$port/cam/track-0.m3u8" | head -n 20 | tee "$work/playlist.txt"
+echo "--- low-latency DASH manifest ---"
+curl -s "http://127.0.0.1:$port/cam/manifest.mpd" | head -n 12 | tee "$work/manifest.txt"

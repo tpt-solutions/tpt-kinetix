@@ -443,3 +443,195 @@ fn well_formed_xml(xml: &str) -> bool {
     }
     stack.is_empty()
 }
+
+/// A publisher that drops and reconnects under the same key continues the same
+/// presentation: segment numbers keep counting, the playlist gains one
+/// `EXT-X-DISCONTINUITY`, and every listed segment can be fetched.
+#[tokio::test]
+async fn reconnecting_publisher_continues_the_presentation() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_live_reconnect_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"], 6) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let webm = std::fs::read(&src).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let port = start(LiveOptions {
+        segment_seconds: 2.0,
+        window: 50,
+        part_seconds: None,
+    })
+    .await;
+
+    let (st, _) = http(port, "POST", "/ingest/cam", &webm).await;
+    assert_eq!(st, 200);
+    let (_, first) = http(port, "GET", "/cam/track-0.m3u8", b"").await;
+    let first = String::from_utf8(first).unwrap();
+    let first_segments = first.matches("#EXTINF").count();
+    assert!(!first.contains("DISCONTINUITY"));
+
+    let (st, _) = http(port, "POST", "/ingest/cam", &webm).await;
+    assert_eq!(st, 200);
+    let (_, both) = http(port, "GET", "/cam/track-0.m3u8", b"").await;
+    let both = String::from_utf8(both).unwrap();
+    assert_eq!(both.matches("#EXT-X-DISCONTINUITY
+").count(), 1, "{both}");
+    assert!(both.matches("#EXTINF").count() > first_segments);
+    assert!(both.contains("#EXT-X-ENDLIST"));
+    for l in both.lines().filter(|l| l.starts_with("seg-")) {
+        let (st, body) = http(port, "GET", &format!("/cam/{l}"), b"").await;
+        assert_eq!(st, 200, "{l}");
+        assert!(!body.is_empty());
+    }
+}
+
+/// A recorded publish is a VOD presentation afterwards: the playlist is complete,
+/// every segment is served from disk, a reconnect extends the same recording, and
+/// the recording decodes in ffmpeg.
+#[tokio::test]
+async fn recording_serves_a_vod_after_the_publish_ends() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_live_record_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"], 6) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let webm = std::fs::read(&src).unwrap();
+    let rec_dir = dir.join("rec");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(
+        LiveServer::new(LiveOptions {
+            segment_seconds: 2.0,
+            window: 2, // the live window is tiny; the recording must keep everything
+            part_seconds: None,
+        })
+        .with_recording(&rec_dir)
+        .serve(listener),
+    );
+
+    let (st, _) = http(port, "POST", "/ingest/cam", &webm).await;
+    assert_eq!(st, 200);
+    let (st, pl) = http(port, "GET", "/cam/dvr/track-0.m3u8", b"").await;
+    assert_eq!(st, 200);
+    let pl = String::from_utf8(pl).unwrap();
+    assert!(pl.contains("PLAYLIST-TYPE:VOD") && pl.contains("#EXT-X-ENDLIST"), "{pl}");
+    let first_segments = pl.matches("#EXTINF").count();
+    assert!(first_segments >= 3, "{pl}");
+    // The live window kept at most `window` of them; the recording kept all.
+    let (_, live_pl) = http(port, "GET", "/cam/track-0.m3u8", b"").await;
+    assert!(String::from_utf8(live_pl).unwrap().matches("#EXTINF").count() <= 2);
+
+    // Reconnect: the same recording grows, with a discontinuity.
+    let (st, _) = http(port, "POST", "/ingest/cam", &webm).await;
+    assert_eq!(st, 200);
+    let (_, pl) = http(port, "GET", "/cam/dvr/track-0.m3u8", b"").await;
+    let pl = String::from_utf8(pl).unwrap();
+    assert!(pl.matches("#EXTINF").count() > first_segments);
+    assert_eq!(pl.matches("#EXT-X-DISCONTINUITY\n").count(), 1, "{pl}");
+
+    // Everything the playlists name is fetchable; the master resolves too.
+    let (st, master) = http(port, "GET", "/cam/dvr/master.m3u8", b"").await;
+    assert_eq!(st, 200);
+    assert!(String::from_utf8(master).unwrap().contains("track-0.m3u8"));
+    let (st, init) = http(port, "GET", "/cam/dvr/init-0.mp4", b"").await;
+    assert_eq!(st, 200);
+    let mut media = init;
+    for l in pl.lines().filter(|l| l.starts_with("seg-")) {
+        let (st, body) = http(port, "GET", &format!("/cam/dvr/{l}"), b"").await;
+        assert_eq!(st, 200, "{l}");
+        media.extend_from_slice(&body);
+    }
+    // Path tricks and unknown keys are refused.
+    assert_eq!(http(port, "GET", "/cam/dvr/..%2Fx", b"").await.0, 404);
+    assert_eq!(http(port, "GET", "/nokey/dvr/track-0.m3u8", b"").await.0, 404);
+    // The recorded video decodes in ffmpeg.
+    let out = dir.join("rec.mp4");
+    std::fs::write(&out, &media).unwrap();
+    let frames = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&out)
+        .args(["-map", "0:v:0", "-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(frames.status.success(), "{}", String::from_utf8_lossy(&frames.stderr));
+    // And it is on disk where the server says.
+    assert!(rec_dir.join("cam").join("g1").join("track-0.m3u8").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A rolling DVR depth deletes the oldest recorded segments and slides the
+/// recorded playlist; old generations are pruned when a new one starts.
+#[tokio::test]
+async fn recording_depth_and_generations_are_bounded() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_live_retain_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"], 8) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let webm = std::fs::read(&src).unwrap();
+    let rec_dir = dir.join("rec");
+    let opts = || LiveOptions {
+        segment_seconds: 2.0,
+        window: 50,
+        part_seconds: None,
+    };
+    let limits = tpt_kinetix_stream::RecordingLimits {
+        max_duration: Some(Duration::from_secs(5)),
+        keep_generations: Some(1),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(
+        LiveServer::new(opts())
+            .with_recording_limits(&rec_dir, limits)
+            .serve(listener),
+    );
+    let (st, _) = http(port, "POST", "/ingest/cam", &webm).await;
+    assert_eq!(st, 200);
+    let (_, pl) = http(port, "GET", "/cam/dvr/track-0.m3u8", b"").await;
+    let pl = String::from_utf8(pl).unwrap();
+    let kept = pl.matches("#EXTINF").count();
+    assert!((1..=3).contains(&kept), "5 s depth of 2 s segments: {pl}");
+    assert!(!pl.contains("MEDIA-SEQUENCE:1\n"), "the head must have slid: {pl}");
+    // Trimmed segments are gone from disk, retained ones are served.
+    let g1 = rec_dir.join("cam").join("g1");
+    let files = std::fs::read_dir(&g1)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("seg-0-"))
+        .count();
+    assert_eq!(files, kept);
+    for l in pl.lines().filter(|l| l.starts_with("seg-")) {
+        assert_eq!(http(port, "GET", &format!("/cam/dvr/{l}"), b"").await.0, 200);
+    }
+
+    // A restarted server (no in-memory state) starts generation 2 and prunes g1.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port2 = listener.local_addr().unwrap().port();
+    tokio::spawn(
+        LiveServer::new(opts())
+            .with_recording_limits(&rec_dir, limits)
+            .serve(listener),
+    );
+    assert_eq!(http(port2, "POST", "/ingest/cam", &webm).await.0, 200);
+    assert!(rec_dir.join("cam").join("g2").exists());
+    assert!(!g1.exists(), "generation 1 should have been pruned");
+    let _ = std::fs::remove_dir_all(&dir);
+}

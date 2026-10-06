@@ -12,6 +12,12 @@ categories = ["multimedia", "network-programming"]
 readme = "README.md"
 documentation = "https://docs.rs/tpt-kinetix-stream"
 
+[features]
+# TLS termination for RTMPS ingest (OBS "RTMPS" mode). Off by default so the
+# base crate stays dependency-light; enable for deployments that take
+# `rtmps://` publishers.
+rtmps = ["dep:tokio-rustls", "dep:rustls-pemfile"]
+
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -21,6 +27,8 @@ tracing = { workspace = true }
 tokio = { version = "1.38", features = ["full"] }
 bytes = "1.5"
 nom = { workspace = true }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-package = { workspace = true }

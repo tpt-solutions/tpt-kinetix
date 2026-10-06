@@ -292,8 +292,11 @@ fn check_clip_tagged(
 /// `#[ignore]`d "known pre-existing gap" reproduction (diverges from frame 128
 /// of the 300-frame perf clip); the sub-8x8 mode/MV bugs it exposed are fixed,
 /// so it asserts byte-exactness like the rest of the file. The two larger
-/// real-content cases below remain `#[ignore]`d on the residual luma-only
-/// loop-filter edge divergence (see `fixtures/div128/README.md`).
+/// real-content cases below used to stay `#[ignore]`d on what the
+/// `fixtures/div128/README.md` isolation notes called a loop-filter edge
+/// divergence — that framing was wrong (see the README's closing note): the
+/// divergence was the n>4 D153/D117 intra predictors, and both cases now
+/// assert byte-exactness too.
 #[test]
 fn conformance_vp9_320x240_real_content() {
     check_clip_tagged(
@@ -307,15 +310,11 @@ fn conformance_vp9_320x240_real_content() {
     );
 }
 
-/// **Known pre-existing gap — `#[ignore]`d. See
-/// `fixtures/div128/README.md` for the isolation state.**
-///
-/// Down to 748 differing luma samples (was whole-frame corruption before the
-/// sub-8x8/MV fixes): a per-edge loop-filter level divergence at
-/// skip-8x8/4x4-partitioned boundaries, luma ±1. Chroma is nearly exact
-/// (u_bad=17, v_bad=23).
+/// Whole-frame 1080p intra keyframe. Was `#[ignore]`d as a "known pre-existing
+/// gap" (748 differing luma samples blamed on a loop-filter edge divergence);
+/// the real cause was the n>4 D153/D117 intra predictors (see
+/// `fixtures/div128/README.md`), and the clip now decodes byte-exact.
 #[test]
-#[ignore = "VP9 luma loop-filter edge divergence vs libvpx on real content (pre-existing, see fixtures/div128)"]
 fn conformance_vp9_1920x1080_keyframe_intra() {
     check_clip_tagged(
         "realtestsrc_1920x1080",
@@ -328,13 +327,10 @@ fn conformance_vp9_1920x1080_keyframe_intra() {
     );
 }
 
-/// **Known pre-existing gap — `#[ignore]`d. See
-/// `fixtures/div128/README.md` for the isolation state.**
-///
-/// Same residual as the 1080p case: luma-only, ±1-2 deltas at 35.5 dB after
-/// the sub-8x8/MV fixes; chroma is bit-exact (`u_bad=0`, `v_bad=0`).
+/// 640x360 real content, 4 frames. Same history as the 1080p case above: the
+/// `#[ignore]` was for the misdiagnosed "loop-filter edge divergence"; the
+/// D153/D117 n>4 intra-predictor fix closed it.
 #[test]
-#[ignore = "VP9 luma loop-filter edge divergence vs libvpx on real content (pre-existing, see fixtures/div128)"]
 fn conformance_vp9_640x360_real_content() {
     check_clip_tagged(
         "realtestsrc_640x360",
@@ -343,6 +339,25 @@ fn conformance_vp9_640x360_real_content() {
         360,
         "testsrc",
         4,
+        &["-deadline", "good", "-cpu-used", "4", "-lag-in-frames", "0"],
+    );
+}
+
+/// The original perf-corpus envelope: 300 frames of real content, whose
+/// mid-stream keyframe at frame 128 was the seed of the `fixtures/div128`
+/// investigation. The n>4 D153/D117 intra-predictor bugs only surfaced past
+/// ~2s of content (one D153 8x8 block on that keyframe, then propagated
+/// through inter frames), so a short clip can never catch them. This long
+/// case pins the whole chain end to end.
+#[test]
+fn conformance_vp9_320x240_300frame() {
+    check_clip_tagged(
+        "realtestsrc_320x240_300f",
+        "real320long",
+        320,
+        240,
+        "testsrc",
+        300,
         &["-deadline", "good", "-cpu-used", "4", "-lag-in-frames", "0"],
     );
 }

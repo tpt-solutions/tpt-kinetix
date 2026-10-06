@@ -197,6 +197,29 @@ async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config:
     ))
     .await
     .unwrap();
+    // Multitrack + HDR metadata packets (Enhanced RTMP v2 follow-ups): the
+    // server must accept them without disturbing the media flow. Track 0 is
+    // selected, then a synthetic HDR metadata packet is sent.
+    wr.write_all(&chunks(
+        4,
+        0,
+        9,
+        1,
+        &ex(0x80 | 0x10 | 5, fourcc, &[0]),
+        CHUNK,
+    ))
+    .await
+    .unwrap();
+    wr.write_all(&chunks(
+        4,
+        0,
+        9,
+        1,
+        &ex(0x80 | 0x10 | 4, fourcc, &[1, 2, 3, 4]),
+        CHUNK,
+    ))
+    .await
+    .unwrap();
     if with_audio_config {
         wr.write_all(&chunks(
             5,
@@ -244,7 +267,7 @@ async fn start() -> (u16, u16) {
         http.local_addr().unwrap().port(),
         rtmp.local_addr().unwrap().port(),
     );
-    let rtmp_server = server.rtmp_server("");
+    let rtmp_server = server.rtmp_server("", None);
     tokio::spawn(server.serve(http));
     tokio::spawn(async move { rtmp_server.serve(rtmp).await });
     ports
@@ -391,4 +414,110 @@ async fn stock_ffmpeg_publishes_vp9_over_enhanced_rtmp() {
         .await
         .unwrap();
     assert_eq!(frames, 150);
+}
+
+/// The v2 capability exchange is recorded on `PublishStart`: the FourCC lists
+/// and app from the `connect` command object reach the session. Exercises the
+/// same path a real OBS 30+ (Enhanced RTMP) publish takes — OBS sends
+/// `fourCcList`/`audioFourCcList` in `connect`, which stock ffmpeg does not.
+/// Run a real OBS publish manually with:
+/// `Settings -> Stream -> Service Custom, Server rtmp://127.0.0.1:1935/live,
+///  Stream Key <key>`; the server logs the announced FourCCs at info level.
+#[tokio::test]
+async fn capability_exchange_reaches_publish_start() {
+    use std::sync::{Arc, Mutex};
+    use tpt_kinetix_stream::rtmp::server::{RtmpConfig, RtmpMediaEvent, RtmpServer};
+    let rtmp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rtmp_port = rtmp.local_addr().unwrap().port();
+    let seen: Arc<Mutex<Vec<RtmpMediaEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let server = RtmpServer::new(RtmpConfig {
+        bind_addr: String::new(),
+        tls: None,
+    })
+    .with_handler({
+        let seen = seen.clone();
+        move |e| seen.lock().unwrap().push(e.clone())
+    });
+    tokio::spawn(async move { server.serve(rtmp).await });
+
+    let mut s = TcpStream::connect(("127.0.0.1", rtmp_port)).await.unwrap();
+    s.write_all(&[3]).await.unwrap();
+    let c1: Vec<u8> = (0..1536).map(|i| (i * 13 % 251) as u8).collect();
+    s.write_all(&c1).await.unwrap();
+    let mut srv = vec![0u8; 1 + 1536 + 1536];
+    s.read_exact(&mut srv).await.unwrap();
+    s.write_all(&srv[1..1537]).await.unwrap();
+    let cmd = |values: &[Amf0Value]| chunks(3, 0, 20, 0, &amf::encode_all(values), 4096);
+    // OBS-style connect: app + video/audio FourCC lists + multitrack flag.
+    s.write_all(&cmd(&[
+        Amf0Value::String("connect".into()),
+        Amf0Value::Number(1.0),
+        Amf0Value::Object(vec![
+            ("app".into(), Amf0Value::String("live".into())),
+            (
+                "fourCcList".into(),
+                Amf0Value::StrictArray(vec![
+                    Amf0Value::String("av01".into()),
+                    Amf0Value::String("vp09".into()),
+                ]),
+            ),
+            (
+                "audioFourCcList".into(),
+                Amf0Value::StrictArray(vec![Amf0Value::String("Opus".into())]),
+            ),
+            ("multitrack".into(), Amf0Value::Boolean(true)),
+        ]),
+    ]))
+    .await
+    .unwrap();
+    s.write_all(&cmd(&[
+        Amf0Value::String("createStream".into()),
+        Amf0Value::Number(2.0),
+        Amf0Value::Null,
+    ]))
+    .await
+    .unwrap();
+    s.write_all(&cmd(&[
+        Amf0Value::String("publish".into()),
+        Amf0Value::Number(0.0),
+        Amf0Value::Null,
+        Amf0Value::String("caps".into()),
+        Amf0Value::String("live".into()),
+    ]))
+    .await
+    .unwrap();
+    // HDR metadata + multitrack packets must surface as their own events.
+    let ex = |first: u8, cc: &[u8], body: &[u8]| [&[first][..], cc, body].concat();
+    s.write_all(&chunks(4, 0, 9, 1, &ex(0x80 | 0x10 | 4, b"av01", &[9, 9]), 128))
+        .await
+        .unwrap();
+    s.write_all(&chunks(4, 1, 9, 1, &ex(0x80 | 0x10 | 5, b"av01", &[2]), 128))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let events = seen.lock().unwrap().clone();
+    let Some(RtmpMediaEvent::PublishStart {
+        stream_key,
+        capabilities,
+    }) = events.iter().find(|e| matches!(e, RtmpMediaEvent::PublishStart { .. })).cloned()
+    else {
+        panic!("no PublishStart; got {events:?}");
+    };
+    assert_eq!(stream_key, "caps");
+    assert_eq!(capabilities.app.as_deref(), Some("live"));
+    assert!(capabilities.video_four_ccs.contains(b"av01"));
+    assert!(capabilities.video_four_ccs.contains(b"vp09"));
+    assert!(capabilities.audio_four_ccs.contains(b"Opus"));
+    assert!(capabilities.multitrack);
+    assert!(
+        events.iter().any(|e| matches!(e, RtmpMediaEvent::Hdr { .. })),
+        "HDR metadata event missing: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            RtmpMediaEvent::Multitrack { track_number: 2 }
+        )),
+        "multitrack event missing: {events:?}"
+    );
 }

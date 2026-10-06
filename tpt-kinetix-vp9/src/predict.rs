@@ -234,15 +234,15 @@ pub fn intra_predict(
                 for c in 0..n {
                     dst[dst_off + c] = clip_pixel((i32::from(top[c]) + t(c) + 1) >> 1);
                 }
-                dst[dst_off + stride] = clip_pixel((l(n - 1) + 2 * tl + t(0) + 2) >> 2);
+                dst[dst_off + stride] = clip_pixel((l(0) + 2 * tl + t(0) + 2) >> 2);
                 for c in 1..n {
                     dst[dst_off + stride + c] =
                         clip_pixel((i32::from(top[c - 1]) + 2 * t(c - 1) + t(c) + 2) >> 2);
                 }
-                dst[dst_off + 2 * stride] = clip_pixel((tl + 2 * l(n - 1) + l(n - 2) + 2) >> 2);
+                dst[dst_off + 2 * stride] = clip_pixel((l(1) + 2 * l(0) + tl + 2) >> 2);
                 for r in 3..n {
                     dst[dst_off + r * stride] =
-                        clip_pixel((l(n + 2 - r) + 2 * l(n + 1 - r) + l(n - r) + 2) >> 2);
+                        clip_pixel((l(r - 3) + 2 * l(r - 2) + l(r - 1) + 2) >> 2);
                 }
                 for r in 2..n {
                     for c in 1..n {
@@ -272,23 +272,25 @@ pub fn intra_predict(
                     }
                 }
             } else {
-                dst[dst_off] = clip_pixel((tl + l(n - 1) + 1) >> 1);
+                dst[dst_off] = clip_pixel((tl + l(0) + 1) >> 1);
                 for r in 1..n {
-                    dst[dst_off + r * stride] = clip_pixel((l(n - r) + l(n - 1 - r) + 1) >> 1);
+                    dst[dst_off + r * stride] = clip_pixel((l(r - 1) + l(r) + 1) >> 1);
                 }
-                dst[dst_off + 1] = clip_pixel((l(n - 1) + 2 * tl + t(0) + 2) >> 2);
-                dst[dst_off + stride + 1] = clip_pixel((tl + 2 * l(n - 1) + l(n - 2) + 2) >> 2);
+                dst[dst_off + 1] = clip_pixel((l(0) + 2 * tl + t(0) + 2) >> 2);
+                dst[dst_off + stride + 1] = clip_pixel((tl + 2 * l(0) + l(1) + 2) >> 2);
                 for r in 2..n {
                     dst[dst_off + r * stride + 1] =
-                        clip_pixel((l(n + 1 - r) + 2 * l(n - r) + l(n - 1 - r) + 2) >> 2);
+                        clip_pixel((l(r - 2) + 2 * l(r - 1) + l(r) + 2) >> 2);
                 }
                 for c in 0..n - 2 {
                     dst[dst_off + 2 + c] =
                         clip_pixel((i32::from(top[c]) + 2 * t(c) + t(c + 1) + 2) >> 2);
                 }
+                // row r col 2+c = row r-1 col c, for r = 1..n-1 (the loop must
+                // start at row 1 and must not run past the block's last row)
                 for r in 1..n {
                     for c in 0..n - 2 {
-                        dst[dst_off + (r + 1) * stride + 2 + c] = dst[dst_off + r * stride + c];
+                        dst[dst_off + r * stride + 2 + c] = dst[dst_off + (r - 1) * stride + c];
                     }
                 }
             }
@@ -873,5 +875,276 @@ pub fn mc_block_scaled(
         my_p += usize::from(step[1]);
         trow += (my_p >> 4) * tmp_stride;
         my_p &= 0xf;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic pseudo-random edge values (LCG) — flat edges would mask
+    /// index-order bugs because averaging symmetric neighbourhoods commutes.
+    fn test_edges(n: usize) -> IntraEdges {
+        let mut x: u32 = 0x1234_5678 ^ (n as u32).wrapping_mul(0x9E37_79B9);
+        let mut next = move || {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (x >> 24) as u8
+        };
+        let mut edges = IntraEdges {
+            top: [127; 64 + 4 + 1],
+            left: [129; 64],
+            n,
+        };
+        for slot in edges.top.iter_mut() {
+            *slot = next();
+        }
+        for slot in edges.left.iter_mut() {
+            *slot = next();
+        }
+        edges
+    }
+
+    // Reference transcriptions of vpx_dsp/intrapred.c's generic predictors,
+    // written from the C source with TOP-DOWN `left` (the reference
+    // orientation); `intra_predict` receives the same edges stored bottom-up.
+    // They pin the n > 4 paths, which the conformance corpus's
+    // encoder-parameter envelope never selects (broken D153/D117 at 8x8+
+    // corrupted real content while all 13 corpus clips stayed byte-exact).
+
+    fn avg2(a: i32, b: i32) -> i32 {
+        (a + b + 1) >> 1
+    }
+    fn avg3(a: i32, b: i32, c: i32) -> i32 {
+        (a + 2 * b + c + 2) >> 2
+    }
+
+    fn ref_d45(above_m1: i32, above: &[i32], _left: &[i32], n: usize) -> Vec<u8> {
+        let _ = above_m1;
+        let ar = above[n - 1];
+        let mut dst = vec![0u8; n * n];
+        for x in 0..n - 1 {
+            dst[x] = clip_pixel(avg3(above[x], above[x + 1], above[x + 2]));
+        }
+        dst[n - 1] = ar as u8;
+        for r in 1..n {
+            for c in 0..n - r {
+                dst[r * n + c] = dst[(r - 1) * n + c + 1];
+            }
+            for c in n - r..n {
+                dst[r * n + c] = ar as u8;
+            }
+        }
+        dst
+    }
+
+    fn ref_d117(above_m1: i32, above: &[i32], left: &[i32], n: usize) -> Vec<u8> {
+        let mut dst = vec![0u8; n * n];
+        // first row: AVG2(above[c-1], above[c])
+        for c in 0..n {
+            let prev = if c == 0 { above_m1 } else { above[c - 1] };
+            dst[c] = clip_pixel(avg2(prev, above[c]));
+        }
+        // second row: AVG3(left[0], above[-1], above[0]) then AVG3(above[c-2..c])
+        dst[n] = clip_pixel(avg3(left[0], above_m1, above[0]));
+        for c in 1..n {
+            let prev2 = if c == 1 { above_m1 } else { above[c - 2] };
+            dst[n + c] = clip_pixel(avg3(prev2, above[c - 1], above[c]));
+        }
+        // first column below row 2
+        dst[2 * n] = clip_pixel(avg3(above_m1, left[0], left[1]));
+        for r in 3..n {
+            dst[r * n] = clip_pixel(avg3(left[r - 3], left[r - 2], left[r - 1]));
+        }
+        // the rest: two rows up, one column left
+        for r in 2..n {
+            for c in 1..n {
+                dst[r * n + c] = dst[(r - 2) * n + c - 1];
+            }
+        }
+        dst
+    }
+
+    fn ref_d135(above_m1: i32, above: &[i32], left: &[i32], n: usize) -> Vec<u8> {
+        let mut border = vec![0i32; 2 * n + 1];
+        for i in 0..n - 2 {
+            border[i] = avg3(left[n - 3 - i], left[n - 2 - i], left[n - 1 - i]);
+        }
+        border[n - 2] = avg3(above_m1, left[0], left[1]);
+        border[n - 1] = avg3(left[0], above_m1, above[0]);
+        border[n] = avg3(above_m1, above[0], above[1]);
+        for i in 0..n - 2 {
+            border[n + 1 + i] = avg3(above[i], above[i + 1], above[i + 2]);
+        }
+        let mut dst = vec![0u8; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                dst[i * n + j] = clip_pixel(border[n - 1 - i + j]);
+            }
+        }
+        dst
+    }
+
+    fn ref_d153(above_m1: i32, above: &[i32], left: &[i32], n: usize) -> Vec<u8> {
+        let mut dst = vec![0u8; n * n];
+        let stride = n;
+        // first column
+        dst[0] = clip_pixel(avg2(above_m1, left[0]));
+        for r in 1..n {
+            dst[r * stride] = clip_pixel(avg2(left[r - 1], left[r]));
+        }
+        // second column
+        dst[1] = clip_pixel(avg3(left[0], above_m1, above[0]));
+        dst[stride + 1] = clip_pixel(avg3(above_m1, left[0], left[1]));
+        for r in 2..n {
+            dst[r * stride + 1] = clip_pixel(avg3(left[r - 2], left[r - 1], left[r]));
+        }
+        // row 0 tail
+        for c in 0..n - 2 {
+            let prev = if c == 0 { above_m1 } else { above[c - 1] };
+            dst[2 + c] = clip_pixel(avg3(prev, above[c], above[c + 1]));
+        }
+        // interior: one row up, two columns left
+        for r in 1..n {
+            for c in 0..n - 2 {
+                dst[r * stride + 2 + c] = dst[(r - 1) * stride + c];
+            }
+        }
+        dst
+    }
+
+    fn ref_d207(above_m1: i32, above: &[i32], left: &[i32], n: usize) -> Vec<u8> {
+        let _ = (above_m1, above);
+        let mut dst = vec![0u8; n * n];
+        let stride = n;
+        // first column
+        for r in 0..n - 1 {
+            dst[r * stride] = clip_pixel(avg2(left[r], left[r + 1]));
+        }
+        dst[(n - 1) * stride] = left[n - 1] as u8;
+        // second column
+        for r in 0..n - 2 {
+            dst[r * stride + 1] = clip_pixel(avg3(left[r], left[r + 1], left[r + 2]));
+        }
+        dst[(n - 2) * stride + 1] = clip_pixel(avg3(left[n - 2], left[n - 1], left[n - 1]));
+        dst[(n - 1) * stride + 1] = left[n - 1] as u8;
+        // rest of last row
+        for c in 0..n - 2 {
+            dst[(n - 1) * stride + 2 + c] = left[n - 1] as u8;
+        }
+        // interior: one row below, two columns left, walking rows bottom-up
+        for r in (0..n - 1).rev() {
+            for c in 0..n - 2 {
+                dst[r * stride + 2 + c] = dst[(r + 1) * stride + c];
+            }
+        }
+        dst
+    }
+
+    fn ref_d63(above_m1: i32, above: &[i32], _left: &[i32], n: usize) -> Vec<u8> {
+        let _ = above_m1;
+        let mut dst = vec![0u8; n * n];
+        for c in 0..n {
+            dst[c] = clip_pixel(avg2(above[c], above[c + 1]));
+            dst[n + c] = clip_pixel(avg3(above[c], above[c + 1], above[c + 2]));
+        }
+        let mut r = 2;
+        let mut size = n - 2;
+        while r < n {
+            for c in 0..size {
+                dst[r * n + c] = dst[(r >> 1) + c];
+            }
+            for c in size..n {
+                dst[r * n + c] = above[n - 1] as u8;
+            }
+            for c in 0..size {
+                dst[(r + 1) * n + c] = dst[n + (r >> 1) + c];
+            }
+            for c in size..n {
+                dst[(r + 1) * n + c] = above[n - 1] as u8;
+            }
+            r += 2;
+            size -= 1;
+        }
+        dst
+    }
+
+    fn run_ours(mode: usize, n: usize) -> Vec<u8> {
+        let edges = test_edges(n);
+        let mut dst = vec![0u8; 96 * 96];
+        // pre-fill with a sentinel so unwritten samples fail the comparison
+        for slot in dst.iter_mut() {
+            *slot = 0xAA;
+        }
+        intra_predict(mode, &edges, &mut dst, 8 * 96 + 8, 96);
+        let mut out = vec![0u8; n * n];
+        for r in 0..n {
+            for c in 0..n {
+                out[r * n + c] = dst[(8 + r) * 96 + 8 + c];
+            }
+        }
+        out
+    }
+
+    fn edges_to_ref(edges: &IntraEdges) -> (i32, Vec<i32>, Vec<i32>) {
+        // top-down left for the reference transcriptions
+        let left_td: Vec<i32> = (0..edges.n)
+            .map(|r| edges.left[edges.n - 1 - r] as i32)
+            .collect();
+        let above: Vec<i32> = (0..edges.n + 2).map(|c| edges.top[c + 1] as i32).collect();
+        (edges.top[0] as i32, above, left_td)
+    }
+
+    /// (our mode constant, reference transcription)
+    type DiagCase = (usize, fn(i32, &[i32], &[i32], usize) -> Vec<u8>);
+
+    #[test]
+    fn diagonal_predictors_generic_sizes_match_the_reference() {
+        let cases: [DiagCase; 6] = [
+            (DIAG_DOWN_LEFT_PRED, ref_d45),
+            (VERT_RIGHT_PRED, ref_d117),
+            (DIAG_DOWN_RIGHT_PRED, ref_d135),
+            (HOR_DOWN_PRED, ref_d153),
+            (VERT_LEFT_PRED, ref_d207),
+            (HOR_UP_PRED, ref_d63),
+        ];
+        for (mode, model) in cases {
+            for n in [8usize, 16, 32] {
+                let edges = test_edges(n);
+                let (above_m1, above, left_td) = edges_to_ref(&edges);
+                let want = model(above_m1, &above, &left_td, n);
+                let got = run_ours(mode, n);
+                assert_eq!(
+                    got, want,
+                    "mode {mode} n={n}: generic path diverges from the reference transcription"
+                );
+            }
+        }
+    }
+
+    /// The D153 bug that corrupted real content at frame 128: the interior
+    /// shift loop must write every row 1..n-1 (it wrote rows 2..n, leaving
+    /// row 1's tail as stale zeros and bleeding one row past the block).
+    #[test]
+    fn d153_generic_row1_is_derived_from_row0() {
+        let n = 8;
+        let edges = test_edges(n);
+        let mut dst = vec![0u8; 32 * 32];
+        for slot in dst.iter_mut() {
+            *slot = 0xAA;
+        }
+        intra_predict(HOR_DOWN_PRED, &edges, &mut dst, 8 * 32 + 8, 32);
+        // row 1, cols 2..n == row 0, cols 0..n-2
+        for c in 0..n - 2 {
+            assert_eq!(
+                dst[8 * 32 + 8 + 32 + 2 + c],
+                dst[8 * 32 + 8 + c],
+                "D153 row 1 col {}: not the row-0 shift",
+                2 + c
+            );
+        }
+        // and nothing bled below the block (row n must stay sentinel)
+        for c in 0..n {
+            assert_eq!(dst[8 * 32 + 8 + n * 32 + c], 0xAA);
+        }
     }
 }

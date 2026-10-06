@@ -19,9 +19,16 @@ rayon = "1.10"
 [dependencies]
 libfuzzer-sys = "0.4"
 tpt-kinetix-av1 = { path = ".." }
+tpt-kinetix-core = { path = "../../tpt-kinetix-core" }
 
 [[bin]]
 name = "fuzz_obu_parse"
 path = "fuzz_targets/fuzz_obu_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_av1_frame"
+path = "fuzz_targets/fuzz_av1_frame.rs"
 test = false
 doc = false

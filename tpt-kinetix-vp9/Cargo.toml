@@ -13,6 +13,7 @@ readme = "README.md"
 documentation = "https://docs.rs/tpt-kinetix-vp9"
 
 [dependencies]
+rayon = { workspace = true }
 tpt-kinetix-core = { path = "../tpt-kinetix-core" }
 thiserror = "2"
 

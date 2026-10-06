@@ -97,6 +97,31 @@ enum Commands {
         /// they publish to `rtmp://host:port/live/<key>` and play at `/<key>/master.m3u8`.
         #[arg(long)]
         rtmp_port: Option<u16>,
+        /// Require this token from HTTP publishers (`Authorization: Bearer <t>` or `?token=<t>`).
+        #[arg(long)]
+        publish_token: Option<String>,
+        /// Drop an HTTP publisher that sends nothing for this many seconds.
+        #[arg(long)]
+        idle_timeout: Option<f64>,
+        /// Refuse a publish when this many streams are already live.
+        #[arg(long)]
+        max_streams: Option<usize>,
+        /// Abort a publish whose sustained bitrate exceeds this many kbit/s.
+        #[arg(long)]
+        max_bitrate_kbps: Option<u64>,
+        /// Refuse a second publisher on a key that is already live (default: replace it).
+        #[arg(long)]
+        reject_concurrent: bool,
+        /// Record every publish under this directory; the recording plays at
+        /// `/<key>/dvr/master.m3u8` during and after the publish.
+        #[arg(long)]
+        record_dir: Option<std::path::PathBuf>,
+        /// Rolling DVR depth in seconds: older recorded segments are deleted (default: keep all).
+        #[arg(long, requires = "record_dir")]
+        record_depth_secs: Option<f64>,
+        /// Recorded generations kept per stream key (default: keep all).
+        #[arg(long, requires = "record_dir")]
+        keep_generations: Option<usize>,
     },
     /// Serve an MP4 as HLS and DASH, packaged just in time (nothing is pre-processed).
     Serve {
@@ -195,6 +220,14 @@ async fn main() -> Result<()> {
             part_seconds,
             public,
             rtmp_port,
+            publish_token,
+            idle_timeout,
+            max_streams,
+            max_bitrate_kbps,
+            reject_concurrent,
+            record_dir,
+            record_depth_secs,
+            keep_generations,
         } => {
             let host = if public { "0.0.0.0" } else { "127.0.0.1" };
             println!(
@@ -204,12 +237,33 @@ async fn main() -> Result<()> {
                 segment_seconds,
                 window,
                 part_seconds: (part_seconds > 0.0).then_some(part_seconds),
+            })
+            .with_policy(tpt_kinetix_stream::IngestPolicy {
+                token: publish_token,
+                idle_timeout: idle_timeout.map(std::time::Duration::from_secs_f64),
+                max_streams,
+                max_bitrate_bps: max_bitrate_kbps.map(|k| k * 1000),
+                reject_concurrent,
+                ..Default::default()
             });
+            let server = match record_dir {
+                Some(dir) => {
+                    println!("  record : {} (play at /<key>/dvr/master.m3u8)", dir.display());
+                    server.with_recording_limits(
+                        dir,
+                        tpt_kinetix_stream::RecordingLimits {
+                            max_duration: record_depth_secs.map(std::time::Duration::from_secs_f64),
+                            keep_generations,
+                        },
+                    )
+                }
+                None => server,
+            };
             if let Some(rtmp) = rtmp_port {
                 println!(
                     "  rtmp   : rtmp://{host}:{rtmp}/live/<key> (Enhanced RTMP: AV1/VP9 + Opus)"
                 );
-                let rtmp_server = server.rtmp_server(&format!("{host}:{rtmp}"));
+                let rtmp_server = server.rtmp_server(&format!("{host}:{rtmp}"), None);
                 tokio::spawn(async move {
                     if let Err(e) = rtmp_server.run().await {
                         eprintln!("RTMP server stopped: {e}");
@@ -1000,8 +1054,11 @@ fn handle_rtmp_event(
     use tpt_kinetix_stream::rtmp::server::RtmpMediaEvent;
 
     match event {
-        RtmpMediaEvent::PublishStart { stream_key } => {
-            tracing::info!(stream_key, "RTMP publish started");
+        RtmpMediaEvent::PublishStart {
+            stream_key,
+            capabilities,
+        } => {
+            tracing::info!(stream_key, ?capabilities, "RTMP publish started");
         }
         RtmpMediaEvent::Video { timestamp, tag } => {
             if tag.is_sequence_header() {
@@ -1031,6 +1088,16 @@ fn handle_rtmp_event(
                 is_sequence_header = tag.is_sequence_header(),
                 "received audio (not yet muxed to HLS)"
             );
+        }
+        RtmpMediaEvent::Hdr { timestamp, hdr } => {
+            tracing::debug!(
+                timestamp = *timestamp,
+                bytes = hdr.raw.len(),
+                "received HDR metadata (not muxed to HLS)"
+            );
+        }
+        RtmpMediaEvent::Multitrack { track_number } => {
+            tracing::debug!(track_number, "RTMP multitrack select");
         }
         RtmpMediaEvent::PublishStop => {
             tracing::info!("RTMP publish stopped; flushing remaining HLS segments");

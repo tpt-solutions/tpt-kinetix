@@ -19,7 +19,13 @@ pub struct HandshakeState {
 /// 2. Read C1 (1536 bytes).
 /// 3. Write S0 (`0x03`) + S1 (1536 pseudo-random bytes) + S2 (echo of C1).
 /// 4. Read C2 (1536 bytes) — echo not validated in this implementation.
-pub async fn perform_server_handshake(stream: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
+///
+/// Generic over the transport so the same handshake runs over plain TCP and
+/// over a TLS-terminated (RTMPS) stream.
+pub async fn perform_server_handshake<S>(stream: &mut S) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // ── C0 ──────────────────────────────────────────────────────────────────
     let mut c0 = [0u8; 1];
     stream.read_exact(&mut c0).await?;

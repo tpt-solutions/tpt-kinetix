@@ -900,3 +900,64 @@ instrumented libvpx tree at /tmp/libvpx has all the dumps; rebuild recipe in
 this session). Watch out: our stderr frame markers print AFTER each frame's
 decode, libvpx's FRAME markers print BEFORE - align the windows or the
 diff lies to you.
+
+## CLOSED 2026-10-06: the div128 "loop-filter edge divergence" was neither loop filter nor edge — n>4 D153/D117 intra predictors
+
+The last open VP9 decode gap (frame 128+ of the 300-frame perf clip; the
+`#[ignore]`d 640x360/1080p real-content cases) is closed with **two more real
+decoder bugs**, and one important negative result about the debugging
+tooling itself:
+
+**The instrumented libvpx oracle was itself corrupted.** The dump
+instrumentation a previous session added to `filter_selectively_horiz` in
+`/tmp/libvpx/vp9/common/vp9_loopfilter.c` contained a dangling-`else`:
+`if (mask_4x4_int & 1) if (pt_ops()) {IN dump}` left the *kernel call* and the
+OUT dump unconditional and bound `else if (mask_4x4_int & 2)` to
+`if (pt_ops())` — so the oracle filtered 4x4-int edges the real libvpx skips
+(389 extra ops on the solo keyframe) and skipped others. That is where the
+oracle's documented "9-sample quirk vs ffmpeg" came from. An oracle that
+disagrees with the reference is not an oracle: the div128 README's
+"per-edge level/skip-rule difference" isolation, and the
+"skip-8x8/4x4-partitioned boundary" framing in the ignored tests, were both
+artifacts of it. The oracle is repaired now (byte-exact vs ffmpeg on the
+fixture; the fixed `filter_selectively_horiz` is in the tree, see the rebuilt
+README recipe) — **always re-verify the oracle against the ffmpeg reference
+before trusting its dumps**, and brace every single statement you wrap.
+
+**With a clean oracle the loop filter exonerated in minutes**: the per-SB op
+streams (offsets, widths, levels — dumps now carry plane-relative offsets)
+are IDENTICAL for all 2724 filter ops, every comparable vertical kernel's
+in/out windows match, and with both LFs disabled the frames still diverge at
+(240, 208). The difference is in **reconstruction**. Walking the intra
+predictions block-by-block (oracle `PRED` vs our `KEDGE`+`PREDP`, first-8
+samples keyed by pixel position; note our PREDP prints derived DC variants
+10-14 where libvpx prints base DC=0, and the oracle's dst[4..7] are garbage
+for 4x4 blocks) pinned the first divergence to the D153 8x8 block at
+(232, 208): its prediction wrote a zero staircase into rows 1-3.
+
+**Two real bugs in `predict.rs`'s n>4 generic branches** (the 4x4 unrolled
+branches were always correct — which is exactly why all 13 corpus clips stayed
+byte-exact; the corpus's encoder envelope never selects D153/D117 at 8x8+):
+
+1. **D153 (`HOR_DOWN_PRED`) generic path**: the five left-column formulas
+   indexed the left edge bottom-up (`l(n-1-r)` where the reference
+   `vpx_d153_predictor` is top-down `left[r-1]`/`left[r]`), and the interior
+   shift loop wrote rows `2..n` instead of `1..n-1` — row 1's tail kept stale
+   zeros (the smear) and the loop bled one row past the block into the next
+   block row.
+2. **D117 (`VERT_RIGHT_PRED`) generic path**: same reversed-left-indexing in
+   three formulas (row-1 col 0, row-2 col 0, and the col-0 AVG3 loop), wrong
+   values without zeros, so it degrades silently.
+
+The other four diagonals (D45/D135/D63/D207 generic paths) were audited
+against `vpx_dsp/intrapred.c` line-by-line and are correct. Guarded by
+`predict.rs::tests::diagonal_predictors_generic_sizes_match_the_reference` —
+transcriptions of all six C predictors against pseudo-random edges at
+n=8/16/32 (flat edges would mask index-order bugs; the corpus cannot reach
+these paths at all). Also added `conformance_vp9_320x240_300frame`: the
+original perf-clip envelope (300 frames), which is what finally exposes
+mid-stream D153 8x8 blocks; un-ignored the 640x360 and 1080p real-content
+cases (byte-exact, 99 dB). Evidence: the 300-frame clip decodes byte-exact on
+every frame; `keyframe128.ivf` byte-exact; 21/21 conformance cases; 20k-case
+release proptest sweep. **VP9 decode has no known remaining gap.**
+`capabilities().pixel_exact` stays `true`.

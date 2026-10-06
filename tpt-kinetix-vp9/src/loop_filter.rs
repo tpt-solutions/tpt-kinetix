@@ -866,8 +866,42 @@ pub fn loopfilter_sb(
     sb_row: usize,
     sb_col: usize,
 ) {
-    let mi_rows = frame.mi_rows;
-    let mi_cols = frame.mi_cols;
+    loopfilter_sb_luma(
+        &mut frame.y,
+        frame.stride,
+        frame.mi_rows,
+        frame.mi_cols,
+        sf,
+        luts,
+        sb_row,
+        sb_col,
+    );
+    loopfilter_sb_chroma(
+        &mut frame.u,
+        &mut frame.v,
+        frame.stride,
+        frame.mi_rows,
+        frame.mi_cols,
+        sf,
+        luts,
+        sb_row,
+        sb_col,
+    );
+}
+
+/// The luma half of [`loopfilter_sb`] (`vp9_filter_block_plane_ss00`).
+/// Plane-disjoint from [`loopfilter_sb_chroma`], so the two halves can run
+/// concurrently; the per-SB raster order within the plane is unchanged.
+pub fn loopfilter_sb_luma(
+    y: &mut [u8],
+    stride: usize,
+    mi_rows: usize,
+    mi_cols: usize,
+    sf: &SbFilter,
+    luts: &FilterLut,
+    sb_row: usize,
+    sb_col: usize,
+) {
     if crate::dbg_env::var_os("TPT_VP9_TRACE").is_some() {
         let nz = sf.unit.iter().filter(|u| u.lvl != 0).count();
         let valid = sf.unit.iter().filter(|u| u.bs != 255).count();
@@ -911,9 +945,44 @@ pub fn loopfilter_sb(
             lfm.above_y[2]
         );
     }
+    luma_pass(y, stride, mi_rows, mi_cols, &lfm, luts, sb_row, sb_col);
+}
 
-    // ---- luma (reference ss00) ----
-    let stride = frame.stride;
+/// The chroma half of [`loopfilter_sb`] (both 4:2:0 planes,
+/// `vp9_filter_block_plane_ss11`). Reads only the chroma planes and the
+/// per-SB mask grid — never luma pixels — so it is plane-disjoint from
+/// [`loopfilter_sb_luma`].
+pub fn loopfilter_sb_chroma(
+    u: &mut [u8],
+    v: &mut [u8],
+    stride: usize,
+    mi_rows: usize,
+    mi_cols: usize,
+    sf: &SbFilter,
+    luts: &FilterLut,
+    sb_row: usize,
+    sb_col: usize,
+) {
+    let mut lfm = sf.clone();
+    setup_mask(
+        &mut lfm,
+        (mi_rows - sb_row * 8).min(8),
+        (mi_cols - sb_col * 8).min(8),
+    );
+    adjust_mask(&mut lfm, sb_row * 8, sb_col * 8, mi_rows, mi_cols);
+    chroma_pass(u, v, stride, mi_rows, mi_cols, &lfm, luts, sb_row, sb_col);
+}
+
+fn luma_pass(
+    y: &mut [u8],
+    stride: usize,
+    mi_rows: usize,
+    _mi_cols: usize,
+    lfm: &SbFilter,
+    luts: &FilterLut,
+    sb_row: usize,
+    sb_col: usize,
+) {
     let sb_px = sb_col * 64;
     let sb_py = sb_row * 64;
     {
@@ -926,7 +995,6 @@ pub fn loopfilter_sb(
         let mut r = 0usize;
         while r < 8 && sb_row * 8 + r < mi_rows {
             let lfl: Vec<u8> = lfm.lfl_y[(r << 3)..((r << 3) + 16)].to_vec();
-            let y = &mut frame.y;
             filter_selectively_vert_row2(
                 y,
                 stride,
@@ -981,7 +1049,6 @@ pub fn loopfilter_sb(
                 );
             }
             let lfl: Vec<u8> = lfm.lfl_y[(r << 3)..((r << 3) + 8)].to_vec();
-            let y = &mut frame.y;
             filter_selectively_horiz(
                 y,
                 stride,
@@ -1001,8 +1068,22 @@ pub fn loopfilter_sb(
             r += 1;
         }
     }
+}
 
+fn chroma_pass(
+    u: &mut [u8],
+    v: &mut [u8],
+    stride: usize,
+    mi_rows: usize,
+    _mi_cols: usize,
+    lfm: &SbFilter,
+    luts: &FilterLut,
+    sb_row: usize,
+    sb_col: usize,
+) {
     // ---- chroma 4:2:0 (reference ss11) ----
+    let sb_px = sb_col * 64;
+    let sb_py = sb_row * 64;
     let ustride = stride >> 1;
     for chroma in 1..=2 {
         let sb_px_uv = sb_px >> 1;
@@ -1022,11 +1103,7 @@ pub fn loopfilter_sb(
                 lfl_uv[((r + 2) << 1) + c] = lfm.lfl_y[((r + 2) << 3) + (c << 1)];
             }
             {
-                let plane = if chroma == 1 {
-                    &mut frame.u
-                } else {
-                    &mut frame.v
-                };
+                let plane: &mut [u8] = if chroma == 1 { u } else { v };
                 filter_selectively_vert_row2(
                     plane,
                     ustride,
@@ -1064,11 +1141,7 @@ pub fn loopfilter_sb(
                 (m16 & 0xf, m8 & 0xf, m4 & 0xf)
             };
             let lfl_uv_r: Vec<u8> = lfl_uv[(r << 1)..((r << 1) + 4)].to_vec();
-            let plane = if chroma == 1 {
-                &mut frame.u
-            } else {
-                &mut frame.v
-            };
+            let plane: &mut [u8] = if chroma == 1 { u } else { v };
             filter_selectively_horiz(
                 plane,
                 ustride,

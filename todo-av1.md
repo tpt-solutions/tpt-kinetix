@@ -15467,3 +15467,46 @@ green (173 lib + 12 integration, including the 98s `libaom_crosscheck`). Not re-
 against a dav1d sweep in this session -- the three fixes are reference-transcription
 corrections, and the existing bit-exactness corpus already passes with them applied.
 
+
+## Session 2026-10-06 — the correctness column is CLOSED; re-verified end to end, plus a full-decode fuzz target
+
+Nothing in this session changed decoder logic. It re-measured every open AV1
+claim against the actual tree and found all of them already fixed by the
+#11-#13 work; the record below is the closure evidence, measured today, not
+carried forward from prose:
+
+- **PSNR corpus 6/6 at 99.00 dB (byte-exact)** — including `testsrc2_320x180`
+  (the long-standing 24.7/24.0/16.9 dB "pixel-reconstruction bug" that headed
+  the old priority list) and `mandelbrot_128x96` (the directional-prediction
+  edge-filter item). Both were closed by the #11-#13 fix batches; the
+  todo.md reconciliation predating them was stale.
+- **Official FATE corpus 204/204 frames bit-exact vs dav1d** with the repaired
+  harness (`decode_av1_with_dav1d_auto`): `film_grain` 10/10 (10-bit) and
+  `switch_frame` 32/32 (including the two resolution-switched frames) — the
+  two cases #13b recorded as harness bugs are fixed and asserted, not excused.
+  CI fetches the samples (`tools/fetch-av1-fate.sh` → `fixtures/av1-fate`) and
+  generates the conformance report on every run.
+- **Randomized inter sweeps / 27-case libaom+SVT crosscheck green** (185 lib
+  tests + all integration; 117 s crosscheck), covering 4:2:2/4:4:4 8/10/12-bit,
+  superres (fixed denominator + adaptive, via SVT), IntraBC, global motion,
+  compound MV, quantizer matrices, segmentation, lossless, monochrome, film
+  grain on inter frames, and odd-dimension film grain (the last "skipped by
+  design" note in #13b is superseded: the skip was removed and
+  `libaom_film_grain_on_odd_dimensions_matches_libdav1d` pins it).
+- **`capabilities().pixel_exact == true`** — already flipped in the tree,
+  matching AGENTS.md.
+
+New hardening (the one real gap left in the AV1 column): the crate's fuzz
+coverage was parser-only (`fuzz_obu_parse`). Added
+**`fuzz_av1_frame`** — arbitrary bytes through `Av1Decoder::decode` on a
+*persistent* decoder (thread-local), so temporal state (reference slots, CDF
+carry-over) is exercised the way a real demuxer exercises it, complementing
+the stateless parser target. Wired into `just fuzz-build`, CI's `fuzz-check`
+job, and the nightly `fuzz.yml` matrix. Local nightly still lacks the
+libFuzzer/ASAN runtime for instrumented runs, but the uninstrumented binary
+links and replays fine: **1020 inputs (all 7 FATE streams' frame payloads +
+truncation/bit-flip mutations) replayed with zero panics**. A crash found
+anywhere goes to `fuzz/corpus/fuzz_av1_frame/` per the AGENTS.md convention.
+
+Remaining AV1 work is perf (already in flight: AVX2 MC/CDEF/SgrProj/warp
+cores, sampling profiler) and coverage widening, not correctness.

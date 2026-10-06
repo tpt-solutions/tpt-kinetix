@@ -33,8 +33,11 @@ use tpt_kinetix_stream::rtmp::{RtmpServer, RtmpConfig, RtmpMediaEvent};
 async fn main() -> anyhow::Result<()> {
     let server = RtmpServer::new(RtmpConfig::default()) // binds 0.0.0.0:1935
         .with_handler(|event| match event {
-            RtmpMediaEvent::PublishStart { stream_key } => {
-                println!("publish started: {stream_key}");
+            RtmpMediaEvent::PublishStart {
+                stream_key,
+                capabilities,
+            } => {
+                println!("publish started: {stream_key} ({capabilities:?})");
             }
             RtmpMediaEvent::Video { timestamp, tag } => {
                 // Forward `tag.data` (AVCC NALUs) into tpt-kinetix-pipeline here.
@@ -42,6 +45,12 @@ async fn main() -> anyhow::Result<()> {
             }
             RtmpMediaEvent::Audio { timestamp, tag } => {
                 println!("audio @ {timestamp}: {} bytes", tag.data.len());
+            }
+            RtmpMediaEvent::Hdr { timestamp, hdr } => {
+                println!("HDR metadata @ {timestamp}: {} bytes", hdr.raw.len());
+            }
+            RtmpMediaEvent::Multitrack { track_number } => {
+                println!("multitrack select: {track_number}");
             }
             RtmpMediaEvent::PublishStop => println!("publish stopped"),
         });

@@ -155,7 +155,14 @@ Correctness gaps the verify-before-timing gate surfaced (each UNVERIFIED row in
   single sample, (231, 2) on row 0, where OUR filter modified the flat-145
   skip block by -1 and libvpx left it. The edge separates a **skip** 8x8 DC
   block (mi 0,28) from a 4x4-partitioned intra block (mi 0,29, D153/TM
-  sub-modes): our LF filters that edge, libvpx does not. VP9 decoder
+  sub-modes): our LF filters that edge, libvpx does not.
+  **CORRECTION 2026-10-06: the whole "VP9 - OPEN" item and both loop-filter
+  hypotheses above were artifacts of a corrupted oracle (a dangling-else in
+  the dump instrumentation made /tmp/libvpx filter edges real libvpx skips).
+  The real bug was the n>4 D153/D117 intra predictors in `predict.rs`; fixed,
+  all clips including the 300-frame envelope decode byte-exact - see the
+  closing note in todo-vp9.md and the rewritten div128 README. VP9 rows no
+  longer need the UNVERIFIED caveat.** VP9 decoder
   allocation-scratch migration (XfmScratch, removing 4 vec allocs + a
   `.to_vec()` per transform block) was also tried and REJECTED the same day:
   tiles 560 us vs a 538-609 us noise band, matching the AV1 precedent. The perf corpus
@@ -849,8 +856,9 @@ path kept as oracle. Commit or stash unrelated working-tree edits before A/B wor
   - [ ] VP9 tile-column threading
 - [ ] 5. Entropy decode: symbol decoder refill, branchless CDF adaptation, coef-context lookups.
 - [ ] 6. Allocation/memory: only if the profiler shows it matters (AV1 evidence says no).
-- [ ] Prerequisite for trustworthy VP9 speed numbers: fix the VP9 loop-filter skip-edge correctness
-  bug (rows read `UNVERIFIED` until then).
+- [x] Prerequisite for trustworthy VP9 speed numbers: the "loop-filter skip-edge correctness
+  bug" turned out to be the n>4 D153/D117 intra predictors (fixed 2026-10-06, see
+  todo-vp9.md); the perf corpus verifies byte-exact again.
 - [ ] Headline metric: refresh `just bench-ffmpeg` ratio vs `-threads 1` ffmpeg after each major step.
 
 Out of scope: H.264, the original codecs, anything that changes decoded output.

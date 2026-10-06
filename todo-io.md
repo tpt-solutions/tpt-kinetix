@@ -40,21 +40,46 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [ ] **WHIP (WebRTC-HTTP ingest)** — browsers publish VP9/AV1 + Opus natively; needs ICE/DTLS/SRTP (large; evaluate a
       memory-safe Rust WebRTC stack vs. scope).
 - [ ] Browser publish via `MediaRecorder` + streaming `fetch` (needs HTTP/2 or WebSocket ingest) and a demo page.
-- [ ] Ingest hardening: auth tokens on `/ingest/<key>`, per-key limits (bitrate, duration, max publishers), idle
-      timeout, backpressure, bounded memory under slow viewers, structured metrics (`/metrics`).
-- [ ] Reconnect/restart handling: publisher drop + resume with `EXT-X-DISCONTINUITY`, config change mid-stream.
-- [ ] Recording / DVR: persist segments, VOD playlist after the publish ends, resume window.
+- [ ] **Ingest hardening** — HTTP ingest DONE 2026-10-06 (`IngestPolicy`, `LiveServer::with_policy`, `policy.rs`; CLI
+      `live --publish-token/--idle-timeout/--max-streams/--max-bitrate-kbps/--reject-concurrent`): bearer/`?token=`
+      auth (global + per-key, constant-time compare) -> 401; idle timeout -> 408; max duration -> 408; max bytes ->
+      413; sustained-bitrate cap (after a 2 s grace) -> 429; max live streams -> 503; optional 409 on a second
+      publisher for a live key; `GET /metrics` (Prometheus text: active publishers, started/refused/cut-off
+      counters, bytes in, playback requests). A cut-off publish still finishes its playlists. Tested over real
+      HTTP in `tests/ingest_policy.rs`. STILL OPEN: apply the same policy to RTMP ingest (only the
+      `publishes_started` counter is wired there), per-key bitrate/duration overrides, bounded memory under
+      slow *viewers* (responses are whole buffers today), auth on `/metrics`.
+- [x] **Reconnect handling (HTTP ingest)** DONE 2026-10-06: a publisher that drops and re-POSTs under the same key with
+      the same codec configuration *resumes* the presentation — `LivePackager::set_tracks` on a finished stream reopens
+      it; segment numbers and the media timeline continue (incoming timestamps are offset to the end of the previous
+      publish), the first new segment is preceded by `EXT-X-DISCONTINUITY`, and `EXT-X-DISCONTINUITY-SEQUENCE`
+      counts discontinuities that slid out of the window. A *changed* configuration (extradata or dimensions —
+      VP9's `vpcC` has no size) starts a fresh presentation, the old one ending with `ENDLIST`. Tests:
+      `tpt-kinetix-package/tests/live.rs` (resume, config change) and `tpt-kinetix-stream/tests/live_webm.rs`
+      (over real HTTP). OPEN: RTMP ingest still replaces on reconnect (`LiveServer::begin`); DASH has no new
+      `Period` (timeline is kept continuous instead); a resumed stream is not marked in `_stats`.
+- [x] **Recording / DVR** DONE 2026-10-06 (`Recorder`, `LiveServer::with_recording`, CLI `live --record-dir`): finished
+      segments are persisted as they complete (`<dir>/<key>/g<N>/{init-T.mp4,seg-T-N.m4s,track-T.m3u8,master.m3u8}`,
+      atomic write-then-rename) and served at `/<key>/dvr/<file>`; the track playlist is `EVENT` while the
+      publish runs and `VOD` + `ENDLIST` after, so a viewer can seek back to the start live or later. A
+      reconnect with the same config extends the same generation (with its discontinuity); a new presentation
+      (config change, RTMP reconnect, server restart) starts generation N+1 so nothing is overwritten. Works for
+      HTTP and RTMP ingest. Test: `live_webm.rs::recording_serves_a_vod_after_the_publish_ends` (tiny live
+      window, full recording, reconnect, ffmpeg decodes the concatenated recording). Retention DONE: `RecordingLimits` (`--record-depth-secs` rolling DVR
+      depth: oldest segments deleted + playlist slides, `--keep-generations` prunes old generations; tested in
+      `recording_depth_and_generations_are_bounded`). OPEN: byte-size cap, DASH static MPD for the recording,
+      listing generations, serving older generations,
+      recording survives restart only as files (no in-memory index rebuilt, so a restarted server serves
+      the newest generation's files but does not extend it).
 - [ ] Multi-rendition ladders (needs transcoding; passthrough only today — separate decision).
 - [x] Opus pre-skip carried end to end: the `dOps` pre-skip becomes `OpusHead` on ingest and `CodecDelay`
       + `SeekPreRoll` on WebM output (measured against ffmpeg: without it the stream starts 7 ms late).
-- [ ] **`DiscardPadding` (end trim) — partially done, one open question.** 2026-10-04: `MkvStream` now parses
-      `DiscardPadding` (0x75A2) and `WebmWriter` re-emits it in a `BlockGroup`, so the trim round-trips
-      (verified: our reader sees the identical value, and the bytes match ffmpeg's). NOTE the value is in
-      *nanoseconds* per the Matroska TimestampScale, not samples — that cost two 1000x bugs. But ffmpeg
-      still decodes the final frame at its full length (803 samples) where it decodes the source as 312,
-      even though **`ffmpeg -c copy` itself preserves 312** — so something else differs and is NOT yet
-      isolated. Measured state: 100/100 video frames and 200/201 audio frames decode identically after
-      a WebM->WebM remux; only the final trimmed frame differs.
+- [x] **`DiscardPadding` (end trim)** DONE 2026-10-06: `MkvStream` parses it and `WebmWriter` re-emits it in a
+      `BlockGroup`; a WebM->WebM remux now decodes frame-identically to the source *including* the final
+      trimmed frame (312 samples). The two causes of the old 803-vs-312 mismatch: `CodecDelay`/`SeekPreRoll`
+      were written inside the `Audio` master instead of `TrackEntry` (ffmpeg saw `initial_padding=0` and
+      shifted every timestamp +7 ms), and `DiscardPadding` is a *signed* int, so a minimal-width unsigned
+      encoding of 13.5e6 ns (`CD FE 60`, top bit set) read back negative. The value is nanoseconds, not samples.
 - [ ] HEVC/H.264/AAC live paths (secondary): FLV legacy RTMP -> the same `LivePackager` (the old TS HLS server stays).
 
 ### B. Packaging (VOD) and edge
@@ -128,9 +153,12 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       comparing a tree leaf against mapped mode ids, sub-8x8 chroma MC sized to the block shape
       instead of one full 4x4, and intra-in-inter sub-8x8 reading four y-mode trees where 8x4/4x8
       read two. All fixed; a 15-case encoder-parameter matrix, ordinary 25-frame clips and the VP9
-      suite decode byte-exact. Four new corpus cases pin the paths (see todo-vp9.md). Remaining:
-      the `fixtures/div128` luma loop-filter edge divergence (300-frame perf clip diverges from
-      frame 128 only) — luma ±1, pre-existing, tracked in `fixtures/div128/README.md`.
+      suite decode byte-exact. Four new corpus cases pin the paths (see todo-vp9.md). The remaining
+      `fixtures/div128` "luma loop-filter edge divergence" (300-frame perf clip diverging from
+      frame 128 only) was CLOSED 2026-10-06: it was the n>4 D153/D117 intra predictors, not the
+      loop filter — all clips now decode byte-exact (see todo-vp9.md and the rewritten div128
+      README, which also documents that the isolation had been misled by a corrupted
+      instrumented oracle).
 
 ### D. Evidence, quality, tooling
 

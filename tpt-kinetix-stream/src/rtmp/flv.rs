@@ -90,6 +90,63 @@ impl AvcPacketType {
     }
 }
 
+/// The Enhanced-RTMP video packet type (low nibble of the ExHeader byte).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExVideoPacketType {
+    /// Codec configuration (sequence header).
+    SequenceStart,
+    /// Coded frames (with composition time for AVC/HEVC).
+    CodedFrames,
+    /// End of sequence.
+    SequenceEnd,
+    /// Coded frames without composition time.
+    CodedFramesX,
+    /// Video metadata (HDR/color info, SEI, ...).
+    Metadata,
+    /// Carries the multitrack number (MPEG-TS style multi-program).
+    Multitrack,
+    /// ModEx (returns a modifier + extended timestamp offset).
+    ModEx,
+    /// Unknown / reserved value.
+    Unknown(u8),
+}
+
+impl ExVideoPacketType {
+    fn from_nibble(n: u8) -> Self {
+        match n {
+            0 => Self::SequenceStart,
+            1 => Self::CodedFrames,
+            2 => Self::SequenceEnd,
+            3 => Self::CodedFramesX,
+            4 => Self::Metadata,
+            5 => Self::Multitrack,
+            6 => Self::ModEx,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// HDR / color metadata carried by an Enhanced-RTMP `Metadata` video packet.
+///
+/// Carries the fields OBS and FFmpeg emit for HDR (color primaries / transfer /
+/// matrix plus mastering-display and content-light-level boxes), in the same
+/// byte layout as the FLV `VideoPacketType.Metadata` payload so downstream
+/// code can forward them into SEI or fMP4 `colr`/`mdcv`/`clli` boxes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HdrMetadata {
+    /// Raw metadata payload bytes (FourCC + packet contents, unparsed boxes).
+    pub raw: Vec<u8>,
+    /// FourCC of the video codec this metadata applies to (`av01`, `hvc1`, ...).
+    pub fourcc: [u8; 4],
+}
+
+/// A parsed Enhanced-RTMP multitrack header (packet type 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultitrackInfo {
+    /// Track number carried after the FourCC.
+    pub track_number: u8,
+}
+
 /// A parsed FLV video payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlvVideoTag {
@@ -101,6 +158,13 @@ pub struct FlvVideoTag {
     pub avc_packet_type: AvcPacketType,
     /// Composition time offset (signed 24-bit), in milliseconds.
     pub composition_time: i32,
+    /// Enhanced-RTMP packet kind (SequenceStart / CodedFrames / Metadata / ...).
+    /// For classic (non-enhanced) tags this mirrors `avc_packet_type`.
+    pub packet_kind: ExVideoPacketType,
+    /// HDR/color metadata when `packet_kind == Metadata`.
+    pub hdr: Option<HdrMetadata>,
+    /// Multitrack number when `packet_kind == Multitrack`.
+    pub multitrack: Option<MultitrackInfo>,
     /// The codec payload: an AVCDecoderConfigurationRecord when
     /// `avc_packet_type == SequenceHeader`, otherwise AVCC NAL data.
     pub data: Vec<u8>,
@@ -142,6 +206,9 @@ fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
         codec,
         avc_packet_type: AvcPacketType::Unknown(packet_type),
         composition_time: 0,
+        packet_kind: ExVideoPacketType::from_nibble(packet_type),
+        hdr: None,
+        multitrack: None,
         data: Vec::new(),
     };
     // A video-info frame carries a command byte, not coded data.
@@ -166,9 +233,32 @@ fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
         };
         body = &body[3..];
     }
+    // Metadata packets carry HDR/color info, not coded frames: surface the raw
+    // payload so the ingest layer can forward it (SEI / colr / mdcv / clli).
+    // (Checked before the non-media early return: metadata/multitrack arrive
+    // as `AvcPacketType::Unknown`, which is exactly how they are told apart.)
+    if tag.packet_kind == ExVideoPacketType::Metadata {
+        let fourcc: [u8; 4] = payload[1..5].try_into().unwrap_or([0; 4]);
+        tag.hdr = Some(HdrMetadata {
+            raw: body.to_vec(),
+            fourcc,
+        });
+        tag.data = body.to_vec();
+        return Ok(tag);
+    }
+    // Multitrack packets select a track number; the payload after the track
+    // byte is empty (the actual frames follow as CodedFrames).
+    if tag.packet_kind == ExVideoPacketType::Multitrack {
+        let track_number = body.first().copied().unwrap_or(0);
+        tag.multitrack = Some(MultitrackInfo { track_number });
+        tag.data = Vec::new();
+        return Ok(tag);
+    }
     if matches!(tag.avc_packet_type, AvcPacketType::Unknown(_)) {
         return Ok(tag);
     }
+    // ModEx carries a modifier + extended timestamp offset; treat like
+    // CodedFramesX payload (no cts) and keep the raw bytes.
     tag.data = body.to_vec();
     Ok(tag)
 }
@@ -197,11 +287,20 @@ pub fn parse_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
             } else {
                 raw
             };
+            let packet_kind = match avc_packet_type {
+                AvcPacketType::SequenceHeader => ExVideoPacketType::SequenceStart,
+                AvcPacketType::Nalu => ExVideoPacketType::CodedFrames,
+                AvcPacketType::EndOfSequence => ExVideoPacketType::SequenceEnd,
+                AvcPacketType::Unknown(n) => ExVideoPacketType::Unknown(n),
+            };
             Ok(FlvVideoTag {
                 frame_type,
                 codec,
                 avc_packet_type,
                 composition_time,
+                packet_kind,
+                hdr: None,
+                multitrack: None,
                 data: payload[5..].to_vec(),
             })
         }
@@ -210,6 +309,9 @@ pub fn parse_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
             codec,
             avc_packet_type: AvcPacketType::Unknown(0),
             composition_time: 0,
+            packet_kind: ExVideoPacketType::CodedFramesX,
+            hdr: None,
+            multitrack: None,
             data: payload[1..].to_vec(),
         }),
     }
@@ -378,9 +480,14 @@ mod tests {
             (t.codec, t.composition_time, t.data),
             (FlvVideoCodec::Hevc, 40, vec![9])
         );
-        // Metadata / multitrack packets and truncation are not media.
+        // Metadata packets surface HDR info; multitrack packets select a track.
         let t = parse_video_tag(&[0x80 | 0x10 | 4, b'a', b'v', b'0', b'1', 7]).unwrap();
-        assert!(t.data.is_empty() && !t.is_sequence_header());
+        assert_eq!(t.packet_kind, ExVideoPacketType::Metadata);
+        assert!(t.hdr.is_some() && !t.is_sequence_header());
+        assert_eq!(t.hdr.as_ref().unwrap().fourcc, *b"av01");
+        let t = parse_video_tag(&[0x80 | 0x10 | 5, b'a', b'v', b'0', b'1', 2]).unwrap();
+        assert_eq!(t.packet_kind, ExVideoPacketType::Multitrack);
+        assert_eq!(t.multitrack, Some(MultitrackInfo { track_number: 2 }));
         assert!(parse_video_tag(&[0x81, b'a', b'v']).is_err());
     }
 

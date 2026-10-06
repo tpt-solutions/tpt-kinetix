@@ -38,6 +38,8 @@ struct Queued {
 pub struct RtmpLiveSession {
     server: LiveServer,
     live: Option<Shared>,
+    /// The stream key being published, for recording.
+    key: String,
     video: Option<StreamInfo>,
     audio: Option<StreamInfo>,
     /// VP9 needs a key frame to learn the picture size (and, without a
@@ -56,6 +58,7 @@ impl RtmpLiveSession {
         Self {
             server,
             live: None,
+            key: String::new(),
             video: None,
             audio: None,
             vp9_needs_frame: false,
@@ -75,12 +78,37 @@ impl RtmpLiveSession {
     /// Handles one event from the connection.
     pub fn on_event(&mut self, event: &RtmpMediaEvent) {
         let ts = match event {
-            RtmpMediaEvent::PublishStart { stream_key } => {
+            RtmpMediaEvent::PublishStart {
+                stream_key,
+                capabilities,
+            } => {
+                tracing::info!(
+                    four_ccs = ?capabilities.video_four_ccs
+                        .iter().map(|c| String::from_utf8_lossy(c).into_owned())
+                        .collect::<Vec<_>>(),
+                    multitrack = capabilities.multitrack,
+                    "RTMP capabilities"
+                );
                 self.start(stream_key);
                 return;
             }
             RtmpMediaEvent::PublishStop => {
                 self.stop();
+                return;
+            }
+            // HDR metadata is informational for ingest: log it once per
+            // publish so an HDR OBS feed is visible, but do not feed it to
+            // the packager as coded frames.
+            RtmpMediaEvent::Hdr { hdr, .. } => {
+                if !self.warned_codec {
+                    tracing::info!(bytes = hdr.raw.len(), "RTMP HDR metadata");
+                }
+                return;
+            }
+            // Multitrack selection is accepted and logged; the live packager
+            // carries a single video track, so frames keep flowing there.
+            RtmpMediaEvent::Multitrack { track_number } => {
+                tracing::info!(track_number, "RTMP multitrack select");
                 return;
             }
             RtmpMediaEvent::Video { timestamp, tag } => {
@@ -126,6 +154,7 @@ impl RtmpLiveSession {
         let live = self.server.begin(key);
         *self = Self {
             live,
+            key: key.to_string(),
             ..Self::new(self.server.clone())
         };
     }
@@ -137,6 +166,7 @@ impl RtmpLiveSession {
         }
         if let Some(live) = self.live.take() {
             let _ = live.lock().unwrap().finish();
+            self.server.record(&self.key, &live, true);
             tracing::info!("RTMP publish finished");
         }
     }
@@ -255,6 +285,7 @@ impl RtmpLiveSession {
             .lock()
             .unwrap()
             .push(track, q.pts_ms, q.key, q.data, None);
+        self.server.record(&self.key, live, false);
         if let Err(e) = result {
             tracing::warn!(error = %e, "RTMP frame rejected; ending the publish");
             self.live = None;
@@ -266,11 +297,17 @@ impl LiveServer {
     /// An RTMP server whose publishers appear as live presentations of this
     /// server, under the stream key they publish to.
     ///
-    /// Enhanced RTMP: AV1 / VP9 video and Opus audio.
-    pub fn rtmp_server(&self, bind_addr: &str) -> crate::RtmpServer {
+    /// Enhanced RTMP: AV1 / VP9 video and Opus audio. Pass `tls` to terminate
+    /// RTMPS (`rtmps://`, requires the `rtmps` feature); `None` is plain RTMP.
+    pub fn rtmp_server(
+        &self,
+        bind_addr: &str,
+        tls: Option<crate::rtmp::RtmpsIdentity>,
+    ) -> crate::RtmpServer {
         let server = self.clone();
         crate::RtmpServer::new(crate::RtmpConfig {
             bind_addr: bind_addr.to_string(),
+            tls,
         })
         .with_session_factory(move || RtmpLiveSession::new(server.clone()).into_sink())
     }

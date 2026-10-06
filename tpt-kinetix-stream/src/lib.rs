@@ -8,6 +8,8 @@
 
 pub mod hls;
 pub mod live;
+pub mod policy;
+pub mod record;
 pub mod rtmp;
 pub mod rtmp_live;
 
@@ -16,5 +18,7 @@ pub use hls::{
     server::{HlsConfig, HlsPackager},
 };
 pub use live::LiveServer;
+pub use policy::IngestPolicy;
+pub use record::{Recorder, RecordingLimits};
 pub use rtmp::server::{RtmpConfig, RtmpServer};
 pub use rtmp_live::RtmpLiveSession;

@@ -66,6 +66,9 @@ function runOne(kind, url) {
       `${good ? "PASS" : "FAIL"} ${kind}: played to ${r.currentTime && r.currentTime.toFixed(2)}s of ` +
         `${r.duration && r.duration.toFixed ? r.duration.toFixed(2) : r.duration}s, ` +
         `${r.videoWidth}x${r.videoHeight}, decoded ${r.decodedFrames} frames (${r.droppedFrames} dropped), ` +
+        (r.latency !== null && r.latency !== undefined
+          ? `latency ${Number(r.latency).toFixed(2)}s (live edge ${r.liveSyncPosition}), `
+          : `latency n/a (live edge ${r.liveSyncPosition}), `) +
         `errors: ${JSON.stringify(r.errors)}`
     );
     if (!good) failed = true;

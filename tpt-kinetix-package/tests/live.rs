@@ -428,6 +428,81 @@ fn parts_of_the_segment_in_progress_are_visible() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The live-edge latency estimate is `None` before tracks exist, `Some(0)`
+/// when idle, and grows while a segment is in progress. The part/segment
+/// targets are reported so the `/_stats` endpoint and the hls.js probe can
+/// compare measured player latency against the packaging floor.
+#[test]
+fn live_latency_estimate_tracks_the_segment_in_progress() {
+    use tpt_kinetix_core::stream::StreamInfo;
+    let mut live = LivePackager::new(LiveOptions {
+        segment_seconds: 2.0,
+        window: 6,
+        part_seconds: Some(1.0 / 3.0),
+    });
+    assert_eq!(live.live_latency_secs(), None);
+    let mut v = StreamInfo::new(0, CodecId::Av1, 90_000);
+    v.width = 320;
+    v.height = 240;
+    v.extradata = vec![0x81, 0x00, 0x0C, 0x00];
+    live.set_tracks(vec![v]).unwrap();
+    assert_eq!(live.live_latency_secs(), Some(0.0));
+    assert_eq!(live.part_seconds(), Some(1.0 / 3.0));
+    assert_eq!(live.segment_seconds(), 2.0);
+    // Push 1s of video: the in-progress estimate is ~1s.
+    live.push(0, 0, true, vec![1, 2, 3], Some(1000)).unwrap();
+    let lat = live.live_latency_secs().unwrap();
+    assert!((lat - 1.0).abs() < 0.05, "latency {lat}");
+}
+
+/// Low-latency DASH: the manifest advertises `availabilityTimeOffset` and
+/// `availabilityTimeComplete="false"` when parts are on (plain DASH without),
+/// and the CMAF chunks published for a completed segment all resolve and are
+/// identical to the part bytes served live (the final segment re-muxes the
+/// same samples with rebuilt `moof` headers, so bytes differ by design).
+#[test]
+fn low_latency_dash_serves_cmaf_chunks_before_completion() {
+    if !have("ffmpeg") {
+        eprintln!("skipping ll-dash: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_lldash_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(webm) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"]) else {
+        eprintln!("skipping ll-dash: encoder unavailable");
+        return;
+    };
+    // Full ingest: completed segments' prefixes are the whole segment, and the
+    // LL-DASH attributes are present.
+    let (live, _) = ingest(
+        &webm,
+        LiveOptions {
+            segment_seconds: 2.0,
+            window: 100,
+            part_seconds: Some(1.0 / 3.0),
+        },
+    );
+    let mpd = live.dash_mpd().unwrap();
+    assert!(mpd.contains("availabilityTimeOffset="), "{mpd}");
+    assert!(mpd.contains("availabilityTimeComplete=\"false\""), "{mpd}");
+    let segs = live.latest_segment();
+    let prefix = live.segment_prefix(0, segs).unwrap();
+    let full = live.segment(0, segs).unwrap();
+    assert_eq!(prefix, full.to_vec());
+    // Parts disabled: plain segment-latency DASH, no LL attributes.
+    let (plain, _) = ingest(
+        &webm,
+        LiveOptions {
+            segment_seconds: 2.0,
+            window: 100,
+            part_seconds: None,
+        },
+    );
+    let mpd = plain.dash_mpd().unwrap();
+    assert!(!mpd.contains("availabilityTimeOffset="), "{mpd}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn rejects_unusable_tracks_and_mid_stream_changes() {
     use tpt_kinetix_core::stream::StreamInfo;
@@ -509,4 +584,157 @@ fn dynamic_dash_manifest_matches_the_live_window() {
         }
     }
     assert!(checked > 0, "no segments were checked");
+}
+
+/// Feeds a whole WebM into an existing packager (no `finish`).
+fn feed(webm: &[u8], live: &mut LivePackager) {
+    let mut parser = MkvStream::new();
+    let handle = |events: Vec<MkvEvent>, live: &mut LivePackager| {
+        for e in events {
+            match e {
+                MkvEvent::Tracks(t) => live.set_tracks(t).unwrap(),
+                MkvEvent::Cue(_) => {}
+                MkvEvent::Frame(f) => live
+                    .push(f.stream, f.pts_ms, f.key, f.data, f.duration_ms)
+                    .unwrap(),
+            }
+        }
+    };
+    for chunk in webm.chunks(4096) {
+        handle(parser.push(chunk).unwrap(), live);
+    }
+    handle(parser.finish().unwrap(), live);
+}
+
+fn total_extinf(playlist: &str) -> f64 {
+    playlist
+        .lines()
+        .filter_map(|l| l.strip_prefix("#EXTINF:"))
+        .filter_map(|l| l.trim_end_matches(',').parse::<f64>().ok())
+        .sum()
+}
+
+#[test]
+fn a_reconnecting_publisher_resumes_with_a_discontinuity() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_live_resume_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(webm) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"]) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    let opts = LiveOptions {
+        segment_seconds: 2.0,
+        window: 100,
+        part_seconds: None,
+    };
+
+    let mut live = LivePackager::new(opts);
+    feed(&webm, &mut live);
+    live.finish().unwrap();
+    let first = live.media_playlist(0).unwrap();
+    let first_segments = first.matches("#EXTINF").count();
+    let first_secs = total_extinf(&first);
+    assert!(first.contains("#EXT-X-ENDLIST"));
+    assert!(!first.contains("DISCONTINUITY"), "no reconnect yet");
+
+    // The publisher drops and comes back with the same configuration.
+    feed(&webm, &mut live);
+    assert!(!live.is_finished(), "a reconnect reopens the stream");
+    let mid = live.media_playlist(0).unwrap();
+    assert!(!mid.contains("#EXT-X-ENDLIST"), "live again while publishing");
+    live.finish().unwrap();
+    let both = live.media_playlist(0).unwrap();
+
+    // Exactly one discontinuity, placed before the first segment of the new publish.
+    assert_eq!(both.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
+    let lines: Vec<&str> = both.lines().collect();
+    let at = lines.iter().position(|l| *l == "#EXT-X-DISCONTINUITY").unwrap();
+    let before = lines[..at]
+        .iter()
+        .filter(|l| l.starts_with("#EXTINF"))
+        .count();
+    assert_eq!(before, first_segments, "the old segments stay, in order");
+    assert!(both.ends_with("#EXT-X-ENDLIST\n"));
+    // Segment numbers keep counting, and the second publish adds about as much
+    // media as the first.
+    let n = both.matches("#EXTINF").count();
+    assert!(n >= first_segments * 2 - 1, "{n} segments vs {first_segments}");
+    let both_secs = total_extinf(&both);
+    assert!(
+        (both_secs - 2.0 * first_secs).abs() < 1.5,
+        "{both_secs} vs 2x{first_secs}"
+    );
+    // Every listed segment is fetchable.
+    for l in both.lines().filter(|l| l.starts_with("seg-")) {
+        let num: u64 = l
+            .trim_end_matches(".m4s")
+            .rsplit('-')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(live.segment(0, num).is_some(), "{l} missing");
+    }
+    // A sliding window that has dropped the discontinuity reports it.
+    let mut small = LivePackager::new(LiveOptions {
+        segment_seconds: 2.0,
+        window: 2,
+        part_seconds: None,
+    });
+    feed(&webm, &mut small);
+    small.finish().unwrap();
+    feed(&webm, &mut small);
+    small.finish().unwrap();
+    feed(&webm, &mut small); // more segments push the old ones out of the window
+    small.finish().unwrap();
+    let p = small.media_playlist(0).unwrap();
+    assert!(
+        p.contains("#EXT-X-DISCONTINUITY-SEQUENCE:") || p.contains("#EXT-X-DISCONTINUITY\n"),
+        "{p}"
+    );
+}
+
+#[test]
+fn a_changed_configuration_is_not_a_reconnect() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_live_cfg_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25"]);
+    let b = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25", "-s", "160x120"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let (Some(a), Some(b)) = (a, b) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let mut live = LivePackager::new(LiveOptions::default());
+    feed(&a, &mut live);
+    live.finish().unwrap();
+    let mut parser = MkvStream::new();
+    let mut tracks = None;
+    for chunk in b.chunks(4096) {
+        for e in parser.push(chunk).unwrap() {
+            if let MkvEvent::Tracks(t) = e {
+                tracks.get_or_insert(t);
+            }
+        }
+        if tracks.is_some() {
+            break;
+        }
+    }
+    let tracks = tracks.expect("tracks");
+    // `make_webm` ignores the extra args order for -s only if it applies; the
+    // check is meaningful only when the configurations really differ.
+    if live.accepts_tracks(&tracks) {
+        eprintln!("skipping: the two encodes have identical codec configuration");
+        return;
+    }
+    assert!(live.set_tracks(tracks).is_err());
 }

@@ -17,7 +17,7 @@ use crate::header::{
     derive_segment_features, parse_compressed_header, parse_uncompressed_header, FrameCtx,
     FrameHeader, FrameType, WorkingProbs,
 };
-use crate::loop_filter::{loopfilter_sb, FilterLut};
+use crate::loop_filter::{loopfilter_sb, loopfilter_sb_chroma, loopfilter_sb_luma, FilterLut};
 
 /// A VP9 decoder.
 pub struct Vp9Decoder {
@@ -81,20 +81,19 @@ impl Vp9Decoder {
             supports_intra_prediction: true,
             supports_inter_prediction: true,
             supports_deblocking: true,
-            // Scoped deliberately: `pixel_exact` is verified on the conformance
-            // corpus plus real-content 320x240 at every libvpx speed preset
-            // (see `conformance_vp9_320x240_real_content` and the cpu0/1/2/
-            // realtime cases). Long real-content clips still diverge luma-only
-            // from the mid-clip keyframe on a per-edge loop-filter level
-            // difference (`fixtures/div128/README.md`); 640x360 and 1080p
-            // keyframes keep tiny luma residuals from the same bug. Read this
-            // flag as "no known lossiness in the tested subset", not
-            // "bit-exact on arbitrary input".
+            // Scoped deliberately: `pixel_exact` is verified byte-exact on the
+            // conformance corpus, real-content 320x240/640x360/1080p at every
+            // libvpx speed preset, and the 300-frame perf-clip envelope (see
+            // `conformance_vp9.rs`). The last known gap (long real-content
+            // clips diverging luma-only from the mid-clip keyframe) was the
+            // n>4 D153/D117 intra predictors, closed 2026-10-06 — see
+            // `fixtures/div128/README.md`. Read this flag as "no known
+            // lossiness in the tested subset", not "bit-exact on arbitrary
+            // input".
             notes: "profile 0 (8-bit 4:2:0) decode; byte-exact vs ffmpeg/libvpx on the \
-synthetic conformance corpus (<=256x144: lossless/lossy, intra/inter, odd sizes, tiles) \
-and on 320x240 real content at all encoder speed presets. Known gap: long real-content \
-clips diverge luma-only from the mid-clip keyframe (loop-filter edge level derivation, \
-see fixtures/div128); chroma stays exact",
+synthetic conformance corpus (<=256x144: lossless/lossy, intra/inter, odd sizes, tiles), \
+on 320x240/640x360/1080p real content at all encoder speed presets, and on the 300-frame \
+perf-clip envelope (mid-stream keyframes included)",
         }
     }
 
@@ -371,12 +370,53 @@ see fixtures/div128); chroma stays exact",
         if h.loop_filter.level != 0 && crate::dbg_env::var_os("TPT_VP9_NO_LF").is_none() {
             let luts = FilterLut::new(h.loop_filter.sharpness);
             timed(&|p| &p.lf_ns, || {
-                for sb_row in 0..state.frame.sb64_rows() {
-                    for sb_col in 0..state.frame.sb64_cols {
-                        let sf = state.lflvl[sb_row * state.frame.sb64_cols + sb_col].clone();
-                        loopfilter_sb(&mut state.frame, &sf, &luts, sb_row, sb_col);
+                // The luma and chroma filter passes read only the per-SB
+                // masks/levels built during tile decode (`state.lflvl`) and
+                // write disjoint planes, so they run concurrently; within a
+                // plane the per-SB raster order is the reference's, so output
+                // is bit-identical. The interleaved per-SB serial path is
+                // kept for the TPT_VP9_TRACE/TPT_VP9_OPS oracle tooling,
+                // whose dump streams are diffed positionally.
+                let trace_on = crate::dbg_env::var_os("TPT_VP9_TRACE").is_some()
+                    || crate::dbg_env::var_os("TPT_VP9_OPS").is_some();
+                let rows = state.frame.sb64_rows();
+                let cols = state.frame.sb64_cols;
+                if trace_on {
+                    for sb_row in 0..rows {
+                        for sb_col in 0..cols {
+                            let sf = state.lflvl[sb_row * cols + sb_col].clone();
+                            loopfilter_sb(&mut state.frame, &sf, &luts, sb_row, sb_col);
+                        }
                     }
+                    return;
                 }
+                let (stride, mi_rows, mi_cols) =
+                    (state.frame.stride, state.frame.mi_rows, state.frame.mi_cols);
+                let frame = &mut state.frame;
+                let FrameData { y, u, v, .. } = frame;
+                let (y, u, v) = (&mut **y, &mut **u, &mut **v);
+                rayon::join(
+                    || {
+                        for sb_row in 0..rows {
+                            for sb_col in 0..cols {
+                                let sf = state.lflvl[sb_row * cols + sb_col].clone();
+                                loopfilter_sb_luma(
+                                    y, stride, mi_rows, mi_cols, &sf, &luts, sb_row, sb_col,
+                                );
+                            }
+                        }
+                    },
+                    || {
+                        for sb_row in 0..rows {
+                            for sb_col in 0..cols {
+                                let sf = state.lflvl[sb_row * cols + sb_col].clone();
+                                loopfilter_sb_chroma(
+                                    u, v, stride, mi_rows, mi_cols, &sf, &luts, sb_row, sb_col,
+                                );
+                            }
+                        }
+                    },
+                );
             });
         }
         if let Some(spec) = crate::dbg_env::var_os("TPT_VP9_BUF_POST") {

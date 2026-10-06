@@ -35,6 +35,8 @@ jobs:
             target: fuzz_mkv_ebml
           - crate: tpt-kinetix-av1
             target: fuzz_obu_parse
+          - crate: tpt-kinetix-av1
+            target: fuzz_av1_frame
           - crate: out-kinetix-h264
             target: fuzz_h264_nal
           - crate: tpt-kinetix-vp9

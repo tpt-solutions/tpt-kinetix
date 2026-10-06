@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
 };
 
 use super::{
@@ -22,14 +22,47 @@ use super::{
 pub struct RtmpConfig {
     /// Address to bind on, e.g. `"0.0.0.0:1935"`.
     pub bind_addr: String,
+    /// Optional TLS identity for RTMPS (`rtmps://`): a PEM-encoded
+    /// certificate chain plus a PEM-encoded private key. When `None` the
+    /// server speaks plain RTMP. Requires the crate's `rtmps` feature
+    /// (`tokio-rustls`); enabling the feature without setting this keeps
+    /// plain RTMP.
+    pub tls: Option<RtmpsIdentity>,
+}
+
+/// PEM-encoded certificate chain + private key for RTMPS.
+#[derive(Debug, Clone)]
+pub struct RtmpsIdentity {
+    /// PEM certificate chain (leaf first).
+    pub cert_chain_pem: Vec<u8>,
+    /// PEM PKCS#8 / RSA / SEC1 private key.
+    pub key_pem: Vec<u8>,
 }
 
 impl Default for RtmpConfig {
     fn default() -> Self {
         Self {
             bind_addr: "0.0.0.0:1935".into(),
+            tls: None,
         }
     }
+}
+
+/// What the client announced during the capability exchange (`connect` +
+/// `releaseStream`/`FCPublish` hints and the audio/video codec fields of the
+/// `connect` command object). OBS 30+ sends `fourCcList` / `audioFourCcList`
+/// when Enhanced RTMP is enabled; older encoders send nothing, which is also
+/// recorded (all `None`/empty) so downstream code can fall back safely.
+#[derive(Debug, Clone, Default)]
+pub struct RtmpCapabilities {
+    /// Video FourCCs the client claims it may send (`av01`, `vp09`, `hvc1`, ...).
+    pub video_four_ccs: Vec<[u8; 4]>,
+    /// Audio FourCCs the client claims it may send (`Opus`, ...).
+    pub audio_four_ccs: Vec<[u8; 4]>,
+    /// Whether the client asked for multitrack mode (`multitrack: true`).
+    pub multitrack: bool,
+    /// The `app` the client connected to.
+    pub app: Option<String>,
 }
 
 /// A high-level media event emitted after AMF negotiation and FLV
@@ -43,6 +76,8 @@ pub enum RtmpMediaEvent {
     PublishStart {
         /// The stream key / name requested by the publisher.
         stream_key: String,
+        /// What the client announced during the capability exchange.
+        capabilities: RtmpCapabilities,
     },
     /// A depacketized video tag (SPS/PPS sequence header or coded NALUs).
     Video {
@@ -57,6 +92,23 @@ pub enum RtmpMediaEvent {
         timestamp: u32,
         /// The parsed FLV audio tag.
         tag: FlvAudioTag,
+    },
+    /// HDR/color metadata from an Enhanced-RTMP `Metadata` video packet.
+    /// Emitted instead of `Video` for packet kind `Metadata` so ingest layers
+    /// can forward it (SEI / `colr` / `mdcv` / `clli`) rather than treat it as
+    /// coded frames.
+    Hdr {
+        /// Message timestamp in milliseconds.
+        timestamp: u32,
+        /// The HDR metadata payload.
+        hdr: flv::HdrMetadata,
+    },
+    /// The publisher selected a multitrack number (Enhanced-RTMP packet kind
+    /// `Multitrack`). Frames that follow belong to this track until the next
+    /// such event.
+    Multitrack {
+        /// The selected track number.
+        track_number: u8,
     },
     /// The publisher stopped or disconnected.
     PublishStop,
@@ -116,6 +168,10 @@ impl RtmpServer {
     ///
     /// Each accepted connection is spawned into its own Tokio task. The future
     /// returned by this method runs forever (or until an accept error occurs).
+    ///
+    /// When [`RtmpConfig::tls`] is set (and the `rtmps` feature is enabled) the
+    /// listener terminates TLS first, so OBS in "RTMPS" mode can publish to
+    /// the same ingest path.
     pub async fn run(&self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(&self.config.bind_addr).await?;
         self.serve(listener).await
@@ -123,13 +179,36 @@ impl RtmpServer {
 
     /// Accept RTMP connections on an already-bound listener.
     pub async fn serve(&self, listener: TcpListener) -> anyhow::Result<()> {
+        #[cfg(feature = "rtmps")]
+        let tls = self.tls_acceptor()?;
         tracing::info!(addr = ?listener.local_addr().ok(), "RTMP server listening");
         loop {
-            let (mut stream, peer_addr) = listener.accept().await?;
+            let (stream, peer_addr) = listener.accept().await?;
             tracing::info!(%peer_addr, "RTMP client connected");
             let handler = self.handler.clone();
             let session = self.session.as_ref().map(|f| f());
+            #[cfg(feature = "rtmps")]
+            let tls = tls.clone();
+            #[cfg(feature = "rtmps")]
+            let use_tls = self.config.tls.is_some();
             tokio::spawn(async move {
+                #[cfg(feature = "rtmps")]
+                if use_tls {
+                    let tls = tls.expect("RTMPS identity checked at serve() entry");
+                    match tls.accept(stream).await {
+                        Ok(tls_stream) => {
+                            let mut tls_stream = tls_stream;
+                            if let Err(e) =
+                                handle_connection(&mut tls_stream, handler, session).await
+                            {
+                                tracing::warn!(%peer_addr, error = %e, "RTMPS connection ended");
+                            }
+                        }
+                        Err(e) => tracing::warn!(%peer_addr, error = %e, "RTMPS handshake failed"),
+                    }
+                    return;
+                }
+                let mut stream = stream;
                 if let Err(e) = handle_connection(&mut stream, handler, session).await {
                     // A dropped/reset connection is expected and recovered by
                     // simply ending this task; the listener keeps accepting.
@@ -137,6 +216,28 @@ impl RtmpServer {
                 }
             });
         }
+    }
+
+    /// Build the TLS acceptor for RTMPS from [`RtmpConfig::tls`].
+    #[cfg(feature = "rtmps")]
+    fn tls_acceptor(&self) -> anyhow::Result<Option<std::sync::Arc<tokio_rustls::TlsAcceptor>>> {
+        let Some(id) = &self.config.tls else {
+            return Ok(None);
+        };
+        use std::io::BufReader;
+        use tokio_rustls::rustls;
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(&id.cert_chain_pem[..]))
+                .collect::<Result<Vec<_>, _>>()?;
+        anyhow::ensure!(!certs.is_empty(), "RTMPS identity has no certificates");
+        let key = rustls_pemfile::private_key(&mut BufReader::new(&id.key_pem[..]))?
+            .ok_or_else(|| anyhow::anyhow!("RTMPS identity has no private key"))?;
+        let cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        Ok(Some(std::sync::Arc::new(tokio_rustls::TlsAcceptor::from(
+            std::sync::Arc::new(cfg),
+        ))))
     }
 }
 
@@ -268,11 +369,17 @@ fn publish_start_status() -> Vec<u8> {
 }
 
 /// Handle a single RTMP client connection.
-async fn handle_connection(
-    stream: &mut TcpStream,
+///
+/// Generic over the transport so the same negotiation + chunk reassembly runs
+/// over plain TCP and over a TLS-terminated (RTMPS) stream.
+async fn handle_connection<S>(
+    stream: &mut S,
     handler: Option<MediaHandler>,
     mut session: Option<SessionSink>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // 1. RTMP handshake.
     perform_server_handshake(stream).await?;
     tracing::info!("RTMP handshake complete");
@@ -289,6 +396,7 @@ async fn handle_connection(
     // 2. Reassemble the chunk stream into messages and negotiate.
     let mut assembler = ChunkAssembler::new();
     let mut created_stream = false;
+    let mut caps = RtmpCapabilities::default();
     let mut buf = [0u8; 8192];
 
     loop {
@@ -315,14 +423,28 @@ async fn handle_connection(
                 }
                 Some(MessageTypeId::CommandAmf0) => {
                     let mut events = Vec::new();
-                    handle_command(stream, &msg, &mut created_stream, &mut events).await?;
+                    handle_command(stream, &msg, &mut created_stream, &mut caps, &mut events)
+                        .await?;
                     events.into_iter().for_each(&mut emit);
                 }
                 Some(MessageTypeId::Video) => match flv::parse_video_tag(&msg.payload) {
-                    Ok(tag) => emit(RtmpMediaEvent::Video {
-                        timestamp: msg.timestamp,
-                        tag,
-                    }),
+                    Ok(tag) => {
+                        if let Some(hdr) = tag.hdr.clone() {
+                            emit(RtmpMediaEvent::Hdr {
+                                timestamp: msg.timestamp,
+                                hdr,
+                            });
+                        } else if let Some(mt) = tag.multitrack {
+                            emit(RtmpMediaEvent::Multitrack {
+                                track_number: mt.track_number,
+                            });
+                        } else {
+                            emit(RtmpMediaEvent::Video {
+                                timestamp: msg.timestamp,
+                                tag,
+                            });
+                        }
+                    }
                     Err(e) => tracing::warn!(error = %e, "bad FLV video tag"),
                 },
                 Some(MessageTypeId::Audio) => match flv::parse_audio_tag(&msg.payload) {
@@ -342,13 +464,37 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Read an Enhanced-RTMP FourCC list (`fourCcList` / `audioFourCcList`) from a
+/// `connect` command object: a strict array of 4-char strings.
+fn four_cc_list(obj: &Amf0Value, key: &str) -> Vec<[u8; 4]> {
+    let Some(list) = obj.get(key) else {
+        return Vec::new();
+    };
+    let items = match list {
+        Amf0Value::StrictArray(items) => items.as_slice(),
+        _ => return Vec::new(),
+    };
+    items
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| {
+            let b = s.as_bytes();
+            (b.len() == 4).then(|| [b[0], b[1], b[2], b[3]])
+        })
+        .collect()
+}
+
 /// Process a single AMF0 command message and send the appropriate response.
-async fn handle_command(
-    stream: &mut TcpStream,
+async fn handle_command<S>(
+    stream: &mut S,
     msg: &RtmpMessage,
     created_stream: &mut bool,
+    caps: &mut RtmpCapabilities,
     emit: &mut Vec<RtmpMediaEvent>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let values = match amf::decode_all(&msg.payload) {
         Ok(v) => v,
         Err(e) => {
@@ -363,6 +509,22 @@ async fn handle_command(
     match command_name {
         "connect" => {
             tracing::info!("RTMP connect");
+            // Record the v2 capability exchange: the `connect` command object
+            // (values[2]) carries the app name plus optional Enhanced-RTMP
+            // codec lists (`fourCcList`, `audioFourCcList`, `multitrack`).
+            if let Some(obj) = values.get(2) {
+                caps.app = obj.get("app").and_then(|v| v.as_str()).map(str::to_string);
+                caps.video_four_ccs = four_cc_list(obj, "fourCcList");
+                caps.audio_four_ccs = four_cc_list(obj, "audioFourCcList");
+                caps.multitrack = obj
+                    .get("multitrack")
+                    .and_then(|v| match v {
+                        Amf0Value::Boolean(b) => Some(*b),
+                        Amf0Value::Number(n) => Some(*n != 0.0),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+            }
             // Standard control message sequence, then _result.
             stream.write_all(&window_ack_size(2_500_000)).await?;
             stream.write_all(&set_peer_bandwidth(2_500_000, 2)).await?;
@@ -388,7 +550,10 @@ async fn handle_command(
             tracing::info!(%stream_key, "RTMP publish");
             stream.write_all(&publish_start_status()).await?;
             stream.flush().await?;
-            emit.push(RtmpMediaEvent::PublishStart { stream_key });
+            emit.push(RtmpMediaEvent::PublishStart {
+                stream_key,
+                capabilities: caps.clone(),
+            });
         }
         "deleteStream" | "FCUnpublish" | "closeStream" => {
             tracing::info!(command_name, "RTMP publish teardown");

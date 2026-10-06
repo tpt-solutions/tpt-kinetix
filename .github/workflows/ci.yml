@@ -141,7 +141,9 @@ jobs:
         run: cargo fuzz build fuzz_mkv_ebml
         working-directory: tpt-kinetix-demux
       - name: Check fuzz targets compile (av1)
-        run: cargo fuzz build fuzz_obu_parse
+        run: |
+          cargo fuzz build fuzz_obu_parse
+          cargo fuzz build fuzz_av1_frame
         working-directory: tpt-kinetix-av1
       - name: Check fuzz targets compile (h264)
         run: cargo fuzz build fuzz_h264_nal

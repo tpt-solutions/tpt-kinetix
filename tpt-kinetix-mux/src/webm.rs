@@ -137,6 +137,18 @@ fn elem_uint(out: &mut Vec<u8>, id: u32, value: u64) {
     elem(out, id, &bytes[first..]);
 }
 
+/// A non-negative value as a Matroska *signed* integer (`DiscardPadding`): the
+/// top bit of the first byte is the sign, so a value whose minimal width has it
+/// set needs a leading zero byte or readers see a negative number.
+fn elem_sint(out: &mut Vec<u8>, id: u32, value: u64) {
+    let bytes = value.min(i64::MAX as u64).to_be_bytes();
+    let mut first = bytes.iter().position(|b| *b != 0).unwrap_or(7);
+    if bytes[first] & 0x80 != 0 {
+        first -= 1; // value < 2^63, so bytes[0] is zero and this cannot underflow
+    }
+    elem(out, id, &bytes[first..]);
+}
+
 fn elem_float(out: &mut Vec<u8>, id: u32, value: f64) {
     elem(out, id, &value.to_be_bytes());
 }
@@ -606,9 +618,11 @@ impl<W: Write> WebmWriter<W> {
                     // the stream start gapless. Without it the encoder's warm-up
                     // samples are audible and the stream starts late.
                     if let Some(delay) = opus_codec_delay(&t.info) {
-                        elem_uint(&mut sub, ID_CODEC_DELAY, delay);
+                        // Both are `TrackEntry` children, not `Audio` children:
+                        // inside `Audio` a reader silently ignores them.
+                        elem_uint(&mut entry, ID_CODEC_DELAY, delay);
                         // SeekPreRoll is the same value, per the Matroska spec.
-                        elem_uint(&mut sub, ID_SEEK_PRE_ROLL, delay);
+                        elem_uint(&mut entry, ID_SEEK_PRE_ROLL, delay);
                     }
                     elem_float(
                         &mut sub,
@@ -694,7 +708,7 @@ impl<W: Write> WebmWriter<W> {
         if let Some(ns) = duration_ns {
             elem_uint(&mut group, ID_BLOCK_DURATION, ns);
         }
-        elem_uint(&mut group, ID_DISCARD_PADDING, discard);
+        elem_sint(&mut group, ID_DISCARD_PADDING, discard);
         let mut buf = Vec::new();
         elem(&mut buf, ID_BLOCK_GROUP, &group);
         self.flush(&buf)

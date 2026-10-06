@@ -32,6 +32,12 @@ pub struct ChunkParser {
     /// Current negotiated chunk size (default 128 bytes as per RTMP spec).
     pub chunk_size: u32,
     prev_headers: HashMap<u32, ChunkHeader>,
+    /// Whether the last header on a chunk stream used the 4-byte extended
+    /// timestamp (`timestamp == 0x00FF_FFFF`). Continuation (`Type3`) chunks of
+    /// a large-timestamp message repeat the extended-timestamp field even
+    /// though they carry no other header bytes (RTMP §5.3.1.3), so the parser
+    /// must consume it to stay in sync.
+    extended: HashMap<u32, bool>,
 }
 
 impl ChunkParser {
@@ -40,6 +46,7 @@ impl ChunkParser {
         Self {
             chunk_size: 128,
             prev_headers: HashMap::new(),
+            extended: HashMap::new(),
         }
     }
 
@@ -185,7 +192,10 @@ impl ChunkParser {
             }
 
             ChunkHeaderFormat::Type3 => {
-                // No message header — inherit everything from previous.
+                // No message header — inherit everything from previous. When the
+                // message uses an extended timestamp, every chunk (including
+                // continuations) carries the 4-byte extended-timestamp field,
+                // which must be consumed to stay in sync.
                 let base = prev.unwrap_or(ChunkHeader {
                     format: ChunkHeaderFormat::Type3,
                     chunk_stream_id,
@@ -194,18 +204,39 @@ impl ChunkParser {
                     message_type_id: 0,
                     message_stream_id: 0,
                 });
+                let consumed = if *self.extended.get(&chunk_stream_id).unwrap_or(&false) {
+                    anyhow::ensure!(
+                        rest.len() >= 4,
+                        "truncated extended timestamp (type 3 continuation)"
+                    );
+                    4
+                } else {
+                    0
+                };
                 (
                     ChunkHeader {
                         format: fmt,
                         chunk_stream_id,
                         ..base
                     },
-                    0,
+                    consumed,
                 )
             }
         };
 
         // Store as the most-recent header for this CS ID.
+        let uses_extended = match fmt {
+            // Type 3 never changes the flag; the first header of the message set it.
+            ChunkHeaderFormat::Type3 => *self.extended.get(&chunk_stream_id).unwrap_or(&false),
+            _ => msg_header_len
+                > match fmt {
+                    ChunkHeaderFormat::Type0 => 11,
+                    ChunkHeaderFormat::Type1 => 7,
+                    ChunkHeaderFormat::Type2 => 3,
+                    ChunkHeaderFormat::Type3 => 0,
+                },
+        };
+        self.extended.insert(chunk_stream_id, uses_extended);
         self.prev_headers.insert(chunk_stream_id, header.clone());
 
         Ok((&rest[msg_header_len..], header)).map(|(remaining, h)| (h, remaining))
@@ -293,6 +324,7 @@ impl ChunkAssembler {
             // (re-parsing a type 1/2 header would otherwise add its delta twice).
             let peeked = peek_chunk_stream_id(&self.buf);
             let saved = peeked.and_then(|id| self.parser.prev_headers.get(&id).cloned());
+            let saved_ext = peeked.and_then(|id| self.parser.extended.get(&id).copied());
             // Try to parse one chunk header from the front of the buffer.
             let (header, after_header_len) = match self.parser.parse_chunk_header(&self.buf) {
                 Ok((h, remaining)) => (h, self.buf.len() - remaining.len()),
@@ -314,6 +346,10 @@ impl ChunkAssembler {
                 match saved {
                     Some(h) => self.parser.prev_headers.insert(cs_id, h),
                     None => self.parser.prev_headers.remove(&cs_id),
+                };
+                match saved_ext {
+                    Some(e) => self.parser.extended.insert(cs_id, e),
+                    None => self.parser.extended.remove(&cs_id),
                 };
                 break;
             }
@@ -509,5 +545,59 @@ mod tests {
         assert_eq!(MessageTypeId::from_u8(9), Some(MessageTypeId::Video));
         assert_eq!(MessageTypeId::from_u8(8), Some(MessageTypeId::Audio));
         assert_eq!(MessageTypeId::from_u8(200), None);
+    }
+
+    #[test]
+    fn extended_timestamp_on_continuation_chunks_stays_in_sync() {
+        // A message with timestamp 0x1234_5678 (> 0xFF_FFFF) needs the extended
+        // timestamp on the first chunk AND on every Type-3 continuation chunk.
+        // Before the fix, continuation chunks consumed 0 header bytes, so the
+        // 4 extended-timestamp bytes were misread as payload and the next
+        // message never decoded.
+        let mut asm = ChunkAssembler::new();
+        asm.set_chunk_size(4);
+        let big_ts: u32 = 0x1234_5678;
+        let payload = b"ABCDEFGHIJ"; // 10 bytes = 4 + 4 + 2
+        let mut bytes = Vec::new();
+        // First chunk: Type-0 with 0xFF_FFFF marker + extended timestamp.
+        bytes.push(0x03);
+        bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
+        bytes.extend_from_slice(&10u32.to_be_bytes()[1..]);
+        bytes.push(9);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&big_ts.to_be_bytes());
+        bytes.extend_from_slice(&payload[..4]);
+        // Continuations: Type-3 + extended timestamp + payload slice.
+        bytes.push(0xC3);
+        bytes.extend_from_slice(&big_ts.to_be_bytes());
+        bytes.extend_from_slice(&payload[4..8]);
+        bytes.push(0xC3);
+        bytes.extend_from_slice(&big_ts.to_be_bytes());
+        bytes.extend_from_slice(&payload[8..]);
+        // A second message right after must still decode.
+        bytes.extend(type0_chunk(9, 1, b"next"));
+
+        let msgs = asm.push(&bytes);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].timestamp, big_ts);
+        assert_eq!(msgs[0].payload, payload);
+        assert_eq!(msgs[1].payload, b"next");
+    }
+
+    #[test]
+    fn extended_timestamp_without_continuations_still_parses() {
+        // Single-chunk message with an extended timestamp (no Type-3 involved).
+        let big_ts: u32 = 0x0100_0000;
+        let mut bytes = vec![0x03];
+        bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
+        bytes.extend_from_slice(&5u32.to_be_bytes()[1..]);
+        bytes.push(8);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&big_ts.to_be_bytes());
+        bytes.extend_from_slice(b"hello");
+        let mut asm = ChunkAssembler::new();
+        let msgs = asm.push(&bytes);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].timestamp, big_ts);
     }
 }

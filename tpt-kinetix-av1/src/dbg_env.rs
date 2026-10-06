@@ -42,17 +42,19 @@ pub fn var(key: &str) -> Result<String, std::env::VarError> {
 }
 
 /// Env-gated phase timing (`KINETIX_AV1_PHASE=1`), the admin-free stand-in for
-/// a sampling profiler (todo-perf.md Phase 2). AV1 decode is single-threaded,
-/// so thread-local accumulators are enough; a per-frame summary is printed
-/// every `PHASE_REPORT_EVERY` frames.
+/// a sampling profiler (todo-perf.md Phase 2). Tile decode runs per tile on
+/// rayon workers and the post-filter planes run concurrently, so the
+/// accumulators are process-global atomics — thread-locals would hide the
+/// share of the work a worker thread did from the main thread's report. A
+/// per-frame summary is printed every `PHASE_REPORT_EVERY` frames.
 #[derive(Default)]
 pub struct Av1PhaseTimers {
-    pub tile_ns: std::cell::Cell<u64>,
-    pub deblock_ns: std::cell::Cell<u64>,
-    pub cdef_ns: std::cell::Cell<u64>,
-    pub superres_ns: std::cell::Cell<u64>,
-    pub lr_ns: std::cell::Cell<u64>,
-    pub grain_ns: std::cell::Cell<u64>,
+    pub tile_ns: std::sync::atomic::AtomicU64,
+    pub deblock_ns: std::sync::atomic::AtomicU64,
+    pub cdef_ns: std::sync::atomic::AtomicU64,
+    pub superres_ns: std::sync::atomic::AtomicU64,
+    pub lr_ns: std::sync::atomic::AtomicU64,
+    pub grain_ns: std::sync::atomic::AtomicU64,
     /// Tile-phase sub-splits (todo-perf.md Phase 3b item 2). `tile_ns` lumps
     /// entropy decode, coefficient read, dequant + inverse transform,
     /// prediction and motion compensation together, and every measurement so
@@ -62,93 +64,110 @@ pub struct Av1PhaseTimers {
     /// sum is less than it because the partition/mode syntax between blocks is
     /// untimed.
     /// Coefficient read through the symbol decoder (`read_coeffs`).
-    pub coeff_ns: std::cell::Cell<u64>,
+    pub coeff_ns: std::sync::atomic::AtomicU64,
     /// Dequantize + 2-D inverse transform.
-    pub itx_ns: std::cell::Cell<u64>,
+    pub itx_ns: std::sync::atomic::AtomicU64,
     /// Intra prediction + the residual add back into the plane.
-    pub pred_ns: std::cell::Cell<u64>,
+    pub pred_ns: std::sync::atomic::AtomicU64,
     /// Inter prediction: motion-vector prediction + motion compensation.
-    pub mc_ns: std::cell::Cell<u64>,
-    pub frames: std::cell::Cell<u64>,
+    pub mc_ns: std::sync::atomic::AtomicU64,
+    pub frames: std::sync::atomic::AtomicU64,
+}
+
+impl Av1PhaseTimers {
+    const fn new() -> Self {
+        Self {
+            tile_ns: std::sync::atomic::AtomicU64::new(0),
+            deblock_ns: std::sync::atomic::AtomicU64::new(0),
+            cdef_ns: std::sync::atomic::AtomicU64::new(0),
+            superres_ns: std::sync::atomic::AtomicU64::new(0),
+            lr_ns: std::sync::atomic::AtomicU64::new(0),
+            grain_ns: std::sync::atomic::AtomicU64::new(0),
+            coeff_ns: std::sync::atomic::AtomicU64::new(0),
+            itx_ns: std::sync::atomic::AtomicU64::new(0),
+            pred_ns: std::sync::atomic::AtomicU64::new(0),
+            mc_ns: std::sync::atomic::AtomicU64::new(0),
+            frames: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
 }
 
 const PHASE_REPORT_EVERY: u64 = 100;
 
-thread_local! {
-    static AV1_PHASES: Av1PhaseTimers = Av1PhaseTimers::default();
-}
+static AV1_PHASES: Av1PhaseTimers = Av1PhaseTimers::new();
 
 /// Run `f`, accumulating its wall time into `phase` when `KINETIX_AV1_PHASE`
 /// is set; passes through untouched (and free) otherwise.
 #[inline]
 pub fn av1_timed<R>(
-    phase: &dyn Fn(&Av1PhaseTimers) -> &std::cell::Cell<u64>,
+    phase: &dyn Fn(&Av1PhaseTimers) -> &std::sync::atomic::AtomicU64,
     f: impl FnOnce() -> R,
 ) -> R {
+    use std::sync::atomic::Ordering;
     if !phase_enabled() {
         return f();
     }
     let t = std::time::Instant::now();
     let out = f();
     let dt = t.elapsed().as_nanos() as u64;
-    AV1_PHASES.with(|p| {
-        let c = phase(p);
-        c.set(c.get().wrapping_add(dt));
-    });
+    phase(&AV1_PHASES).fetch_add(dt, Ordering::Relaxed);
     out
 }
 
 /// Account one frame and print the accumulated averages when the report
 /// interval elapses.
 pub fn av1_phase_frame_tick() {
+    use std::sync::atomic::Ordering;
     if !phase_enabled() {
         return;
     }
-    AV1_PHASES.with(|p| {
-        let f = p.frames.get() + 1;
-        p.frames.set(f);
-        if f % PHASE_REPORT_EVERY == 0 {
-            let n = f.max(1) as f64;
-            let us = |cell: &std::cell::Cell<u64>| cell.get() as f64 / 1000.0 / n;
-            let (t, d, c, s, l, g) = (
-                &p.tile_ns,
-                &p.deblock_ns,
-                &p.cdef_ns,
-                &p.superres_ns,
-                &p.lr_ns,
-                &p.grain_ns,
-            );
-            eprintln!(
-                "av1 phases (per-frame avg over {f}): tiles {:.0}us deblock {:.0}us cdef {:.0}us superres {:.0}us loop-restoration {:.0}us film-grain {:.0}us",
-                us(t),
-                us(d),
-                us(c),
-                us(s),
-                us(l),
-                us(g),
-            );
-            // Second line rather than an extension of the first: anything
-            // scraping the phase line (docs, ad-hoc greps) keeps working.
-            eprintln!(
-                "av1 tile sub-phases (per-frame avg over {f}, all subsets of tiles): coeffs {:.0}us itx {:.0}us intra-pred {:.0}us mc {:.0}us",
-                us(&p.coeff_ns),
-                us(&p.itx_ns),
-                us(&p.pred_ns),
-                us(&p.mc_ns),
-            );
-            p.tile_ns.set(0);
-            p.deblock_ns.set(0);
-            p.cdef_ns.set(0);
-            p.superres_ns.set(0);
-            p.lr_ns.set(0);
-            p.grain_ns.set(0);
-            p.coeff_ns.set(0);
-            p.itx_ns.set(0);
-            p.pred_ns.set(0);
-            p.mc_ns.set(0);
-            p.frames.set(0);
-        }
-    });
+    let p = &AV1_PHASES;
+    let f = p.frames.fetch_add(1, Ordering::Relaxed) + 1;
+    if f % PHASE_REPORT_EVERY == 0 {
+        let n = f.max(1) as f64;
+        let us = |cell: &std::sync::atomic::AtomicU64| cell.load(Ordering::Relaxed) as f64 / 1000.0 / n;
+        let (t, d, c, s, l, g) = (
+            &p.tile_ns,
+            &p.deblock_ns,
+            &p.cdef_ns,
+            &p.superres_ns,
+            &p.lr_ns,
+            &p.grain_ns,
+        );
+        eprintln!(
+            "av1 phases (per-frame avg over {f}): tiles {:.0}us deblock {:.0}us cdef {:.0}us superres {:.0}us loop-restoration {:.0}us film-grain {:.0}us",
+            us(t),
+            us(d),
+            us(c),
+            us(s),
+            us(l),
+            us(g),
+        );
+        // Second line rather than an extension of the first: anything
+        // scraping the phase line (docs, ad-hoc greps) keeps working.
+        eprintln!(
+            "av1 tile sub-phases (per-frame avg over {f}, all subsets of tiles): coeffs {:.0}us itx {:.0}us intra-pred {:.0}us mc {:.0}us",
+            us(&p.coeff_ns),
+            us(&p.itx_ns),
+            us(&p.pred_ns),
+            us(&p.mc_ns),
+        );
+        // Reset after printing (swap), so the next window starts at zero.
+        // `fetch_sub(f * PHASE_REPORT_EVERY)` would race with concurrent
+        // additions; a plain swap is the documented idiom.
+        let reset = |cell: &std::sync::atomic::AtomicU64| cell.swap(0, Ordering::Relaxed);
+        reset(&p.tile_ns);
+        reset(&p.deblock_ns);
+        reset(&p.cdef_ns);
+        reset(&p.superres_ns);
+        reset(&p.lr_ns);
+        reset(&p.grain_ns);
+        reset(&p.coeff_ns);
+        reset(&p.itx_ns);
+        reset(&p.pred_ns);
+        reset(&p.mc_ns);
+        p.frames.swap(0, Ordering::Relaxed);
+    }
 }
 
 /// Whether the phase timers are on. This is itself a hot-path predicate —

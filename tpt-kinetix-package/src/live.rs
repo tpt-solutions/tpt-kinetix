@@ -116,10 +116,32 @@ struct Segment {
     /// The parts this segment was published as, per track, so a client that is
     /// part-way through the segment can still fetch the earlier ones.
     parts: Vec<Vec<Part>>,
+    /// Whether a publisher reconnected before this segment: it is preceded by
+    /// `EXT-X-DISCONTINUITY` in the HLS playlists.
+    discontinuity: bool,
+}
+
+/// One finished segment of one track, handed out by
+/// [`LivePackager::drain_completed`] so it can be recorded.
+#[derive(Clone)]
+pub struct CompletedSegment {
+    /// Track index.
+    pub track: usize,
+    /// Segment number (continues across reconnects).
+    pub number: u64,
+    /// Duration of the segment on this track, in seconds.
+    pub seconds: f64,
+    /// Whether a publisher reconnected just before this segment.
+    pub discontinuity: bool,
+    /// The fMP4 fragment.
+    pub data: Arc<Vec<u8>>,
 }
 
 /// Builds a live sliding-window HLS presentation.
 pub struct LivePackager {
+    /// Segments finished but not yet drained, when recording is on.
+    completed: Vec<CompletedSegment>,
+    recording: bool,
     opts: LiveOptions,
     tracks: Vec<Track>,
     lead: usize,
@@ -137,6 +159,17 @@ pub struct LivePackager {
     /// Samples already published as parts but not yet folded into a segment, per
     /// track. Retained so the segment's own fragment contains every sample.
     part_samples: Vec<Vec<Sample>>,
+    /// A publisher resumed and no segment since has carried the discontinuity.
+    pending_discontinuity: bool,
+    /// Discontinuity-flagged segments that have left the retained window
+    /// (`EXT-X-DISCONTINUITY-SEQUENCE`).
+    discontinuities_dropped: u64,
+    /// On resume: where the new publisher's first frame lands on the existing
+    /// timeline (the end of the previous publish), so media times stay continuous.
+    resume_base_ms: Option<i64>,
+    /// Added to every incoming timestamp (set from `resume_base_ms` on the first
+    /// frame after a resume).
+    ts_offset_ms: i64,
 }
 
 /// One `#EXT-X-PART` line naming the part's URI.
@@ -184,6 +217,8 @@ impl LivePackager {
     /// A packager with `opts`; call [`Self::set_tracks`] before pushing frames.
     pub fn new(opts: LiveOptions) -> Self {
         Self {
+            completed: Vec::new(),
+            recording: false,
             opts,
             tracks: Vec::new(),
             lead: 0,
@@ -196,6 +231,71 @@ impl LivePackager {
             part_start_ms: None,
             part_index: 0,
             part_samples: Vec::new(),
+            pending_discontinuity: false,
+            discontinuities_dropped: 0,
+            resume_base_ms: None,
+            ts_offset_ms: 0,
+        }
+    }
+
+    /// Turns on collection of finished segments for [`Self::drain_completed`].
+    /// Segments finished before this call are not collected.
+    pub fn set_recording(&mut self, on: bool) {
+        self.recording = on;
+        if !on {
+            self.completed.clear();
+        }
+    }
+
+    /// Takes the segments finished since the last call (recording must be on).
+    pub fn drain_completed(&mut self) -> Vec<CompletedSegment> {
+        std::mem::take(&mut self.completed)
+    }
+
+    /// Whether `infos` could continue this presentation: it has no tracks yet,
+    /// or its tracks carry the same codec configuration.
+    pub fn accepts_tracks(&self, infos: &[StreamInfo]) -> bool {
+        self.tracks.is_empty()
+            || (self.tracks.len() == infos.len()
+                && self
+                    .tracks
+                    .iter()
+                    .zip(infos)
+                    .all(|(t, i)| {
+                    // VP9's `vpcC` carries no size, so compare the dimensions too.
+                    t.info.extradata == i.extradata
+                        && t.info.width == i.width
+                        && t.info.height == i.height
+                }))
+    }
+
+    /// Reopens a finished presentation for a reconnecting publisher.
+    ///
+    /// Segment numbering and the media timeline continue where the previous
+    /// publish ended, and the first new segment is marked with
+    /// `EXT-X-DISCONTINUITY`. A no-op unless the stream is finished. Called by
+    /// [`Self::set_tracks`] when a finished stream is given the same tracks.
+    fn resume(&mut self) {
+        if !self.finished {
+            return;
+        }
+        self.finished = false;
+        for t in &mut self.tracks {
+            t.pending.clear();
+            t.next_dts = None;
+        }
+        for p in &mut self.parts {
+            p.clear();
+        }
+        for p in &mut self.part_samples {
+            p.clear();
+        }
+        self.part_index = 0;
+        self.part_start_ms = None;
+        if let Some(end) = self.seg_start_ms.take() {
+            // Something was published: continue after it.
+            self.resume_base_ms = Some(end);
+            self.pending_discontinuity = true;
         }
     }
 
@@ -204,13 +304,9 @@ impl LivePackager {
     /// milliseconds. Fails if a track cannot be described in fMP4.
     pub fn set_tracks(&mut self, infos: Vec<StreamInfo>) -> Result<(), LiveError> {
         if !self.tracks.is_empty() {
-            let same = self.tracks.len() == infos.len()
-                && self
-                    .tracks
-                    .iter()
-                    .zip(&infos)
-                    .all(|(t, i)| t.info.extradata == i.extradata);
-            return if same {
+            return if self.accepts_tracks(&infos) {
+                // A finished stream given the same tracks is a reconnect.
+                self.resume();
                 Ok(())
             } else {
                 Err(LiveError::Config(
@@ -270,6 +366,10 @@ impl LivePackager {
         if self.finished || stream >= self.tracks.len() {
             return Ok(());
         }
+        if let Some(base) = self.resume_base_ms.take() {
+            self.ts_offset_ms = base - pts_ms;
+        }
+        let pts_ms = pts_ms + self.ts_offset_ms;
         if self.tracks[stream].info.media_type == MediaType::Video {
             self.push_video(stream, pts_ms, key, data, duration_ms)
         } else {
@@ -472,6 +572,20 @@ impl LivePackager {
             });
             data.push(Some(Arc::new(build_fragment(&t.info, &current, number)?)));
         }
+        let discontinuity = std::mem::take(&mut self.pending_discontinuity);
+        if self.recording {
+            for (track, d) in data.iter().enumerate() {
+                if let Some(d) = d {
+                    self.completed.push(CompletedSegment {
+                        track,
+                        number,
+                        seconds: seconds[track],
+                        discontinuity,
+                        data: d.clone(),
+                    });
+                }
+            }
+        }
         let parts = std::mem::take(&mut self.parts);
         self.parts = (0..self.tracks.len()).map(|_| Vec::new()).collect();
         self.part_samples = (0..self.tracks.len()).map(|_| Vec::new()).collect();
@@ -482,11 +596,14 @@ impl LivePackager {
             data,
             seconds,
             parts,
+            discontinuity,
         });
         self.next_number += 1;
         // Keep a little beyond the window so a slow client can still fetch it.
         while self.segments.len() > self.opts.window + 3 {
-            self.segments.pop_front();
+            if let Some(old) = self.segments.pop_front() {
+                self.discontinuities_dropped += u64::from(old.discontinuity);
+            }
         }
         self.seg_start_ms = Some(end_ms);
         Ok(())
@@ -556,6 +673,39 @@ impl LivePackager {
             .and_then(|s| s.data.get(track).cloned().flatten())
     }
 
+    /// The CMAF chunks published so far for `number` of `track`: every part of
+    /// a completed segment, or the parts published so far when `number` is the
+    /// segment in progress. Concatenated, they are a prefix of the final
+    /// segment bytes, so a low-latency DASH player can start playback before
+    /// the segment completes.
+    ///
+    /// Completed segments may have dropped their parts once the window went
+    /// past `2 * window` (memory cap); then the prefix is the retained whole
+    /// segment, i.e. itself.
+    pub fn segment_prefix(&self, track: usize, number: u64) -> Option<Vec<u8>> {
+        let collect = |parts: &[Part]| {
+            let mut out = Vec::new();
+            for p in parts {
+                out.extend_from_slice(&p.data);
+            }
+            (!out.is_empty()).then_some(out)
+        };
+        if number == self.next_number {
+            return self.parts.get(track).and_then(|p| collect(p));
+        }
+        if let Some(prefix) = self
+            .segments
+            .iter()
+            .find(|s| s.number == number)
+            .and_then(|s| s.parts.get(track).map(Vec::as_slice))
+            .and_then(collect)
+        {
+            return Some(prefix);
+        }
+        // Parts evicted: the whole retained segment is its own prefix.
+        self.segment(track, number).map(|b| b.to_vec())
+    }
+
     /// Part `index` (0-based) of segment `number` of `track`, if available.
     /// Covers both the parts of a completed segment and those of the segment in
     /// progress (whose number is [`Self::latest_segment`] + 1).
@@ -578,6 +728,49 @@ impl LivePackager {
     /// are disabled or nothing has been published yet).
     pub fn latest_part(&self) -> u64 {
         self.part_index
+    }
+
+    /// Estimated end-to-end latency of the live edge, in seconds: the age of
+    /// the oldest frame in the segment in progress (i.e. how far behind real
+    /// time a player joining now would start), or of the newest retained
+    /// segment when idle. This is what the `/_stats` HTTP endpoint and the
+    /// hls.js latency probe report as `live_latency_secs`.
+    pub fn live_latency_secs(&self) -> Option<f64> {
+        // Prefer the in-progress segment (the true live edge); fall back to
+        // the newest retained segment when nothing is in flight. `None` only
+        // before tracks exist or when no segment has ever completed.
+        if self.tracks.get(self.lead).is_none() {
+            return None;
+        }
+        Some(self.pending_secs().or_else(|| {
+            self.segments
+                .back()
+                .and_then(|s| s.seconds.get(self.lead).copied())
+        })?)
+    }
+
+    /// Target part duration in seconds (`None` when parts are disabled).
+    pub fn part_seconds(&self) -> Option<f64> {
+        self.parts_enabled().then(|| self.opts.part_seconds.unwrap_or(0.0))
+    }
+
+    /// Target segment duration in seconds.
+    pub fn segment_seconds(&self) -> f64 {
+        self.opts.segment_seconds
+    }
+
+    /// Seconds buffered for the segment in progress on the lead track (0 when
+    /// idle). Backs [`Self::live_latency_secs`].
+    fn pending_secs(&self) -> Option<f64> {
+        let t = self.tracks.get(self.lead)?;
+        if t.pending.is_empty() {
+            return Some(0.0);
+        }
+        let scale = f64::from(t.info.timescale.max(1));
+        let first = t.pending.first()?.dts;
+        let last = t.pending.last()?;
+        let end = last.dts + u64::from(last.duration.unwrap_or(0));
+        Some(end.saturating_sub(first) as f64 / scale)
     }
 
     fn window(&self) -> impl Iterator<Item = &Segment> {
@@ -620,6 +813,15 @@ impl LivePackager {
             "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{start}\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
             max.ceil() as u64,
         );
+        let disc_seq = self.discontinuities_dropped
+            + self
+                .segments
+                .iter()
+                .filter(|s| s.number < start && s.discontinuity)
+                .count() as u64;
+        if disc_seq > 0 {
+            let _ = writeln!(out, "#EXT-X-DISCONTINUITY-SEQUENCE:{disc_seq}");
+        }
         if parts {
             let part_target = self.opts.part_seconds.unwrap_or(0.0);
             let _ = write!(
@@ -636,6 +838,9 @@ impl LivePackager {
         }
         for s in self.segments.iter().filter(|s| s.number >= start) {
             let has = s.data.get(track).is_some_and(Option::is_some);
+            if s.discontinuity && has {
+                out.push_str("#EXT-X-DISCONTINUITY\n");
+            }
             if parts {
                 if let Some(ps) = s.parts.get(track) {
                     for (i, p) in ps.iter().enumerate() {
@@ -654,6 +859,9 @@ impl LivePackager {
         if parts && !self.finished && self.is_ready() {
             // The segment in progress: its published parts, then a hint for the next.
             let in_progress = self.next_number;
+            if self.pending_discontinuity {
+                out.push_str("#EXT-X-DISCONTINUITY\n");
+            }
             if let Some(ps) = self.parts.get(track) {
                 for (i, p) in ps.iter().enumerate() {
                     part_tag(&mut out, track, in_progress, i as u64, p);
@@ -802,6 +1010,20 @@ impl LivePackager {
         );
         let mut out = String::new();
         out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        // Low-latency DASH (CMAF chunks): when parts are enabled the manifest
+        // advertises `availabilityTimeOffset` so a player may request a segment
+        // before it is complete and receive its CMAF chunks as they arrive
+        // (`availabilityTimeComplete="false"`). Without parts the attribute is
+        // omitted and playback is plain segment-latency DASH.
+        let ato = self
+            .parts_enabled()
+            .then(|| {
+                format!(
+                    " availabilityTimeOffset=\"{:.3}\" availabilityTimeComplete=\"false\"",
+                    self.opts.segment_seconds.max(0.5)
+                )
+            })
+            .unwrap_or_default();
         // Built in pieces: the attribute line has no newline of its own, so
         // `write!` is correct here and clippy's `writeln!` suggestion is not.
         let _ = write!(
@@ -809,7 +1031,7 @@ impl LivePackager {
             "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" \
              profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" type=\"dynamic\" \
              availabilityStartTime=\"{ast}\" minimumUpdatePeriod=\"{update}\" \
-             minBufferTime=\"PT{:.3}S\">",
+             minBufferTime=\"PT{:.3}S\"{ato}>",
             (self.opts.segment_seconds / 3.0).max(0.5)
         );
         out.push('\n');

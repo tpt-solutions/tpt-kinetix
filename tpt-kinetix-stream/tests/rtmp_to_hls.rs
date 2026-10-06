@@ -47,6 +47,7 @@ async fn rtmp_ingest_to_hls_playlist_and_segments() {
     // FLV video tag into the next HLS TS segment.
     let rtmp = RtmpServer::new(RtmpConfig {
         bind_addr: rtmp_addr.to_string(),
+        tls: None,
     })
     .with_handler({
         let video_tags = video_tags.clone();

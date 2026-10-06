@@ -55,7 +55,7 @@ coverage:
 # Compile all fuzz targets (requires nightly + cargo-fuzz).
 fuzz-build:
     cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mkv_ebml
-    cd tpt-kinetix-av1 && cargo fuzz build fuzz_obu_parse
+    cd tpt-kinetix-av1 && cargo fuzz build fuzz_obu_parse && cargo fuzz build fuzz_av1_frame
     cd out-kinetix-h264 && cargo fuzz build fuzz_h264_nal
     cd tpt-kinetix-vp9 && cargo fuzz build fuzz_vp9_frame
     cd tpt-kinetix-stream && cargo fuzz build fuzz_rtmp_chunk && cargo fuzz build fuzz_rtmp_amf && cargo fuzz build fuzz_rtmp_flv && cargo fuzz build fuzz_hls_playlist

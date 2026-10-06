@@ -167,19 +167,12 @@ fn webm_remux_round_trips_through_ffmpeg_in_both_modes() {
                 want_v,
                 "{name}/{label}: video decodes differently"
             );
-            // Every audio frame decodes identically except the very last. The
-            // source's final Opus packet is a partial frame the encoder trimmed
-            // with `DiscardPadding`; this writer now carries that trim in the
-            // container (verified below), but ffmpeg still presents the last
-            // frame at its full decoded length here, where ffmpeg's own `-c copy`
-            // trims it. See todo-io.md — the container metadata is right, the
-            // remaining difference is not isolated.
-            let got_a = frame_md5s(&path, "0:a:0");
-            assert_eq!(got_a.len(), want_a.len(), "{name}/{label}: audio frames");
-            let n = want_a.len().saturating_sub(1);
+            // Every audio frame decodes identically, including the final one the
+            // encoder trimmed with `DiscardPadding` (needs `CodecDelay` in the
+            // `TrackEntry` and a *signed* `DiscardPadding`).
             assert_eq!(
-                got_a[..n],
-                want_a[..n],
+                frame_md5s(&path, "0:a:0"),
+                want_a,
                 "{name}/{label}: audio decodes differently"
             );
             // The trim itself survives the round trip in the container.
@@ -215,7 +208,11 @@ fn webm_remux_round_trips_through_ffmpeg_in_both_modes() {
         assert_eq!(r.streams()[1].codec, CodecId::Opus);
         assert_eq!(r.streams()[1].channels, 2);
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    if std::env::var_os("KEEP_WEBM_DIR").is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    } else {
+        eprintln!("kept {}", dir.display());
+    }
 }
 
 /// A live-mode stream must be readable incrementally, before it is finished.

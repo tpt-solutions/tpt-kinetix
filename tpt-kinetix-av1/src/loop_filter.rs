@@ -2877,53 +2877,7 @@ pub fn apply_post_filters(
             fh.loop_filter_deltas.loop_filter_mode_deltas,
         );
     }
-    let lf_h4 = (fh.height as usize + 3) >> 2;
-    if !skip_deblock {
-        crate::dbg_env::av1_timed(&|p| &p.deblock_ns, || {
-            deblock_plane(
-                y_plane,
-                width,
-                width,
-                height,
-                4,
-                0,
-                &meta.luma_tx_w4,
-                &meta.luma_tx_h4,
-                &meta.luma_skip,
-                &meta.luma_edge_left4,
-                &meta.luma_edge_top4,
-                &meta.delta_lf4,
-                &meta.lf_ref4,
-                &meta.lf_mode4,
-                meta.w4,
-                0,
-                meta.w4,
-                lf_h4,
-                // dav1d's `f->w4 = (width[0] + 3) >> 2` — the *coded* width,
-                // which for a superres frame is the downscaled one.
-                (fh.width as usize).div_ceil(4),
-                fh,
-                &[],
-                0,
-                0,
-            )
-        });
-    }
     let sub_x = subsampling_x as usize;
-    if crate::dbg_env::var("KINETIX_AV1_DUMP_POSTDEBLOCK").is_ok() {
-        let mut fp = std::fs::File::create("k_postdeb.bin").ok();
-        if let Some(fp) = fp.as_mut() {
-            use std::io::Write;
-            for yy in 280..320usize {
-                let _ = fp.write_all(
-                    &y_plane[yy * width..yy * width + width]
-                        .iter()
-                        .map(|&s| s as u8)
-                        .collect::<Vec<u8>>(),
-                );
-            }
-        }
-    }
     let sub_y = subsampling_y as usize;
     // dav1d builds its loop-filter masks over the visible frame's 4-sample
     // units (`f->w4`/`f->h4`), rounded up to whole chroma cells; edges at or
@@ -2931,35 +2885,6 @@ pub fn apply_post_filters(
     // chroma grid, so bound the passes explicitly.
     let chroma_lf_cols = (((fh.width as usize).div_ceil(4) + sub_x) >> sub_x).min(meta.cw4);
     let chroma_lf_rows = (((fh.height as usize).div_ceil(4) + sub_y) >> sub_y).min(meta.ch4);
-    if !skip_deblock {
-        crate::dbg_env::av1_timed(&|p| &p.deblock_ns, || {
-            deblock_plane(
-                u_plane,
-                uv_w,
-                uv_w,
-                uv_h,
-                4,
-                1,
-                &meta.u_tx_w,
-                &meta.u_tx_h,
-                &meta.u_skip,
-                &meta.chroma_edge_left,
-                &meta.chroma_edge_top,
-                &meta.delta_lf,
-                &meta.lf_ref4,
-                &meta.lf_mode4,
-                meta.w4,
-                1,
-                meta.cw4,
-                chroma_lf_rows,
-                chroma_lf_cols,
-                fh,
-                &meta.lf_level_u4,
-                meta.cw4,
-                sub_y,
-            )
-        });
-    }
     let dbg_cpxy = crate::dbg_env::var("KINETIX_AV1_DBG_CPXY")
         .ok()
         .and_then(|s| {
@@ -2977,34 +2902,119 @@ pub fn apply_post_filters(
         }
     };
     dump_cpxy("pre-deblock-V", v_plane, uv_w);
+    let lf_h4 = (fh.height as usize + 3) >> 2;
     if !skip_deblock {
+        // The three planes are deblocked independently: `deblock_plane` reads
+        // only its own plane plus read-only decode-time grids, and §7.14 has
+        // no cross-plane dependency — so luma runs concurrently with the two
+        // chroma planes, the same plane-level split the CDEF pass below uses.
+        // Within a plane the per-band cols→rows order is untouched, so the
+        // output is bit-identical to the serial schedule. (Parallelising
+        // *within* a plane is not safe: the vertical-edge pass of a
+        // superblock reads its left neighbour's horizontally-filtered pixels
+        // and the 14-wide horizontal filter crosses band boundaries, so the
+        // cols→rows chain is inherently sequential — which is why dav1d and
+        // libaom only parallelise the filter across tiles / frames.)
+        // Timed as one join: the per-plane phases would otherwise land on a
+        // worker's timers or double-count against the wrapper.
         crate::dbg_env::av1_timed(&|p| &p.deblock_ns, || {
-            deblock_plane(
-                v_plane,
-                uv_w,
-                uv_w,
-                uv_h,
-                4,
-                2,
-                &meta.v_tx_w,
-                &meta.v_tx_h,
-                &meta.v_skip,
-                &meta.chroma_edge_left,
-                &meta.chroma_edge_top,
-                &meta.delta_lf,
-                &meta.lf_ref4,
-                &meta.lf_mode4,
-                meta.w4,
-                1,
-                meta.cw4,
-                chroma_lf_rows,
-                chroma_lf_cols,
-                fh,
-                &meta.lf_level_v4,
-                meta.cw4,
-                sub_y,
-            )
+            let luma = || {
+                deblock_plane(
+                    y_plane,
+                    width,
+                    width,
+                    height,
+                    4,
+                    0,
+                    &meta.luma_tx_w4,
+                    &meta.luma_tx_h4,
+                    &meta.luma_skip,
+                    &meta.luma_edge_left4,
+                    &meta.luma_edge_top4,
+                    &meta.delta_lf4,
+                    &meta.lf_ref4,
+                    &meta.lf_mode4,
+                    meta.w4,
+                    0,
+                    meta.w4,
+                    lf_h4,
+                    // dav1d's `f->w4 = (width[0] + 3) >> 2` — the *coded* width,
+                    // which for a superres frame is the downscaled one.
+                    (fh.width as usize).div_ceil(4),
+                    fh,
+                    &[],
+                    0,
+                    0,
+                )
+            };
+            let chroma = || {
+                deblock_plane(
+                    u_plane,
+                    uv_w,
+                    uv_w,
+                    uv_h,
+                    4,
+                    1,
+                    &meta.u_tx_w,
+                    &meta.u_tx_h,
+                    &meta.u_skip,
+                    &meta.chroma_edge_left,
+                    &meta.chroma_edge_top,
+                    &meta.delta_lf,
+                    &meta.lf_ref4,
+                    &meta.lf_mode4,
+                    meta.w4,
+                    1,
+                    meta.cw4,
+                    chroma_lf_rows,
+                    chroma_lf_cols,
+                    fh,
+                    &meta.lf_level_u4,
+                    meta.cw4,
+                    sub_y,
+                );
+                deblock_plane(
+                    v_plane,
+                    uv_w,
+                    uv_w,
+                    uv_h,
+                    4,
+                    2,
+                    &meta.v_tx_w,
+                    &meta.v_tx_h,
+                    &meta.v_skip,
+                    &meta.chroma_edge_left,
+                    &meta.chroma_edge_top,
+                    &meta.delta_lf,
+                    &meta.lf_ref4,
+                    &meta.lf_mode4,
+                    meta.w4,
+                    1,
+                    meta.cw4,
+                    chroma_lf_rows,
+                    chroma_lf_cols,
+                    fh,
+                    &meta.lf_level_v4,
+                    meta.cw4,
+                    sub_y,
+                );
+            };
+            rayon::join(luma, chroma);
         });
+    }
+    if crate::dbg_env::var("KINETIX_AV1_DUMP_POSTDEBLOCK").is_ok() {
+        let mut fp = std::fs::File::create("k_postdeb.bin").ok();
+        if let Some(fp) = fp.as_mut() {
+            use std::io::Write;
+            for yy in 280..320usize {
+                let _ = fp.write_all(
+                    &y_plane[yy * width..yy * width + width]
+                        .iter()
+                        .map(|&s| s as u8)
+                        .collect::<Vec<u8>>(),
+                );
+            }
+        }
     }
     dump_cpxy("post-deblock-V", v_plane, uv_w);
 
@@ -3374,46 +3384,55 @@ pub fn apply_post_filters(
         // Restoring the mi-grid padding rows below the visible frame desyncs
         // the next frame's CDEF, which reads those rows as sbrow-boundary
         // context (dav1d's `lr_lpf_line` holds unrestored padding rows).
+        // Each plane restores independently (its own pixels + its own
+        // `lr_pre_*` boundary snapshot), so luma and chroma run concurrently
+        // like the deblock and CDEF passes; per-plane stripe order is
+        // unchanged, so output is bit-identical.
         let vis_h = fh.height as usize;
         let vis_ch = (vis_h + sub_y) >> sub_y;
         let vis_w = (fh.upscaled_width as usize).min(width);
         let vis_cw = ((vis_w + sub_x) >> sub_x).min(uv_w);
-        apply_loop_restoration_plane(
-            y_plane,
-            width,
-            vis_w,
-            vis_h,
-            0,
-            fh,
-            &meta.lr_units,
-            &lr_pre_y,
-            0,
-            pix_max,
-        );
-        apply_loop_restoration_plane(
-            u_plane,
-            uv_w,
-            vis_cw,
-            vis_ch,
-            1,
-            fh,
-            &meta.lr_units,
-            &lr_pre_u,
-            sub_y,
-            pix_max,
-        );
-        apply_loop_restoration_plane(
-            v_plane,
-            uv_w,
-            vis_cw,
-            vis_ch,
-            2,
-            fh,
-            &meta.lr_units,
-            &lr_pre_v,
-            sub_y,
-            pix_max,
-        );
+        let luma_lr = || {
+            apply_loop_restoration_plane(
+                y_plane,
+                width,
+                vis_w,
+                vis_h,
+                0,
+                fh,
+                &meta.lr_units,
+                &lr_pre_y,
+                0,
+                pix_max,
+            );
+        };
+        let chroma_lr = || {
+            apply_loop_restoration_plane(
+                u_plane,
+                uv_w,
+                vis_cw,
+                vis_ch,
+                1,
+                fh,
+                &meta.lr_units,
+                &lr_pre_u,
+                sub_y,
+                pix_max,
+            );
+            apply_loop_restoration_plane(
+                v_plane,
+                uv_w,
+                vis_cw,
+                vis_ch,
+                2,
+                fh,
+                &meta.lr_units,
+                &lr_pre_v,
+                sub_y,
+                pix_max,
+            );
+        };
+        rayon::join(luma_lr, chroma_lr);
     }
     dump_cpxy("post-lr-V", v_plane, uv_w);
     dump_pxy("post-lr", y_plane);

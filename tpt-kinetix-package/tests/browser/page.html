@@ -18,6 +18,11 @@
     if (done) return;
     done = true;
     const audioTracks = v.audioTracks ? v.audioTracks.length : null;
+    // For LL-HLS the page object stashes the player first (`window.__hls`);
+    // latency is live edge minus playhead at report time.
+    const hls = window.__hls;
+    const liveEdge = hls && hls.liveSyncPosition !== null && hls.liveSyncPosition !== undefined
+      ? hls.liveSyncPosition : null;
     fetch("/result", {
       method: "POST",
       body: JSON.stringify({
@@ -31,6 +36,8 @@
         audioTracks,
         decodedFrames: v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : null,
         droppedFrames: v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().droppedVideoFrames : null,
+        latency: liveEdge !== null ? Math.max(0, liveEdge - v.currentTime) : null,
+        liveSyncPosition: liveEdge,
         ...extra,
       }),
     });
@@ -49,7 +56,12 @@
   if (kind === "hls") {
     if (!Hls.isSupported()) { errors.push("Hls.isSupported() is false"); report({ ok: false }); }
     else {
-      const hls = new Hls();
+      // Low-latency mode: small back-buffer and `liveSyncDurationCount` of one
+      // part-worth, so `hls.liveSyncPosition` tracks the live edge the
+      // packager advertises. The harness records `latency` (live edge minus
+      // playhead) alongside the usual progress fields.
+      const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30, liveSyncDurationCount: 1 });
+      window.__hls = hls;
       hls.on(Hls.Events.ERROR, (_, d) => errors.push(`${d.type}/${d.details}${d.fatal ? " (fatal)" : ""}`));
       hls.loadSource(url);
       hls.attachMedia(v);
