@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
+
+### Other
+
+- bump all crates to 0.1.1 and fix crates.io publishing
+- AV1 SIMD helpers and bitreader speedups; H.264 env-debug hooks; VP9 div128 fixture notes
+- cache Hadamard matrices, remove per-block allocations
+- Add per-crate Criterion benches, perf baseline/compare tooling, and publishing docs
+- AV1 decoder and coefficient/inter/transform updates; codec crate conformance reporting updates
+- Add conformance reporting, AV1 decoder updates, and per-crate changelogs
+- read_lr gating now matches dav1d (unit-alignment + frame-boundary) — the 106 extra entropy reads per tile row are gone; the EC desync at the non_uniform_tiling (112,56) skip read should be resolved
+- remove reference C/oracle files; vision: overhaul reconstruct + deblock/prediction/headers; h264: interlaced + cabac + ref_pic updates; av1: reconstruct/partition; screen/lean/lossless/cli updates
+- implement MBAFF B-slice decode (ref lists, field MC gate) + B-frame reconstruction; fix CABAC CBP neighbor context for MBAFF frame pairs
+- implement full block reconstruction (intra+inter, WHT, deblock) with DPB; screen: implement mode classifier + flat/glyph/NATURAL reconstruction; vision: add headers/prediction/quant/transform/deblock/reconstruct modules; av1: remove partition debug instrumentation; update todos
+- *(deps)* bump nom from 7.1.3 to 8.0.0
+- Fix H.264 inter CBP table, coeff_token FLC codes, and dec_ref_pic_marking gating
+- Wire H.264 CAVLC I-slice decode into decoder.rs, scaffold tpt-kinetix-vision crate
+
 ### Changed
 
 - **Performance: the Walsh–Hadamard transform matrices are cached instead of

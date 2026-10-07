@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
+
+### Other
+
+- bump all crates to 0.1.1 and fix crates.io publishing
+- Add per-crate Criterion benches, perf baseline/compare tooling, and publishing docs
+- AV1 decoder and coefficient/inter/transform updates; codec crate conformance reporting updates
+- Add conformance reporting, AV1 decoder updates, and per-crate changelogs
+- implement MBAFF B-slice decode (ref lists, field MC gate) + B-frame reconstruction; fix CABAC CBP neighbor context for MBAFF frame pairs
+- fix intra prediction and CAVLC, guard AAC conformance test
+- Expand AV1 coefficient scan tables to all TxSizes and wire filter-intra prediction
+- Fix decoder bitstream-desync and dequant bugs in AV1, H.264, and AAC
+- Merge branch 'master' of https://github.com/tpt-solutions/tpt-kinetix
+- Advance AAC, AV1, and H.264 decode paths, plus realtime and face codec scaffolding
+- Advance AAC decode modules, AV1 inter prediction, and face codec scaffolding
+- Add new codec crates (face, lossless, realtime, screen, volumetric) and bitstream foundation
+
 ## [0.1.0](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.0) - 2026-07-19
 
 ### Added

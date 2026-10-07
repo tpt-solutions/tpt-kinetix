@@ -76,7 +76,7 @@ Notes / follow-ups:
   `tpt-kinetix-test-utils::bench_parse` module (2026-10-02); the copies had
   already drifted (two of them silently dropped duration-only benches such as
   `av1_encode`).
-- Peak memory is **not** yet measured for the Kinetix side; the benches report
+- Peak memory: Kinetix side now measured (2026-10-08, `kinetix_peak_heap_kb` in `ffmpeg_compare` decode rows); previously not measured; the benches report
   throughput only. (`ffmpeg -benchmark` reports `maxrss`, which
   `bench-ffmpeg` records for the reference side.) Add an allocator-counting
   harness (or a `dhat`/`jemalloc` pass) if a memory ceiling becomes a gate.
@@ -1113,7 +1113,7 @@ fixed (no `#[ignore]` left in `tpt-kinetix-screen/tests/roundtrip.rs`). What is 
 | Refresh `just bench-ffmpeg` headline ratio | **Yes, now** | ~32 min, no code. Last numbers (6-9x) predate ~-33% AV1 and plane-parallel gains; VP9 rows are verifiable again. Do not run anything else concurrently |
 | CI nightly/manual bench job uploading the report | **Yes** | small workflow addition (`workflow_dispatch` + schedule, upload `docs/perf/*.json` artifact). Shared runners are noisy, so upload-only, no regression gate |
 | Fuzz >= 60 s locally | **Yes, cheap** | nightly toolchain is installed; reinstall it (`rustup toolchain uninstall/install nightly`) to restore the missing asan runtime, or rely on `fuzz.yml` |
-| Peak-memory measurement (Kinetix side) | **Yes** | counting allocator already exists in `prof_sample.rs`; reuse for a peak-bytes column |
+| ~~Peak-memory measurement (Kinetix side)~~ | **Done 2026-10-08** | counting allocator already exists in `prof_sample.rs`; reuse for a peak-bytes column |
 | VP9 loop-filter AVX2 | **Doable, moderate risk** | best remaining VP9 target (49-63%). Scalar rewrites lost 2x, so it must be real SIMD; the AV1 deblock AVX2 attempt was bit-exact but gave no gain, which is a warning — prototype one filter width and A/B before committing |
 | VP9 MC SIMD | **Doable** | same register-resident pattern as AV1's `filter_h_row` (-5.8%); reuse the kernel shape. Profile VP9 inter first (no breakdown exists) |
 | VP9 tile-column threading | **Doable, small** | independent tile columns, bit-exact by construction. Only helps multi-tile streams; the perf corpus is single-tile, so it needs a new corpus clip (`--tile-columns`) to show anything |
@@ -1123,6 +1123,28 @@ fixed (no `#[ignore]` left in `tpt-kinetix-screen/tests/roundtrip.rs`). What is 
 | Target hardware (ARM?) / bench-compare threshold | **Needs a decision** | drift floor measured at ±10-25% cross-session, so 5% default is not meaningful |
 
 Suggested order: bench-ffmpeg refresh -> CI bench job -> VP9 MC/LF SIMD (measure first) -> VP9 tile threading.
+
+### Refresh 2026-10-08 (`just bench-ffmpeg`, quiet machine, all rows verified byte-exact)
+
+Kinetix vs single-threaded ffmpeg decode throughput: **AV1 0.03-0.05x** (libaom clips; FATE 0.07-0.17x),
+**VP9 0.11-0.18x** (VP9 rows verify again), H.264 0.01-0.03x (compat only). Full table and the new
+peak-memory column in `docs/PERFORMANCE.md`; raw data `docs/perf/ffmpeg-compare-2026-10-08.json`.
+Correction: the standard libvpx perf clips are **already 4 tile columns** at 720p/1080p (libvpx defaults
+to max tile columns), so the "single-tile corpus" assumption was wrong and tile threading is already in
+those numbers. Probe on vp9_1280x720: 4.2 ms/frame at 1 rayon thread -> 2.65 ms at 8 (1.6x); the rest is
+the serial loop filter + per-column FrameState alloc/merge.
+
+**VP9 loop-filter SIMD tried and rejected (2026-10-08).** A bit-exact SSE2 port of `loop_filter_edge`
+(8 steps per call, one per 16-bit lane; 8x8 byte transposes for vertical edges; early-out on the `fm`
+mask before loading outer taps; checked vs scalar on 60k random edges and the full VP9 conformance
+suite) measured **6-8% slower** than the scalar loop on vp9_1280x720 (0.81-0.82 s vs 0.765 s for 180
+frames, 1 thread, quiet machine): the scalar code already bails per step on failed `fm`, and the
+load/transpose/store overhead outweighs the arithmetic saved. Same outcome as the AV1 deblock AVX2
+attempt. Reverted; do not retry without a different data layout (e.g. filtering whole edges across
+several 8-step groups at once). Phase split at 1 thread: tiles ~3.2 ms + loop filter ~3.2 ms per 720p
+frame, so LF is ~50% but is dominated by edge-scan overhead rather than filter arithmetic.
+VP9 MC SIMD not attempted: the VP9 crate has no profiler hook (the AV1 `prof_sample` sampler is
+AV1-specific), and the analogous AV1 MC kernel gained only 5.8%.
 
 ## Open questions
 

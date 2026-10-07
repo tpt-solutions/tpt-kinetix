@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
+
+### Other
+
+- bump all crates to 0.1.1 and fix crates.io publishing
+- fix the partial-edge-block decode bug; make ffmpeg_compare report honestly
+- refresh the ffmpeg comparison; add screen round-trip tests, find 2 bugs
+- cache natural-mode Hadamard matrices, remove per-block allocations
+- Add ffmpeg comparison harness and fix codec bugs it surfaced
+- Add per-crate Criterion benches, perf baseline/compare tooling, and publishing docs
+- Tidy repo root: move H.264 oracle sources and tools, drop debug artifacts
+- AV1 decoder and coefficient/inter/transform updates; codec crate conformance reporting updates
+- Add conformance reporting, AV1 decoder updates, and per-crate changelogs
+- remove reference C/oracle files; vision: overhaul reconstruct + deblock/prediction/headers; h264: interlaced + cabac + ref_pic updates; av1: reconstruct/partition; screen/lean/lossless/cli updates
+- implement MBAFF B-slice decode (ref lists, field MC gate) + B-frame reconstruction; fix CABAC CBP neighbor context for MBAFF frame pairs
+- implement full block reconstruction (intra+inter, WHT, deblock) with DPB; screen: implement mode classifier + flat/glyph/NATURAL reconstruction; vision: add headers/prediction/quant/transform/deblock/reconstruct modules; av1: remove partition debug instrumentation; update todos
+- Advance AAC, AV1, and H.264 decode paths, plus realtime and face codec scaffolding
+- Add new codec crates (face, lossless, realtime, screen, volumetric) and bitstream foundation
+
 ### Changed
 
 - **Performance: the natural-mode Walsh–Hadamard matrices are cached instead of

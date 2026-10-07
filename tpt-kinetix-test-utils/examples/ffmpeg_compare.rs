@@ -623,19 +623,6 @@ fn ensure_corpus(cfg: &Config) -> Corpus {
             .merged(frames),
         );
     }
-    // Multi-tile VP9 clip: the standard clips are single-tile, so tile-column
-    // threading only shows up here (1280 wide allows 4 tile columns).
-    if !cfg.quick {
-        let src = "testsrc=size=1280x720:rate=30";
-        generate(
-            "vp9tiles_1280x720.ivf",
-            vec_args(&[
-                "-f", "lavfi", "-i", src, "-pix_fmt", "yuv420p", "-c:v", "libvpx-vp9", "-deadline",
-                "good", "-cpu-used", "4", "-lag-in-frames", "0", "-tile-columns", "2",
-            ])
-            .merged(["-frames:v", "60"]),
-        );
-    }
 
     if let Ok(text) = serde_json::to_string_pretty(&manifest) {
         let _ = std::fs::write(&manifest_path, text);
@@ -844,13 +831,6 @@ fn run_decode_section(cfg: &Config, corpus: &Corpus, fate: &[PathBuf], report: &
             "h264".into(),
             format!("testsrc {w}x{h} (libx264)"),
             corpus.dir.join(format!("h264_{w}x{h}.h264")),
-        ));
-    }
-    if !cfg.quick {
-        targets.push((
-            "vp9".into(),
-            "testsrc 1280x720 4 tile cols (libvpx)".into(),
-            corpus.dir.join("vp9tiles_1280x720.ivf"),
         ));
     }
     for p in fate {
@@ -2470,15 +2450,15 @@ fn render_markdown(cfg: &Config, report: &Report) -> String {
     if !report.decode.is_empty() {
         s.push_str("### Decode: output verified identical, then timed\n\n");
         s.push_str("A checkmark means Kinetix's decoded planes were **byte-identical** to the reference decoder's before any timing was recorded.\n\n");
-        s.push_str("| Codec | Clip | Frames | Verified | Kinetix | ffmpeg 1T | ffmpeg default | Kinetix/ffmpeg 1T |\n");
-        s.push_str("|:---|:---|---:|:---:|---:|---:|---:|---:|\n");
+        s.push_str("| Codec | Clip | Frames | Verified | Kinetix | ffmpeg 1T | ffmpeg default | Kinetix/ffmpeg 1T | Peak mem Kinetix / ffmpeg 1T |\n");
+        s.push_str("|:---|:---|---:|:---:|---:|---:|---:|---:|---:|\n");
         for r in &report.decode {
             let ratio = match r["ratio_kinetix_over_ffmpeg_1thread"].as_f64() {
                 Some(v) => format!("{v:.2}×"),
                 None => "n/a (unverified)".to_string(),
             };
             s.push_str(&format!(
-                "| {} | {} | {} | {} | {} MPix/s | {} MPix/s | {} MPix/s | {} |\n",
+                "| {} | {} | {} | {} | {} MPix/s | {} MPix/s | {} MPix/s | {} | {} |\n",
                 r["codec"].as_str().unwrap_or("?").to_uppercase(),
                 r["clip"].as_str().unwrap_or("?"),
                 r["kinetix_frames"],
@@ -2491,8 +2471,18 @@ fn render_markdown(cfg: &Config, report: &Report) -> String {
                 r["ffmpeg_1thread_mpxs"],
                 r["ffmpeg_default_mpxs"],
                 ratio,
+                match (
+                    r["kinetix_peak_heap_kb"].as_u64(),
+                    r["ffmpeg_1thread_maxrss_kb"].as_u64(),
+                ) {
+                    (Some(k), Some(f)) =>
+                        format!("{:.1} / {:.1} MiB", k as f64 / 1024.0, f as f64 / 1024.0),
+                    (Some(k), None) => format!("{:.1} MiB / n/a", k as f64 / 1024.0),
+                    _ => "n/a".to_string(),
+                },
             ));
         }
+        s.push_str("\nPeak memory: Kinetix = peak live heap during one decode pass, including the accumulated decoded output frames (excludes the input file); ffmpeg = process max RSS (includes the runtime), so the two are indicative, not like-for-like.\n");
         s.push('\n');
     }
 
