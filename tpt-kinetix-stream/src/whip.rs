@@ -8,7 +8,7 @@
 //! DTLS / SRTP on a UDP port of this server and ends up in the same live HLS / DASH
 //! presentation as every other ingest.
 //!
-//! The WebRTC stack is [`str0m`], sans-I/O and with its pure-Rust crypto (no
+//! The WebRTC stack is `str0m`, sans-I/O and with its pure-Rust crypto (no
 //! OpenSSL, no C), driven here by a tokio UDP socket per session. It is behind the
 //! `whip` cargo feature because of its dependency tree; without it the endpoint
 //! answers `501`.

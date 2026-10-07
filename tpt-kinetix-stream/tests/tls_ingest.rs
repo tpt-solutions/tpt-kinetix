@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tpt_kinetix_package::LiveOptions;
 use tpt_kinetix_stream::rtmp::amf::{self, Amf0Value};
 use tpt_kinetix_stream::rtmp::RtmpsIdentity;
@@ -40,7 +41,7 @@ async fn tls_connect(
     cert_pem: &[u8],
 ) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut &cert_pem[..]) {
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem) {
         roots.add(c.unwrap()).unwrap();
     }
     // Explicit provider: other crates in a workspace build may enable a second one.

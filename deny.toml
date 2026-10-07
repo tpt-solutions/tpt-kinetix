@@ -61,7 +61,8 @@ deny = []
 # no workspace-level upgrade path exists for these.
 skip = [
   { name = "getrandom" },
-  { name = "nom" },
+  # criterion (dev) uses itertools 0.13, rav1e uses 0.14.
+  { name = "itertools" },
   { name = "r-efi" },
   { name = "syn" },
   { name = "windows-sys" },

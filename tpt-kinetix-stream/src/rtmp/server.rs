@@ -245,14 +245,13 @@ impl RtmpServer {
 pub(crate) fn build_tls_acceptor(
     id: &RtmpsIdentity,
 ) -> anyhow::Result<std::sync::Arc<tokio_rustls::TlsAcceptor>> {
-    use std::io::BufReader;
     use tokio_rustls::rustls;
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut BufReader::new(&id.cert_chain_pem[..]))
-            .collect::<Result<Vec<_>, _>>()?;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(&id.cert_chain_pem[..]).collect::<Result<Vec<_>, _>>()?;
     anyhow::ensure!(!certs.is_empty(), "TLS identity has no certificates");
-    let key = rustls_pemfile::private_key(&mut BufReader::new(&id.key_pem[..]))?
-        .ok_or_else(|| anyhow::anyhow!("TLS identity has no private key"))?;
+    let key = PrivateKeyDer::from_pem_slice(&id.key_pem[..])
+        .map_err(|e| anyhow::anyhow!("TLS identity has no usable private key: {e}"))?;
     // An explicit provider: when another crate in the build enables a second one,
     // rustls cannot choose a process default and `builder()` would panic.
     let cfg = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
