@@ -104,7 +104,7 @@ async function main() {
     // server streams while a segment is still being published.
     window.__hlsEvents = [];
     const dp = dashjs.MediaPlayer().create();
-    dp.updateSettings({ debug: { logLevel: q.get("debug") === "1" ? 4 : 1 }, streaming: {
+    dp.updateSettings({ debug: { logLevel: q.get("debug") === "1" ? 5 : 1 }, streaming: {
       delay: { liveDelay: Number(q.get("sync")) || undefined },
       liveCatchup: { enabled: ll },
       buffer: { fastSwitchEnabled: true },
@@ -115,6 +115,8 @@ async function main() {
   } else
   hls = new Hls(ll ? { debug: q.get("debug") === "1", lowLatencyMode: true, backBufferLength: 10, ...(sync ? { liveSyncDuration: sync } : {}), ...(q.get("rate") ? { maxLiveSyncPlaybackRate: Number(q.get("rate")) } : {}) } : { lowLatencyMode: false, backBufferLength: 10 });
   if (player !== "dash") {
+  window.__levelsSeen = [];
+  hls.on(Hls.Events.LEVEL_SWITCHED, (_, d) => window.__levelsSeen.push(d.level));
   window.__hlsEvents = [];
   hls.on(Hls.Events.ERROR, (_, d) => window.__hlsEvents.push(d.details + (d.fatal ? "!" : "") + (d.error ? ": " + d.error.message + " @ " + String(d.error.stack).split("\n").slice(1,4).join(" | ") : "") + (d.reason ? " (" + d.reason + ")" : "")));
   hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) errors.push(d.type + "/" + d.details); });
@@ -125,9 +127,17 @@ async function main() {
   let waits = 0;
   video.addEventListener("waiting", () => waits++);
   window.__waits = () => waits;
-  video.play().catch((e) => errors.push("play: " + e.message));
+  // dash.js starts playback itself (autoplay): calling play() here would fire the
+  // native `play` event before it listens, so it would never learn playback began and
+  // would never start refreshing the manifest.
+  if (player !== "dash") video.play().catch((e) => errors.push("play: " + e.message));
 
   const samples = [], playerLatency = [];
+  // Ladder check: with ?switch=1 force each rendition in turn mid-stream.
+  if (q.get("switch") === "1" && player !== "dash") {
+    const plan = [[warmup + 2, 1], [warmup + 7, 0], [warmup + 12, 1]];
+    plan.forEach(([at, level]) => setTimeout(() => { hls.nextLevel = level; }, at * 1000));
+  }
   const t0 = Date.now();
   const timer = setInterval(() => {
     const t = Date.now();
@@ -141,10 +151,17 @@ async function main() {
       clearInterval(timer);
       if (rec) { rec.stop(); ws.close(1000, "done"); }
       const b = video.buffered;
-      finish({ samples, playerLatency, errors,
+      // How long each request waited before it was sent (browser connection queue).
+      const waits = performance.getEntriesByType("resource")
+        .filter((e) => e.name.includes(`/${key}/`) && e.requestStart > 0)
+        .map((e) => e.requestStart - e.startTime).sort((x, y) => x - y);
+      const queue = waits.length ? { n: waits.length, p50: Math.round(waits[Math.floor(waits.length / 2)]),
+        p95: Math.round(waits[Math.floor(waits.length * 0.95)]), max: Math.round(waits[waits.length - 1]),
+        over100ms: waits.filter((w) => w > 100).length } : null;
+      finish({ samples, playerLatency, errors, queue,
         currentTime: video.currentTime, readyState: video.readyState,
         bufferedEnd: b.length ? b.end(b.length - 1) : null, bufferedStart: b.length ? b.start(0) : null,
-        hlsEvents: window.__hlsEvents || [], chunkGaps: window.__chunkGaps, waits: window.__waits(), maxBuffered: window.__maxBuffered, videoWidth: video.videoWidth, decodedFrames: video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().totalVideoFrames : 0 });
+        hlsEvents: window.__hlsEvents || [], levels: hls && hls.levels ? hls.levels.map((l) => `${l.width}x${l.height}`) : [], levelsSeen: window.__levelsSeen || [], chunkGaps: window.__chunkGaps, waits: window.__waits(), maxBuffered: window.__maxBuffered, videoWidth: video.videoWidth, decodedFrames: video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().totalVideoFrames : 0 });
     }
   }, 250);
 }

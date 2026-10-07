@@ -24,9 +24,16 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       Extended timestamps on continuation chunks are handled and tested (`chunk.rs`). RTMP publishers are now held to the
       ingest policy too (2026-10-06): token in the stream key (`name?token=...`, the OBS convention), stream-count /
       concurrency limits, and byte / bitrate / duration cut-offs, with the cut-off publish still finishing its playlists
-      (`live_rtmp.rs::rtmp_publish_honours_token_and_limits`). Open follow-ups: Enhanced `Multitrack` and `Metadata`
-      (HDR colour info) packets, the E-RTMP v2 capability exchange (`videoFourCcInfoMap`; another session has started
-      it), RTMPS (TLS; in progress elsewhere), and a real OBS pass. RTMP idle timeout DONE 2026-10-06 (a per-publisher watchdog in `rtmp_live.rs` completes the
+      (`live_rtmp.rs::rtmp_publish_honours_token_and_limits`). **Enhanced RTMP v2 Multitrack DONE 2026-10-07**, to the
+      real spec layout (checked against the veovera spec text; the earlier parser guessed it wrong: `Multitrack` is
+      packet type 6 and `ModEx` 7, not 5/6): `AvMultitrackType<<4|VideoPacketType`, shared or per-track FourCC,
+      `trackId`, a 24-bit `sizeOfVideoTrack` (absent for OneTrack), and ModEx prefixes skipped. Each track is its own
+      `RtmpMediaEvent::Video` (`tag.track_id`) and becomes its own packager track, i.e. an OBS Enhanced Broadcasting
+      publish is a multi-rendition ladder (`live_rtmp.rs::multitrack_rtmp_publish_becomes_a_ladder`: two renditions,
+      each decoding frame-exactly). Parser tests + 30k random-input no-panic test + fuzz target updated. `Metadata`
+      (HDR colour info) is surfaced as an event but not yet forwarded into `colr`/`mdcv`/`clli`. Open follow-ups: the
+      E-RTMP v2 capability exchange (`capsEx` / `videoFourCcInfoMap`; another session has started it), RTMPS (TLS;
+      in progress elsewhere), audio multitrack, and a real OBS pass. RTMP idle timeout DONE 2026-10-06 (a per-publisher watchdog in `rtmp_live.rs` completes the
       presentation and frees the slot when a publisher goes silent with the socket open; `rtmp_idle_publisher_is_ended`).
 - [ ] **Low-latency HLS** built 2026-10-04; **first real-player measurement 2026-10-06** (`just latency-test`,
       `tools/latency-test.sh`: headless Chrome publishes a wall-clock barcode through MediaRecorder + WebSocket, plays the
@@ -41,17 +48,25 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       (3) `PART-HOLD-BACK` was 12 *seconds* — now 3 x `PART-TARGET`, and `PART-TARGET` covers the longest published
       part (parts ran 0.36 s against a 0.333 s target); (4) the `EXT-X-PRELOAD-HINT` part URL answered 404 instead of
       blocking until published. Regression tests: `ll_playlist_tags_follow_the_spec`, `ll_hls_parts_are_served_*`.
-      **STILL OPEN — intermittent stalls.** Even with a steady `ffmpeg -re` publisher (so not the in-browser encoder),
-      hls.js in LL mode shows 2-4 `bufferStalledError` per 30 s (playhead reaches the buffer end), after which it
-      re-syncs further behind and the median drifts to 4-10 s; non-LL playback is steadier. Ruled out: server part
-      availability (measured directly: median 344 ms between parts, max 523 ms, none > 550 ms), part contents (59 parts
-      checked: durations match the playlist and chain with no gap), publisher gaps (none, `ws.bufferedAmount` ~4 KB),
-      hold-back distance (`liveSyncDuration` 1.5-3.5 s did not remove them), hls.js catch-up speed-up
-      (`maxLiveSyncPlaybackRate=1` did not). Stalls line up with the 2 s keyframe boundaries in the one debug log
-      captured. Not yet tried: a different player (Safari, Shaka, AVPlayer), a quieter machine (this box also runs other
-      work), a fixed GOP/part alignment, or `fragGap`/`GAP` events seen once (hls.js `addAsGap` when a fragment's
-      buffered range is shorter than declared). Treat 1.6-1.8 s as the floor and ~4 s as the dependable number until
-      this is understood. Harness knobs: `EXTERNAL=1 KEY=..` (play an ffmpeg publisher), `SYNC`, `RATE`, `DEBUG_HLS`.
+      **STILL OPEN — hls.js drops audio segments in low-latency mode.** Narrowed a lot (2026-10-07). With a steady
+      `ffmpeg -re` publisher, hls.js LL shows 2-5 `bufferStalledError` and sometimes `fragGap` per 30 s and its latency
+      drifts to 4-10 s, **but only with an audio rendition**: the identical stream *video-only* is stall-free
+      (1053 frames, 0 events, ~1.3 s), and dash.js plays the same video+audio output steadily at 1.9 s. The proxy log
+      shows what happens: hls.js fetches every video part but skips whole *audio* segments (e.g. 9, 16, 17 of 24; 109
+      audio part requests vs 134 video), and the hole starves the audio buffer. Ruled out: server part availability
+      (median 344 ms between parts, max 523 ms), part contents (durations match, contiguous), publisher gaps, hold-back
+      distance (`liveSyncDuration` 1.5-3.5 s), the catch-up speed-up, background-tab timer throttling (flags added to
+      the harness), the Chrome 6-connections-per-host limit (Resource Timing: no request queued > 65 ms), and playlist
+      structure (polled 21 segments: audio and video playlists describe every segment identically) and start-time
+      alignment (`tfdt` + sample durations of 5 audio/video segment pairs: identical start and end, 0.0 ms apart).
+      hls.js's own fragment tracker marks a fragment a gap when an elementary stream has no buffered data inside its
+      time range (`addAsGap`), so the remaining suspect is hls.js's own alternate-audio handling in LL mode (initPTS /
+      per-part start times / how it decides an audio fragment is already covered).
+      Next experiments: mux audio into the video track (no alternate rendition), compare with a reference LL-HLS server,
+      log hls.js `audio-stream-controller` decisions at debug level around a skipped segment. Treat ~4 s (non-LL) as the
+      dependable HLS number and ~1.6-1.8 s as the LL floor for video-only. Fixed on the way: a blocking reload for a
+      part index beyond a *completed* segment waited the full cap and 404'd (it must answer at once).
+      Harness knobs: `EXTERNAL=1 KEY=..` (play an ffmpeg publisher), `SYNC`, `RATE`, `DEBUG_HLS`, `PLAYER=dash`, `SWITCH`.
 - [x] **Dynamic DASH MPD** for live, 2026-10-04: `LivePackager::dash_mpd()` emits `type="dynamic"` with
       `availabilityStartTime`, a `minimumUpdatePeriod` (half a segment), `minBufferTime`, and a
       `SegmentTimeline` over the current sliding window with `t` on the first entry — no
@@ -59,9 +74,39 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       naming the *same* `init-N.mp4` / `seg-N-M.m4s` URLs the HLS playlists do, so a player can
       switch between the two manifests and a segment is byte-identical either way. Tested over
       real HTTP (both AV1 and VP9 publishes): the manifest is well-formed XML and every segment it
-      names is fetchable and `moof`/`styp`-headed. Low-latency DASH (CMAF chunks) is still open.
-- [ ] **WHIP (WebRTC-HTTP ingest)** — browsers publish VP9/AV1 + Opus natively; needs ICE/DTLS/SRTP (large; evaluate a
-      memory-safe Rust WebRTC stack vs. scope).
+      names is fetchable and `moof`/`styp`-headed. **Low-latency DASH 2026-10-07**: with parts on, a segment is now the
+      concatenation of its parts (a completed segment = the chunks served so far + its tail, byte for byte), a request
+      for the segment in progress is *streamed* with HTTP chunked framing as each CMAF chunk is published
+      (`live_webm.rs::ll_dash_segment_streams_while_it_is_published`: several chunks, first one >= 0.5 s before the end,
+      bytes identical to the finished segment), and the MPD was rewritten to be a correct live manifest: real
+      `availabilityStartTime` (it was `1970-01-01T<time of day>`), per-`S` `t` = the real `tfdt` (it was always 0 for the
+      first entry, wrong once the window slides), `availabilityTimeOffset`/`availabilityTimeComplete` on the
+      `SegmentTemplate` (they were on the `MPD` root, which is invalid), the in-progress segment listed in the timeline,
+      `timeShiftBufferDepth`, `ServiceDescription` latency target and `UTCTiming`. **Real player VERIFIED 2026-10-07: dash.js 4.7.4
+      plays it steadily, glass-to-glass 1.90 s median / 2.0 s p95** (965 frames, no errors) with the same barcode
+      harness as the HLS numbers. (The long chase before that was a bug in *my test page*: it called `video.play()`
+      itself right after `dash.initialize(..., autoplay)`, so dash.js missed the native `play` event, never learnt
+      playback had started, never armed its manifest-refresh timer and went silent after two segments. ffmpeg's own
+      reference LL-DASH manifest failed identically, which is what exposed it.)
+- [x] **WHIP (WebRTC-HTTP ingest)** DONE 2026-10-07 — decision: use the **sans-I/O `str0m`** stack with its pure-Rust
+      crypto (`rust-crypto` feature: DTLS/SRTP/ICE, no OpenSSL, no C), behind the optional `whip` cargo feature
+      (`cargo build --features whip`; CLI `--features whip`, flags `--whip-candidate-ip`, `--whip-udp-port`), so the
+      default build stays dependency-light and the memory-safety story holds. `POST /whip/<key>` (SDP offer,
+      `Content-Type: application/sdp`) -> `201` + SDP answer + `Location`; `DELETE <location>` ends the session;
+      bearer / `?token=` auth and the stream-count / concurrency limits apply; CORS preflight and `Location`
+      exposure for browsers. The media path (VP9 + Opus) is translated into synthetic events for the *same*
+      `RtmpLiveSession` the RTMP ingest uses, so limits, idle timeout, recording, reconnect/discontinuity and
+      ladders all apply unchanged. VERIFIED with a real browser: headless Chrome with a fake camera publishes over
+      WHIP (`TRANSPORT=whip just browser-publish-test`; the `/publish` page has a WHIP transport) and the live HLS
+      decodes in ffmpeg (122 frames from the first 3 segments); HTTP-level tests in `tests/whip.rs`. Four things
+      only a real browser showed: Windows turns an ICMP "port unreachable" from an unreachable ICE candidate into
+      an error on the *next* `recv_from` (ignored now), str0m needs the true local address of each datagram (one UDP
+      socket per advertised address, not one on 0.0.0.0), a WebRTC encoder sends a key frame only at the start and
+      on request (so the server sends a PLI every segment duration, or no segment is ever cut), and the VP9
+      configuration must come from the first key frame. OPEN: AV1 over WebRTC (needs `av1C` built from the sequence
+      header), trickle ICE / `PATCH`, A/V alignment from RTCP sender reports (str0m already surfaces the NTP<->RTP
+      mapping; today each track is aligned by the arrival time of its first packet), TURN/STUN for publishers
+      behind NAT (`--whip-candidate-ip` advertises a public address), an OBS WHIP pass, a session metric.
 - [x] **Browser publish** DONE 2026-10-06: chose **WebSocket ingest** over streaming `fetch` (Chrome's upload streaming
       needs HTTP/2 over TLS, which the server does not speak). `GET /ingest/<key>` with `Upgrade: websocket` feeds binary
       messages into the same ingest path as HTTP POST, so tokens (`?token=`, since browsers cannot set WebSocket
@@ -107,7 +152,15 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       listing generations, serving older generations,
       recording survives restart only as files (no in-memory index rebuilt, so a restarted server serves
       the newest generation's files but does not extend it).
-- [ ] Multi-rendition ladders (needs transcoding; passthrough only today — separate decision).
+- [x] **Multi-rendition ladders without transcoding** DONE 2026-10-07 (the publisher supplies the renditions; the server
+      packages them): the packager accepts several video tracks that share key frame timestamps (non-lead renditions
+      cut on the lead's boundaries and join at their first key frame); the HLS master lists one variant per rendition
+      (own `RESOLUTION`/`BANDWIDTH`, shared audio group) and the DASH MPD puts them in one `AdaptationSet`. Inputs:
+      a WebM with several video tracks (`a_multi_rendition_ladder_is_packaged_per_rendition`: each rendition decodes
+      frame-exactly vs ffmpeg) and **Enhanced RTMP v2 Multitrack** (below). Real player: hls.js sees both levels
+      (320x180, 640x360), switched 1->0->1 mid-stream, 934 frames, 0 errors. Server-side transcoding to build a ladder
+      from a single input is NOT done and is a different decision: it needs decode + scale + encode in real time, and
+      the in-tree AV1/VP9 decoders are far slower than real time at useful sizes (see the 2026-10-03 direction note).
 - [x] Opus pre-skip carried end to end: the `dOps` pre-skip becomes `OpusHead` on ingest and `CodecDelay`
       + `SeekPreRoll` on WebM output (measured against ffmpeg: without it the stream starts 7 ms late).
 - [x] **`DiscardPadding` (end trim)** DONE 2026-10-06: `MkvStream` parses it and `WebmWriter` re-emits it in a
@@ -133,7 +186,7 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [ ] Live variant at the edge (Durable Object / stateful worker holding the `LivePackager`).
 - [ ] Encryption: CENC/CBCS + ClearKey/Widevine key hooks (AV1/VP9/Opus).
 - [ ] Subtitles/WebVTT passthrough, multi-audio-language tracks and `EXT-X-MEDIA` metadata, trick-play.
-- [ ] `sidx` index boxes and `styp` for fragmented output (DASH-IF compatibility).
+- [x] `styp` + `sidx` on VOD media segments DONE 2026-10-07 (`FragmentWriter::with_segment_index`; single-track segments get a v1 one-reference `sidx`, used by `Packager::media_segment`; test in `package.rs`). Still open: `sidx` for live segments (parts stay bare `moof`+`mdat`) and a whole-file `sidx` for `remux --fragmented`; verify with the DASH-IF validator.
 
 ### C. Containers (demux / mux)
 

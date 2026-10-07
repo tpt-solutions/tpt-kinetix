@@ -23,6 +23,8 @@ over a WebSocket. Viewers play it as HLS.</p>
 <input id="key" value="cam1" pattern="[A-Za-z0-9._-]+">
 <label for="token">Publish token (if the server requires one)</label>
 <input id="token" type="password" autocomplete="off">
+<label for="transport">Transport</label>
+<select id="transport"><option value="ws">WebSocket (WebM chunks)</option><option value="whip">WHIP (WebRTC, VP9 + Opus)</option></select>
 <label for="source">Source</label>
 <select id="source"><option value="camera">Camera + microphone</option><option value="screen">Screen</option></select>
 <div>
@@ -37,6 +39,7 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 if (params.has("key")) $("key").value = params.get("key");
 if (params.has("token")) $("token").value = params.get("token");
+if (params.has("transport")) $("transport").value = params.get("transport");
 const logEl = $("log");
 const log = (m) => { logEl.textContent += m + "\n"; window.__publishLog = (window.__publishLog || []).concat(m); };
 
@@ -45,9 +48,61 @@ const MIME_CANDIDATES = [
   "video/webm;codecs=av1,opus",
   "video/webm;codecs=vp9,opus",
 ];
-let recorder, socket, stream, sent = 0;
+let recorder, socket, stream, sent = 0, pc, whipLocation;
+
+// WHIP (RFC 9725): publish over WebRTC with a single HTTP exchange (non-trickle).
+async function startWhip(key, token) {
+  pc = new RTCPeerConnection({ iceServers: [] });
+  // WHIP publishes only: the offer is `sendonly`.
+  stream.getTracks().forEach((t) => pc.addTransceiver(t, { direction: "sendonly", streams: [stream] }));
+  // The server ingests VP9 + Opus: put VP9 first.
+  const caps = RTCRtpSender.getCapabilities("video").codecs;
+  pc.getTransceivers().forEach((tr) => {
+    if (tr.sender.track && tr.sender.track.kind === "video") {
+      const vp9 = caps.filter((c) => c.mimeType === "video/VP9");
+      tr.setCodecPreferences([...vp9, ...caps.filter((c) => c.mimeType !== "video/VP9")]);
+    }
+  });
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise((res) => {
+    if (pc.iceGatheringState === "complete") return res();
+    pc.addEventListener("icegatheringstatechange", () => { if (pc.iceGatheringState === "complete") res(); });
+  });
+  const r = await fetch(`${location.origin}/whip/${key}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: pc.localDescription.sdp,
+  });
+  if (r.status !== 201) throw new Error(`WHIP refused: ${r.status} ${await r.text()}`);
+  whipLocation = r.headers.get("Location");
+  await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+  pc.addEventListener("connectionstatechange", () => {
+    log(`webrtc: ${pc.connectionState}`);
+    window.__rtcState = pc.connectionState;
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") stop(false);
+  });
+  log("publishing over WHIP (WebRTC)");
+}
 
 async function start() {
+  if ($("transport").value === "whip") return startAny();
+  return startWs();
+}
+
+async function startAny() {
+  const key = $("key").value.trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(key)) { log("Invalid stream key."); return; }
+  stream = $("source").value === "screen"
+    ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+    : await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 }, audio: true });
+  $("preview").srcObject = stream;
+  await startWhip(key, $("token").value);
+  $("start").disabled = true; $("stop").disabled = false;
+  $("watch").innerHTML = `Playing at <a href="${location.origin}/${key}/master.m3u8">${location.origin}/${key}/master.m3u8</a>`;
+  window.__publishing = true;
+}
+
+async function startWs() {
   const mimeType = MIME_CANDIDATES.find((m) => MediaRecorder.isTypeSupported(m));
   if (!mimeType) { log("This browser's MediaRecorder cannot produce AV1 or VP9 + Opus WebM."); return; }
   const key = $("key").value.trim();
@@ -84,6 +139,10 @@ async function start() {
 }
 
 function stop(closeSocket = true) {
+  if (pc) {
+    if (whipLocation && closeSocket) fetch(whipLocation, { method: "DELETE" }).catch(() => {});
+    pc.close(); pc = null; whipLocation = null;
+  }
   if (recorder && recorder.state !== "inactive") recorder.stop();
   if (stream) stream.getTracks().forEach((t) => t.stop());
   if (closeSocket && socket && socket.readyState === WebSocket.OPEN) socket.close(1000, "done");

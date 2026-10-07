@@ -44,6 +44,7 @@ struct Track {
 pub struct FragmentWriter {
     tracks: Vec<Track>,
     sequence: u32,
+    segment_index: bool,
 }
 
 fn rescale(value: i64, from: (u32, u32), to_scale: u32) -> Result<i64, MuxError> {
@@ -90,7 +91,18 @@ impl FragmentWriter {
         Ok(Self {
             tracks,
             sequence: 1,
+            segment_index: false,
         })
+    }
+
+    /// Makes every flushed fragment a self-contained DASH-IF / CMAF *media
+    /// segment*: a `styp` box, then (for a single-track writer) a `sidx` box
+    /// describing the fragment (earliest presentation time, duration, SAP), then
+    /// `moof` + `mdat`. Off by default (live parts and plain fragments are bare
+    /// `moof` + `mdat`).
+    pub fn with_segment_index(mut self, on: bool) -> Self {
+        self.segment_index = on;
+        self
     }
 
     /// Starts fragment sequence numbers at `n` instead of 1 (so independently
@@ -238,7 +250,17 @@ impl FragmentWriter {
         debug_assert_eq!(moof.len(), moof_len);
 
         let data_len: usize = taken.iter().flatten().map(|s| s.data.len()).sum();
-        let mut out = moof;
+        let mut out = if self.segment_index {
+            let mut head = boxed(b"styp", &styp_payload());
+            if taken.len() == 1 && !taken[0].is_empty() {
+                let ref_len = (moof_len + 8 + data_len) as u32;
+                head.extend(build_sidx(&self.tracks[0], &taken[0], ref_len));
+            }
+            head.extend(moof);
+            head
+        } else {
+            moof
+        };
         out.reserve(data_len + 16);
         if data_len + 8 > u32::MAX as usize {
             return Err(MuxError::Unsupported("fragment larger than 4 GiB".into()));
@@ -250,6 +272,41 @@ impl FragmentWriter {
         }
         Ok(Some(out))
     }
+}
+
+/// `styp` payload: major brand `msdh` (CMAF media segment), compatible `msdh`
+/// and `msix` (segment index present).
+fn styp_payload() -> Vec<u8> {
+    let mut v = b"msdh".to_vec();
+    v.extend_from_slice(&0u32.to_be_bytes());
+    v.extend_from_slice(b"msdh");
+    v.extend_from_slice(b"msix");
+    v
+}
+
+/// A version-1 `sidx` with one reference: the fragment (`moof` + `mdat`,
+/// `ref_len` bytes) that follows it.
+fn build_sidx(track: &Track, samples: &[Sample], ref_len: u32) -> Vec<u8> {
+    let earliest = samples
+        .iter()
+        .map(|s| s.dts + i64::from(s.cts))
+        .min()
+        .unwrap_or(0)
+        .max(0) as u64;
+    let duration: u64 = samples.iter().map(|s| u64::from(s.duration.unwrap_or(0))).sum();
+    let sap = samples[0].key;
+    let mut p = Vec::new();
+    p.extend_from_slice(&1u32.to_be_bytes()); // reference_ID (track id)
+    p.extend_from_slice(&track.info.timescale.to_be_bytes());
+    p.extend_from_slice(&earliest.to_be_bytes());
+    p.extend_from_slice(&0u64.to_be_bytes()); // first_offset
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // reference_count
+    p.extend_from_slice(&(ref_len & 0x7FFF_FFFF).to_be_bytes()); // type 0 = media
+    p.extend_from_slice(&(duration.min(u64::from(u32::MAX)) as u32).to_be_bytes());
+    let sap_word: u32 = if sap { 0x9000_0000 } else { 0 }; // starts_with_SAP, SAP_type 1
+    p.extend_from_slice(&sap_word.to_be_bytes());
+    full_box(b"sidx", 1, 0, &p)
 }
 
 fn init_trak(t: &Track, track_id: u32) -> Vec<u8> {

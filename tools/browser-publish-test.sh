@@ -2,6 +2,7 @@
 # Publishes from a real browser: headless Chrome (fake camera + microphone) opens the live
 # server's /publish page, MediaRecorder streams AV1/VP9 + Opus over a WebSocket, and the
 # served HLS must appear live and decode in ffmpeg.
+# TRANSPORT=whip publishes over WebRTC (WHIP, VP9 + Opus) instead of a WebSocket.
 # Needs: node >= 18, Chrome (CHROME=/path), ffmpeg (FFMPEG=/path if not on node's PATH).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -15,7 +16,10 @@ if [ -z "$chrome" ]; then
 fi
 [ -n "$chrome" ] || { echo "set CHROME to a Chrome/Chromium binary" >&2; exit 2; }
 export FFMPEG="${FFMPEG:-$(command -v ffmpeg)}"
-cargo build -q -p tpt-kinetix-stream --example live_server
+transport="${TRANSPORT:-ws}"   # ws (WebSocket + MediaRecorder) or whip (WebRTC)
+features=()
+[ "$transport" = whip ] && features=(--features whip)
+cargo build -q -p tpt-kinetix-stream ${features[@]+"${features[@]}"} --example live_server
 port="${PORT:-8899}"
 target/debug/examples/live_server "$port" >"${TMPDIR:-/tmp}/tpt-publish-server.log" 2>&1 &
 server=$!

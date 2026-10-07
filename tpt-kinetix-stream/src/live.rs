@@ -29,6 +29,7 @@ use tpt_kinetix_package::{LiveOptions, LivePackager, PlaylistRequest};
 
 use crate::policy::{ActiveGuard, ActiveSet, IngestPolicy, Metrics, Refusal};
 use crate::record::Recorder;
+use crate::whip::{WhipConfig, WhipSessions};
 use crate::ws;
 
 /// The browser publishing demo served at `/publish`.
@@ -68,6 +69,8 @@ pub struct LiveServer {
     metrics: Arc<Metrics>,
     active: ActiveSet,
     recorder: Option<Arc<Recorder>>,
+    whip_cfg: Arc<WhipConfig>,
+    whip_sessions: WhipSessions,
 }
 
 impl LiveServer {
@@ -80,7 +83,16 @@ impl LiveServer {
             metrics: Arc::new(Metrics::default()),
             active: ActiveSet::default(),
             recorder: None,
+            whip_cfg: Arc::new(WhipConfig::default()),
+            whip_sessions: WhipSessions::default(),
         }
+    }
+
+    /// Where WHIP (WebRTC) publishers send media; see [`crate::whip`]. The default
+    /// advertises loopback and the machine's primary address on an ephemeral port.
+    pub fn with_whip(mut self, cfg: WhipConfig) -> Self {
+        self.whip_cfg = Arc::new(cfg);
+        self
     }
 
     /// Records every publish under `dir` (see [`Recorder`]): segments are
@@ -178,6 +190,12 @@ impl LiveServer {
         }
     }
 
+    /// The target segment length, in seconds.
+    #[cfg(feature = "whip")]
+    pub(crate) fn segment_seconds(&self) -> f64 {
+        self.opts.segment_seconds
+    }
+
     /// The configured idle timeout, if any.
     pub(crate) fn idle_timeout(&self) -> Option<std::time::Duration> {
         self.policy.idle_timeout
@@ -253,12 +271,19 @@ impl LiveServer {
             None => (target.clone(), String::new()),
         };
 
+        if path.starts_with("/whip/") {
+            return self.whip(r, &method, &path, &query, &headers).await;
+        }
         match method.as_str() {
             "GET" if path.starts_with("/ingest/") && ws::upgrade_key(&headers).is_some() => {
                 // Browser publishing: MediaRecorder chunks as binary WebSocket messages.
                 let Some(key) = path.strip_prefix("/ingest/").filter(|k| valid_key(k)) else {
-                    return respond(r.get_mut(), Reply::text(404, "publish to /ingest/<key>"), false)
-                        .await;
+                    return respond(
+                        r.get_mut(),
+                        Reply::text(404, "publish to /ingest/<key>"),
+                        false,
+                    )
+                    .await;
                 };
                 if let Err(refusal) = self.policy.authorize(key, &headers, &query) {
                     self.metrics.count_refusal(refusal);
@@ -454,6 +479,139 @@ impl LiveServer {
         Reply::text(404, "no such resource")
     }
 
+    /// WHIP: `POST /whip/<key>` (SDP offer -> `201` + SDP answer) and
+    /// `DELETE /whip/<key>/<session>`.
+    async fn whip(
+        &self,
+        mut r: BufReader<TcpStream>,
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &HashMap<String, String>,
+    ) -> Result<()> {
+        let rest = path.trim_start_matches("/whip/");
+        let (key, session) = match rest.split_once('/') {
+            Some((k, s)) => (k, Some(s)),
+            None => (rest, None),
+        };
+        if !valid_key(key) {
+            return respond(
+                r.get_mut(),
+                Reply::text(404, "whip endpoint is /whip/<key>"),
+                false,
+            )
+            .await;
+        }
+        if method == "OPTIONS" {
+            return respond(r.get_mut(), Reply::text(204, ""), false).await;
+        }
+        if let Err(refusal) = self.policy.authorize(key, headers, query) {
+            self.metrics.count_refusal(refusal);
+            tracing::warn!(key, "WHIP publish refused: {}", refusal.message());
+            return respond(
+                r.get_mut(),
+                Reply::text(refusal.status(), refusal.message()),
+                false,
+            )
+            .await;
+        }
+        let reply = match (method, session) {
+            ("POST", None) => self.whip_offer(&mut r, key, query, headers).await,
+            ("DELETE", Some(id)) => {
+                if self.whip_sessions.stop(&format!("{key}/{id}")) {
+                    Reply::text(200, "")
+                } else {
+                    Reply::text(404, "no such session")
+                }
+            }
+            _ => Reply::text(405, "WHIP: POST an SDP offer to /whip/<key>"),
+        };
+        respond(r.get_mut(), reply, false).await
+    }
+
+    #[cfg(feature = "whip")]
+    async fn whip_offer(
+        &self,
+        r: &mut BufReader<TcpStream>,
+        key: &str,
+        query: &str,
+        headers: &HashMap<String, String>,
+    ) -> Reply {
+        if !headers
+            .get("content-type")
+            .is_some_and(|v| v.to_ascii_lowercase().starts_with("application/sdp"))
+        {
+            return Reply::text(415, "send the SDP offer as application/sdp");
+        }
+        // The publish policy's slot / concurrency limits, checked up front so the
+        // publisher gets an HTTP error instead of a silent drop. (Probed, not held:
+        // the session takes its own slot when media starts.)
+        if let Err(refusal) = self.active.enter(key, &self.policy) {
+            self.metrics.count_refusal(refusal);
+            return Reply::text(refusal.status(), refusal.message());
+        }
+        let mut body = Body::new(headers);
+        let mut offer = Vec::new();
+        loop {
+            match body.next(r).await {
+                Ok(Some(chunk)) => {
+                    offer.extend_from_slice(&chunk);
+                    if offer.len() > 64 * 1024 {
+                        return Reply::text(413, "SDP offer too large");
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => return Reply::text(400, &e.to_string()),
+            }
+        }
+        let Ok(offer) = String::from_utf8(offer) else {
+            return Reply::text(400, "the SDP offer is not UTF-8");
+        };
+        let id = format!("{:016x}", rand_id());
+        // A presented token rides along as `name?token=...`, which is how the
+        // publish policy reads it.
+        let publish_key = match IngestPolicy::presented(headers, query) {
+            Some(t) => format!("{key}?token={t}"),
+            None => key.to_string(),
+        };
+        match crate::whip::start_session(
+            self.clone(),
+            &self.whip_cfg,
+            self.whip_sessions.clone(),
+            format!("{key}/{id}"),
+            publish_key,
+            &offer,
+        )
+        .await
+        {
+            Ok(answer) => {
+                let mut reply = Reply::text(201, "");
+                reply.content_type = "application/sdp";
+                reply.body = answer.into_bytes();
+                reply.extra_headers = format!("Location: /whip/{key}/{id}{}", "\r\n");
+                reply
+            }
+            Err(e) => {
+                tracing::warn!(key, error = %e, "WHIP offer rejected");
+                Reply::text(400, &e.to_string())
+            }
+        }
+    }
+
+    #[cfg(not(feature = "whip"))]
+    async fn whip_offer(
+        &self,
+        _r: &mut BufReader<TcpStream>,
+        _key: &str,
+        _query: &str,
+        _headers: &HashMap<String, String>,
+    ) -> Reply {
+        Reply::text(
+            501,
+            "WHIP needs the `whip` cargo feature (cargo build --features whip)",
+        )
+    }
+
     /// Streams segment `number` of `track` while it is still being published
     /// (low-latency DASH): headers first, then every CMAF chunk as it appears with
     /// HTTP chunked framing, then whatever the finished segment adds after its last
@@ -469,9 +627,8 @@ impl LiveServer {
             b"HTTP/1.1 200 OK\r\nContent-Type: video/iso.segment\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
         )
         .await?;
-        let budget = std::time::Duration::from_secs_f64(
-            live.lock().unwrap().segment_seconds() * 3.0 + 5.0,
-        );
+        let budget =
+            std::time::Duration::from_secs_f64(live.lock().unwrap().segment_seconds() * 3.0 + 5.0);
         let deadline = tokio::time::Instant::now() + budget;
         let (mut next_part, mut sent) = (0u64, 0usize);
         loop {
@@ -482,7 +639,11 @@ impl LiveServer {
                     parts.push(p);
                 }
                 let whole = l.segment(track, number);
-                (parts, whole, number <= l.latest_segment() || l.is_finished())
+                (
+                    parts,
+                    whole,
+                    number <= l.latest_segment() || l.is_finished(),
+                )
             };
             for p in &parts {
                 write_http_chunk(s, p).await?;
@@ -527,7 +688,10 @@ impl LiveServer {
                 }
                 // Only the in-progress segment (or the one a hint will open next)
                 // can still gain parts.
-                if live.is_finished() || number <= live.latest_segment() || number > live.latest_segment() + 2 {
+                if live.is_finished()
+                    || number <= live.latest_segment()
+                    || number > live.latest_segment() + 2
+                {
                     return None;
                 }
             }
@@ -613,7 +777,11 @@ impl LiveServer {
         tracing::info!(%key, "publish started");
         Metrics::inc(&self.metrics.publishes_started);
 
-        let mut body = if ws { Body::WebSocket } else { Body::new(headers) };
+        let mut body = if ws {
+            Body::WebSocket
+        } else {
+            Body::new(headers)
+        };
         let mut parser = MkvStream::new();
         let mut result: Result<()> = Ok(());
         let mut cut_off: Option<Refusal> = None;
@@ -666,12 +834,7 @@ impl LiveServer {
             // Keep what was already published playable, then say why it stopped.
             let _ = live.lock().unwrap().finish();
             self.record(&key, &live, true);
-            return end_publish(
-                &mut r,
-                ws,
-                Reply::text(refusal.status(), refusal.message()),
-            )
-            .await;
+            return end_publish(&mut r, ws, Reply::text(refusal.status(), refusal.message())).await;
         }
         if result.is_ok() {
             result = parser
@@ -720,7 +883,10 @@ impl LiveServer {
         for e in &events {
             if let MkvEvent::Tracks(t) = e {
                 if !live.lock().unwrap().accepts_tracks(t) {
-                    tracing::info!(key, "track configuration changed; starting a new presentation");
+                    tracing::info!(
+                        key,
+                        "track configuration changed; starting a new presentation"
+                    );
                     let fresh = self.new_packager();
                     // The old presentation ends cleanly for anyone still watching it.
                     let _ = live.lock().unwrap().finish();
@@ -858,6 +1024,8 @@ struct Reply {
     /// Set for a segment still being published: the body is streamed as the
     /// parts appear (low-latency DASH) instead of being sent whole.
     stream: Option<(Shared, usize, u64)>,
+    /// Extra raw header lines, each ending in CRLF.
+    extra_headers: String,
 }
 
 impl Reply {
@@ -868,6 +1036,7 @@ impl Reply {
             cache: "no-store",
             body: msg.as_bytes().to_vec(),
             stream: None,
+            extra_headers: String::new(),
         }
     }
 
@@ -878,6 +1047,7 @@ impl Reply {
             cache: "no-cache",
             body,
             stream: None,
+            extra_headers: String::new(),
         }
     }
 
@@ -889,6 +1059,7 @@ impl Reply {
             cache: "no-cache",
             body,
             stream: None,
+            extra_headers: String::new(),
         }
     }
 
@@ -899,6 +1070,7 @@ impl Reply {
             cache: "no-cache",
             body,
             stream: None,
+            extra_headers: String::new(),
         }
     }
 
@@ -909,6 +1081,7 @@ impl Reply {
             cache: "public, max-age=60",
             body,
             stream: None,
+            extra_headers: String::new(),
         }
     }
 }
@@ -929,9 +1102,26 @@ async fn end_publish(r: &mut BufReader<TcpStream>, ws: bool, reply: Reply) -> Re
     Ok(())
 }
 
+/// A hard-to-guess session id (the clock plus a process-wide counter, hashed).
+fn rand_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static N: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let mut x = t ^ N.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
 /// One HTTP/1.1 chunk of a chunked response.
 async fn write_http_chunk(s: &mut TcpStream, data: &[u8]) -> Result<()> {
-    s.write_all(format!("{:X}\r\n", data.len()).as_bytes()).await?;
+    s.write_all(format!("{:X}\r\n", data.len()).as_bytes())
+        .await?;
     s.write_all(data).await?;
     s.write_all(b"\r\n").await?;
     s.flush().await?;
@@ -941,7 +1131,10 @@ async fn write_http_chunk(s: &mut TcpStream, data: &[u8]) -> Result<()> {
 async fn respond(s: &mut TcpStream, r: Reply, head_only: bool) -> Result<()> {
     let reason = match r.status {
         200 => "OK",
+        201 => "Created",
         204 => "No Content",
+        415 => "Unsupported Media Type",
+        501 => "Not Implemented",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
@@ -954,11 +1147,12 @@ async fn respond(s: &mut TcpStream, r: Reply, head_only: bool) -> Result<()> {
         _ => "Error",
     };
     let head = format!(
-        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\nAccess-Control-Expose-Headers: Location\r\nTiming-Allow-Origin: *\r\n{}Connection: close\r\n\r\n",
         r.status,
         r.content_type,
         r.body.len(),
-        r.cache
+        r.cache,
+        r.extra_headers
     );
     s.write_all(head.as_bytes()).await?;
     if !head_only {

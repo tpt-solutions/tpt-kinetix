@@ -228,13 +228,15 @@ impl ChunkParser {
         let uses_extended = match fmt {
             // Type 3 never changes the flag; the first header of the message set it.
             ChunkHeaderFormat::Type3 => *self.extended.get(&chunk_stream_id).unwrap_or(&false),
-            _ => msg_header_len
-                > match fmt {
-                    ChunkHeaderFormat::Type0 => 11,
-                    ChunkHeaderFormat::Type1 => 7,
-                    ChunkHeaderFormat::Type2 => 3,
-                    ChunkHeaderFormat::Type3 => 0,
-                },
+            _ => {
+                msg_header_len
+                    > match fmt {
+                        ChunkHeaderFormat::Type0 => 11,
+                        ChunkHeaderFormat::Type1 => 7,
+                        ChunkHeaderFormat::Type2 => 3,
+                        ChunkHeaderFormat::Type3 => 0,
+                    }
+            }
         };
         self.extended.insert(chunk_stream_id, uses_extended);
         self.prev_headers.insert(chunk_stream_id, header.clone());

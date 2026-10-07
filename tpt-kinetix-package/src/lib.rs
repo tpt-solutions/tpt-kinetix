@@ -266,7 +266,9 @@ impl Packager {
 
         let mut info = t.info.clone();
         info.index = 0;
-        let mut w = FragmentWriter::new(&[info])?.starting_sequence(n as u32);
+        let mut w = FragmentWriter::new(&[info])?
+            .starting_sequence(n as u32)
+            .with_segment_index(true);
         let scale = t.info.timescale;
         for (s, bytes) in samples.iter().zip(data) {
             let dts = s.dts as i64;

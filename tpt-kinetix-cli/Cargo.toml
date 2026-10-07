@@ -37,3 +37,5 @@ tpt-kinetix-stream = { workspace = true }
 [features]
 default = ["codec-vp9"]
 codec-vp9 = ["dep:tpt-kinetix-vp9", "tpt-kinetix-pipeline/codec-vp9"]
+# WHIP (WebRTC) ingest in `live`: browsers and OBS publish VP9 + Opus over WebRTC.
+whip = ["tpt-kinetix-stream/whip"]

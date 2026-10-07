@@ -14,6 +14,10 @@ use tpt_kinetix_stream::{IngestPolicy, LiveServer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `RUST_LOG=tpt_kinetix_stream=debug` shows what the server is doing.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     let mut args = std::env::args().skip(1);
     let port = args.next().unwrap_or_else(|| "8080".into());
     let token = args.next();
@@ -25,8 +29,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(p) = env("PART_SECONDS") {
         opts.part_seconds = (p > 0.0).then_some(p);
     }
-    let server = LiveServer::new(opts)
-    .with_policy(IngestPolicy {
+    let server = LiveServer::new(opts).with_policy(IngestPolicy {
         token,
         ..Default::default()
     });

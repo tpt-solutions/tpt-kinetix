@@ -125,6 +125,14 @@ enum Commands {
         /// Recorded megabytes kept per stream: the oldest segments are deleted beyond it (default: keep all).
         #[arg(long, requires = "record_dir")]
         record_max_mb: Option<u64>,
+        /// WHIP (WebRTC) publishers: an address to advertise as an ICE candidate (repeatable;
+        /// default: loopback and the primary address). Needs a build with `--features whip`;
+        /// publishers POST an SDP offer to `/whip/<key>`.
+        #[arg(long = "whip-candidate-ip")]
+        whip_candidate_ips: Vec<std::net::IpAddr>,
+        /// UDP port for WHIP media (default: a free port per session).
+        #[arg(long, default_value_t = 0)]
+        whip_udp_port: u16,
     },
     /// Serve an MP4 as HLS and DASH, packaged just in time (nothing is pre-processed).
     Serve {
@@ -232,6 +240,8 @@ async fn main() -> Result<()> {
             record_depth_secs,
             keep_generations,
             record_max_mb,
+            whip_candidate_ips,
+            whip_udp_port,
         } => {
             let host = if public { "0.0.0.0" } else { "127.0.0.1" };
             println!(
@@ -250,9 +260,16 @@ async fn main() -> Result<()> {
                 reject_concurrent,
                 ..Default::default()
             });
+            let server = server.with_whip(tpt_kinetix_stream::WhipConfig {
+                candidate_ips: whip_candidate_ips,
+                udp_port: whip_udp_port,
+            });
             let server = match record_dir {
                 Some(dir) => {
-                    println!("  record : {} (play at /<key>/dvr/master.m3u8)", dir.display());
+                    println!(
+                        "  record : {} (play at /<key>/dvr/master.m3u8)",
+                        dir.display()
+                    );
                     server.with_recording_limits(
                         dir,
                         tpt_kinetix_stream::RecordingLimits {
@@ -1008,6 +1025,7 @@ async fn stream(
 
     let rtmp_server = tpt_kinetix_stream::RtmpServer::new(tpt_kinetix_stream::RtmpConfig {
         bind_addr: rtmp_addr.to_string(),
+        tls: None,
     });
 
     let packager_for_handler = Arc::clone(&packager);
@@ -1100,9 +1118,6 @@ fn handle_rtmp_event(
                 bytes = hdr.raw.len(),
                 "received HDR metadata (not muxed to HLS)"
             );
-        }
-        RtmpMediaEvent::Multitrack { track_number } => {
-            tracing::debug!(track_number, "RTMP multitrack select");
         }
         RtmpMediaEvent::PublishStop => {
             tracing::info!("RTMP publish stopped; flushing remaining HLS segments");

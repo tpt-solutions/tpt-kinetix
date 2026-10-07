@@ -646,14 +646,20 @@ fn a_reconnecting_publisher_resumes_with_a_discontinuity() {
     feed(&webm, &mut live);
     assert!(!live.is_finished(), "a reconnect reopens the stream");
     let mid = live.media_playlist(0).unwrap();
-    assert!(!mid.contains("#EXT-X-ENDLIST"), "live again while publishing");
+    assert!(
+        !mid.contains("#EXT-X-ENDLIST"),
+        "live again while publishing"
+    );
     live.finish().unwrap();
     let both = live.media_playlist(0).unwrap();
 
     // Exactly one discontinuity, placed before the first segment of the new publish.
     assert_eq!(both.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
     let lines: Vec<&str> = both.lines().collect();
-    let at = lines.iter().position(|l| *l == "#EXT-X-DISCONTINUITY").unwrap();
+    let at = lines
+        .iter()
+        .position(|l| *l == "#EXT-X-DISCONTINUITY")
+        .unwrap();
     let before = lines[..at]
         .iter()
         .filter(|l| l.starts_with("#EXTINF"))
@@ -663,7 +669,10 @@ fn a_reconnecting_publisher_resumes_with_a_discontinuity() {
     // Segment numbers keep counting, and the second publish adds about as much
     // media as the first.
     let n = both.matches("#EXTINF").count();
-    assert!(n >= first_segments * 2 - 1, "{n} segments vs {first_segments}");
+    assert!(
+        n >= first_segments * 2 - 1,
+        "{n} segments vs {first_segments}"
+    );
     let both_secs = total_extinf(&both);
     assert!(
         (both_secs - 2.0 * first_secs).abs() < 1.5,
@@ -797,7 +806,10 @@ fn ll_playlist_tags_follow_the_spec() {
             },
         )
         .unwrap();
-    assert_eq!(blocking, full, "a blocking reload must not change the playlist");
+    assert_eq!(
+        blocking, full,
+        "a blocking reload must not change the playlist"
+    );
     assert!(!full.contains("#EXT-X-SKIP"), "{full}");
 
     // An explicit delta request skips the oldest segments, keeping >= CAN-SKIP-UNTIL.
@@ -819,17 +831,174 @@ fn ll_playlist_tags_follow_the_spec() {
         .unwrap();
     assert!(skipped > 0 && skipped + seg_lines(&delta) == n, "{delta}");
     // The media sequence stays that of the *full* playlist's first segment.
-    assert!(delta.contains(&format!("#EXT-X-MEDIA-SEQUENCE:{first_msn}\n")), "{delta}");
+    assert!(
+        delta.contains(&format!("#EXT-X-MEDIA-SEQUENCE:{first_msn}\n")),
+        "{delta}"
+    );
 
     // PART-TARGET bounds every part, and PART-HOLD-BACK is at least 3 targets.
     let num = |p: &str, tag: &str| -> f64 {
-        p.split(tag).nth(1).unwrap().split(|c| c == ',' || c == '\n').next().unwrap().parse().unwrap()
+        p.split(tag)
+            .nth(1)
+            .unwrap()
+            .split([',', '\n'])
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
     };
     let target = num(&full, "PART-TARGET=");
     let hold = num(&full, "PART-HOLD-BACK=");
-    assert!(hold >= 3.0 * target - 1e-9, "hold-back {hold} vs target {target}");
+    assert!(
+        hold >= 3.0 * target - 1e-9,
+        "hold-back {hold} vs target {target}"
+    );
     for l in full.lines().filter(|l| l.starts_with("#EXT-X-PART:")) {
         let d = num(l, "DURATION=");
-        assert!(d <= target + 1e-9, "part of {d}s exceeds PART-TARGET {target}: {l}");
+        assert!(
+            d <= target + 1e-9,
+            "part of {d}s exceeds PART-TARGET {target}: {l}"
+        );
     }
+}
+
+/// A WebM carrying two video renditions (a ladder) plus audio: each rendition is
+/// packaged as its own track and listed as its own variant (HLS) / Representation
+/// of one AdaptationSet (DASH), with shared segment boundaries, and every
+/// rendition decodes exactly like the source.
+#[test]
+fn a_multi_rendition_ladder_is_packaged_per_rendition() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_ladder_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_path = dir.join("ladder.webm");
+    let ok = Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=25",
+            "-t",
+            "8",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "8",
+        ])
+        .args(["-filter_complex", "[0:v]split=2[a][b];[b]scale=320:180[c]"])
+        .args(["-map", "[a]", "-map", "[c]", "-map", "1:a"])
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libvpx-vp9",
+            "-g",
+            "25",
+            "-keyint_min",
+            "25",
+            "-sc_threshold",
+            "0",
+        ])
+        .args([
+            "-b:v:0", "600k", "-b:v:1", "200k", "-c:a", "libopus", "-ac", "2", "-b:a", "64k",
+        ])
+        .arg(&src_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let webm = std::fs::read(&src_path).unwrap();
+    let (live, _) = ingest(
+        &webm,
+        LiveOptions {
+            segment_seconds: 2.0,
+            window: 100,
+            part_seconds: None,
+        },
+    );
+    assert_eq!(
+        live.track_count(),
+        3,
+        "two video renditions and one audio track"
+    );
+
+    // HLS: one variant per rendition, both naming the same audio group.
+    let master = live.master_playlist().unwrap();
+    let variants: Vec<&str> = master
+        .lines()
+        .filter(|l| l.starts_with("#EXT-X-STREAM-INF"))
+        .collect();
+    assert_eq!(variants.len(), 2, "{master}");
+    assert!(
+        master.contains("RESOLUTION=640x360") && master.contains("RESOLUTION=320x180"),
+        "{master}"
+    );
+    assert!(
+        variants.iter().all(|v| v.contains("AUDIO=\"audio\"")),
+        "{master}"
+    );
+
+    // DASH: one video AdaptationSet holding both Representations.
+    let mpd = live.dash_mpd().unwrap();
+    let video_set = mpd
+        .split("<AdaptationSet")
+        .find(|s| s.contains("contentType=\"video\""))
+        .unwrap();
+    assert_eq!(video_set.matches("<Representation").count(), 2, "{mpd}");
+    assert_eq!(
+        mpd.matches("<AdaptationSet").count(),
+        2,
+        "one video set + one audio set: {mpd}"
+    );
+
+    // Renditions share segment boundaries and each decodes like the source.
+    let seg_count = |t: usize| live.media_playlist(t).unwrap().matches("#EXTINF").count();
+    assert_eq!(
+        seg_count(0),
+        seg_count(1),
+        "renditions must share segment boundaries"
+    );
+    for (track, map) in [(0usize, "0:v:0"), (1usize, "0:v:1")] {
+        let mut media = live.init_segment(track).unwrap();
+        for n in 1..=live.latest_segment() {
+            media.extend_from_slice(&live.segment(track, n).expect("segment"));
+        }
+        let out = dir.join(format!("rendition-{track}.mp4"));
+        std::fs::write(&out, &media).unwrap();
+        let md5 = |input: &std::path::Path, map: &str| -> Vec<String> {
+            let o = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(input)
+                .args(["-map", map, "-f", "framemd5", "-"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .map(|l| l.split(',').nth(5).unwrap_or("").trim().to_string())
+                .collect()
+        };
+        let want = md5(&src_path, map);
+        let got = md5(&out, "0:v:0");
+        assert!(!want.is_empty());
+        assert_eq!(
+            got, want,
+            "rendition {track} decodes differently from the source"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

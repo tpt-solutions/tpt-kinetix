@@ -125,7 +125,8 @@ pub fn av1_phase_frame_tick() {
     let f = p.frames.fetch_add(1, Ordering::Relaxed) + 1;
     if f % PHASE_REPORT_EVERY == 0 {
         let n = f.max(1) as f64;
-        let us = |cell: &std::sync::atomic::AtomicU64| cell.load(Ordering::Relaxed) as f64 / 1000.0 / n;
+        let us =
+            |cell: &std::sync::atomic::AtomicU64| cell.load(Ordering::Relaxed) as f64 / 1000.0 / n;
         let (t, d, c, s, l, g) = (
             &p.tile_ns,
             &p.deblock_ns,

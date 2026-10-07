@@ -95,6 +95,11 @@ fn presented_token<'a>(headers: &'a HashMap<String, String>, query: &'a str) -> 
 }
 
 impl IngestPolicy {
+    /// The publish token a request presents (bearer header or `?token=`), if any.
+    pub(crate) fn presented(headers: &HashMap<String, String>, query: &str) -> Option<String> {
+        presented_token(headers, query).map(str::to_string)
+    }
+
     /// Checks the publish credentials for `key`.
     pub(crate) fn authorize(
         &self,
@@ -113,11 +118,7 @@ impl IngestPolicy {
     }
 
     /// Checks a running publish against the limits.
-    pub(crate) fn check_progress(
-        &self,
-        elapsed: Duration,
-        bytes: u64,
-    ) -> Result<(), Refusal> {
+    pub(crate) fn check_progress(&self, elapsed: Duration, bytes: u64) -> Result<(), Refusal> {
         if self.max_bytes.is_some_and(|m| bytes > m) {
             return Err(Refusal::ByteLimit);
         }
@@ -274,7 +275,9 @@ mod tests {
         assert!(p
             .authorize("k", &h("authorization", "Bearer s3cret"), "")
             .is_ok());
-        assert!(p.authorize("k", &HashMap::new(), "a=1&token=s3cret").is_ok());
+        assert!(p
+            .authorize("k", &HashMap::new(), "a=1&token=s3cret")
+            .is_ok());
         assert_eq!(
             p.authorize("k", &h("authorization", "Bearer nope"), ""),
             Err(Refusal::Unauthorized)
@@ -294,7 +297,9 @@ mod tests {
         };
         assert!(p.authorize("cam", &HashMap::new(), "token=own").is_ok());
         assert!(p.authorize("cam", &HashMap::new(), "token=global").is_err());
-        assert!(p.authorize("other", &HashMap::new(), "token=global").is_ok());
+        assert!(p
+            .authorize("other", &HashMap::new(), "token=global")
+            .is_ok());
     }
 
     #[test]

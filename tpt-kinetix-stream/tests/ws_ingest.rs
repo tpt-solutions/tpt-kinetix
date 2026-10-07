@@ -41,8 +41,15 @@ async fn get(port: u16, path: &str) -> (u16, String) {
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf).to_string();
-    let status = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-    (status, text.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    (
+        status,
+        text.split("\r\n\r\n").nth(1).unwrap_or("").to_string(),
+    )
 }
 
 /// Opens a WebSocket to `path`; returns the stream and the response head.
@@ -79,8 +86,25 @@ async fn read_close(s: &mut TcpStream) -> (u16, String) {
 fn make_webm(dir: &std::path::Path) -> Option<Vec<u8>> {
     let path = dir.join("src.webm");
     let ok = Command::new("ffmpeg")
-        .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25", "-t", "6"])
-        .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "6"])
+        .args([
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25",
+            "-t",
+            "6",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "6",
+        ])
         .args(["-pix_fmt", "yuv420p", "-c:v", "libvpx-vp9", "-g", "25"])
         .args(["-c:a", "libopus", "-ac", "2", "-b:a", "64k"])
         .arg(&path)
@@ -93,13 +117,18 @@ fn make_webm(dir: &std::path::Path) -> Option<Vec<u8>> {
 async fn publish_ws(port: u16, path: &str, webm: &[u8]) -> (u16, String) {
     let (mut s, head) = ws_open(port, path).await;
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
-    assert!(head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), "{head}");
+    assert!(
+        head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+        "{head}"
+    );
     // MediaRecorder-sized chunks, a few of them fragmented across frames.
     for (i, chunk) in webm.chunks(3000).enumerate() {
         let mask = [i as u8, 0x55, 0xAA, 0x0F];
         s.write_all(&client_frame(0x2, chunk, mask)).await.unwrap();
     }
-    s.write_all(&client_frame(0x8, &1000u16.to_be_bytes(), [1, 2, 3, 4])).await.unwrap();
+    s.write_all(&client_frame(0x8, &1000u16.to_be_bytes(), [1, 2, 3, 4]))
+        .await
+        .unwrap();
     read_close(&mut s).await
 }
 
@@ -134,7 +163,11 @@ async fn websocket_publish_matches_http_publish() {
     assert_eq!(ws_pl, http_pl);
     // And its segments are byte-identical.
     for l in ws_pl.lines().filter(|l| l.starts_with("seg-")) {
-        assert_eq!(get(port, &format!("/cam/{l}")).await.1, get(port, &format!("/ref/{l}")).await.1, "{l}");
+        assert_eq!(
+            get(port, &format!("/cam/{l}")).await.1,
+            get(port, &format!("/ref/{l}")).await.1,
+            "{l}"
+        );
     }
 }
 
@@ -158,7 +191,9 @@ async fn text_frames_end_the_publish_with_a_close_code() {
     let port = start(LiveServer::new(opts())).await;
     let (mut s, head) = ws_open(port, "/ingest/cam").await;
     assert!(head.starts_with("HTTP/1.1 101"));
-    s.write_all(&client_frame(0x1, b"hello", [1, 2, 3, 4])).await.unwrap();
+    s.write_all(&client_frame(0x1, b"hello", [1, 2, 3, 4]))
+        .await
+        .unwrap();
     let (code, reason) = read_close(&mut s).await;
     assert_eq!(code, 1007, "{reason}");
 }

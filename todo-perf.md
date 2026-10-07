@@ -1177,3 +1177,83 @@ Cumulative ~-33% (1.656 -> ~1.12 s). Still open: deblock (`filter_line_1d_into` 
 **Deblock quick reject (2026-10-03, marginal).** Both deblock passes now test `|p1-p0| <= limit && |q1-q0| <= limit` straight off the plane before gathering/filtering/writing back a 16-sample window (necessary for `filterMask`, so skipped lines are provably unchanged). Bit-exact (FATE 204/204). Measured ~-1% (1.134 -> 1.121 s, pairs split -1.5/-1.3/+1.3/-5.7%): within noise, kept because it is exact and trivial. Real deblock gains need the filter itself vectorised (horizontal edges across 8 columns, vertical edges via transposes) — the largest remaining single item (~9%) but the most intricate.
 
 **Rejected 2026-10-03: AVX2 deblock filter** (`filter8` core over 14 tap vectors / 8 lines; horizontal edges loaded across columns, vertical edges via 8x8 transposes; interior edges only, scalar `filter_line_1d_into` as fallback and proptest oracle). Bit-exact (two proptests, FATE 204/204) but no measurable gain: `fate_corpus` 1.099 -> 1.083 s (-1.4%, pairs -1.5/+1.6/-5.9/+0.4%), 1280x720 testsrc 492.7 -> 498.9 ms (noise). A post-change profile still showed `filter_line_1d_into` ~5.6% + `deblock_plane` ~4.4%: the small FATE frames put most edges near borders / in 4-wide chroma segments (scalar fallback), and the quick-reject already skips most flat lines; testsrc rarely triggers the filter. Removed rather than carried (~400 lines of intrinsics for noise). Revisit only with a large-frame, real-content corpus where deblock demonstrably dominates.
+
+## Phase 3b item 4a — plane-parallel post-filters for AV1 and VP9 (2026-10-06)
+
+Phase 3b item 4 ("Parallelism on single-tile streams") started with the
+dependency analysis, and the analysis sets the boundary hard: **within one
+plane, the deblocking filter is inherently sequential** — the vertical-edge
+pass of a superblock reads its left neighbour's *horizontally*-filtered
+pixels, and the 14-wide horizontal filter crosses superblock-row boundaries,
+so the per-band cols→rows chain (which `deblock_plane` already mirrors from
+dav1d) cannot be split across rows or columns without changing pixels. That is
+exactly why dav1d and libaom only parallelise the filter across tiles and
+across frames. What *is* bit-exactly parallel is the **plane axis**: every
+post-filter stage (deblock, CDEF, loop restoration) reads only its own plane
+plus read-only decode-time grids and writes disjoint planes.
+
+Changes:
+1. `tpt-kinetix-av1/src/loop_filter.rs`: deblock and loop restoration now run
+   `rayon::join(luma, chroma)` (CDEF already did). The joins are timed as a
+   whole — per-call timers inside a parallel job would either land on a
+   worker or double-count.
+2. `tpt-kinetix-av1/src/dbg_env.rs`: `Av1PhaseTimers` moved from thread-locals
+   to a static of `AtomicU64`s. With CDEF already plane-parallel and
+   deblock/LR now too, thread-local accumulators silently under-counted every
+   phase that ran on a worker; the phase report is process-global now. (VP9's
+   `PhaseTimers` remains thread-local because its only parallel join is timed
+   by the caller's `timed()` wrapper.)
+3. `tpt-kinetix-vp9`: `loopfilter_sb` split into `loopfilter_sb_luma` /
+   `loopfilter_sb_chroma` (plane-disjoint; each recomputes its own
+   `setup_mask`/`adjust_mask`), and the driver runs them under
+   `rayon::join`. The interleaved per-SB serial path is kept behind the
+   `TPT_VP9_TRACE`/`TPT_VP9_OPS` gates — the oracle-diff tooling diffs dump
+   streams positionally and needs the original per-SB luma-then-chroma
+   order. VP9 gains a `rayon` dependency.
+
+Bit-exactness (everything re-run green after the change): AV1 FATE 204/204 vs
+dav1d, `libaom_crosscheck` 2/2 (27 streams incl. superres/IntraBC/grain),
+PSNR corpus 6/6 at 99 dB; VP9 conformance 21/21 byte-exact incl. the
+300-frame case, `keyframe128` byte-exact.
+
+Measured (criterion, same-session A/B, machine idle; the ±5% drift floor from
+the 2026-10-03 note applies):
+
+| bench | serial | parallel | delta |
+|---|---:|---:|---:|
+| av1_decode/fate_corpus | 1.1192 s | 1.0488 s | **−6.3%** |
+| av1_decode/320x240 | 123.8 ms | 107.0 ms | **−13.6%** |
+| av1_decode/1280x720 | 510.0 ms | 425.3 ms | **−16.6%** |
+| vp9_decode 320x240 | 5.40 ms | 4.99–5.54 ms | noise (±5%) |
+| vp9_decode 1280x720 | 38.2 ms | 32.4–35.7 ms | **−6…−15%** |
+| vp9_decode 1920x1080 | — | −4…−7% (two runs) | **−4…−7%** |
+
+The AV1 deltas reproduce across two clean runs (−6.3/−13.6/−16.6 and
+−1.3*/−11.2/−10.1 with a partially-concurrent first run). VP9's 320x240 case
+is inside the noise floor — its LF chroma share is ~0.1 ms of a 5.4 ms frame —
+while 720p/1080p are consistently positive across four comparison runs;
+single-run spreads are machine drift, not code.
+
+Still open on item 4 (unchanged): superblock-row post-filter parallelism is
+*possible* only with a schedule change that alters filter input order and is
+therefore out as long as byte-exactness is the bar; frame-level overlap of
+loop filter (N) with entropy decode (N+1) remains the next structural win;
+VP9 tile-column threading for multi-tile streams remains open.
+
+### CDEF unit-stripes REVERTED 2026-10-06 — measured neutral, complexity not kept
+
+The natural next candidate after the plane joins was *within-plane* CDEF
+parallelism: CDEF units read only the pre-CDEF snapshot, so 64-row stripes are
+provably independent (a `src_y0` parameter threads absolute snapshot
+coordinates through `cdef_filter_block`/`cdef_plane_{luma,chroma}` while each
+stripe owns a `split_at_mut`/`par_chunks_mut` slice — implemented and
+bit-exact, FATE 204/204). Measured: **dead even** — interleaved A/B/A/B on the
+720p decode (2.46/2.47 s vs 2.45/2.47 s wall) and the criterion fate/320/720
+runs moved within machine drift. CDEF's apparent 9.3 ms/720p share from
+`KINETIX_AV1_PHASE=1` was inflated twice over: with any `KINETIX_*` var set
+the per-block debug `var()` calls do real environment lookups (~40 ms/frame at
+720p across all phases), and per-unit timers opened on rayon workers absorb
+scheduling gaps into `elapsed`. Verdict per the Phase 2 lesson: **measure on
+the criterion clock, treat PHASE numbers as relative, not absolute.** The
+stripe code is reverted (it survives in the session history if CDEF ever
+grows); the plane joins stay.

@@ -73,8 +73,16 @@ fn base64(data: &[u8]) -> String {
             | u32::from(*c.get(2).unwrap_or(&0));
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -107,7 +115,11 @@ pub(crate) fn handshake_response(client_key: &str) -> String {
 }
 
 /// Writes a close frame with `code` and a short `reason`.
-pub(crate) async fn send_close<W: AsyncWrite + Unpin>(w: &mut W, code: u16, reason: &str) -> Result<()> {
+pub(crate) async fn send_close<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    code: u16,
+    reason: &str,
+) -> Result<()> {
     let reason = &reason.as_bytes()[..reason.len().min(100)];
     let mut f = vec![0x88, (2 + reason.len()) as u8];
     f.extend_from_slice(&code.to_be_bytes());
@@ -199,7 +211,10 @@ mod tests {
     #[test]
     fn sha1_known_vectors() {
         let hex = |d: [u8; 20]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
-        assert_eq!(hex(sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hex(sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
         assert_eq!(hex(sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
         assert_eq!(
             hex(sha1(&[b'a'; 1000])),

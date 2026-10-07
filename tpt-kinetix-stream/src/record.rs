@@ -89,7 +89,10 @@ impl Recorder {
             return;
         };
         for e in rd.filter_map(|e| e.ok()) {
-            let g: Option<u64> = e.file_name().to_str().and_then(|n| n.strip_prefix('g')?.parse().ok());
+            let g: Option<u64> = e
+                .file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix('g')?.parse().ok());
             if g.is_some_and(|g| g + keep <= current) {
                 let _ = std::fs::remove_dir_all(e.path());
             }
@@ -105,11 +108,13 @@ impl Recorder {
     pub fn record(&self, key: &str, live: &mut LivePackager, ended: bool) -> Result<()> {
         let done = live.drain_completed();
         let mut state = self.state.lock().unwrap();
-        let rec = state.entry(key.to_string()).or_insert_with(|| KeyRecording {
-            // Never overwrite what an earlier run of the server recorded.
-            generation: latest_generation(&self.root.join(key)).map_or(1, |g| g + 1),
-            ..Default::default()
-        });
+        let rec = state
+            .entry(key.to_string())
+            .or_insert_with(|| KeyRecording {
+                // Never overwrite what an earlier run of the server recorded.
+                generation: latest_generation(&self.root.join(key)).map_or(1, |g| g + 1),
+                ..Default::default()
+            });
         if done.is_empty() && !ended && rec.inits_written {
             return Ok(());
         }
@@ -182,7 +187,8 @@ impl Recorder {
                         let old = entries.remove(0);
                         rec.trimmed_discontinuities[t] += u64::from(old.discontinuity);
                         rec.trimmed = true;
-                        let _ = std::fs::remove_file(dir.join(format!("seg-{t}-{}.m4s", old.number)));
+                        let _ =
+                            std::fs::remove_file(dir.join(format!("seg-{t}-{}.m4s", old.number)));
                     }
                 }
             }
@@ -191,7 +197,13 @@ impl Recorder {
             if entries.is_empty() {
                 continue;
             }
-            let text = playlist(t, entries, ended, rec.trimmed, rec.trimmed_discontinuities[t]);
+            let text = playlist(
+                t,
+                entries,
+                ended,
+                rec.trimmed,
+                rec.trimmed_discontinuities[t],
+            );
             write(&dir.join(format!("track-{t}.m3u8")), text.as_bytes())?;
         }
         Ok(())
@@ -278,7 +290,11 @@ fn playlist(
         if e.discontinuity {
             out.push_str("#EXT-X-DISCONTINUITY\n");
         }
-        let _ = writeln!(out, "#EXTINF:{:.6},\nseg-{track}-{}.m4s", e.seconds, e.number);
+        let _ = writeln!(
+            out,
+            "#EXTINF:{:.6},\nseg-{track}-{}.m4s",
+            e.seconds, e.number
+        );
     }
     if ended {
         out.push_str("#EXT-X-ENDLIST\n");

@@ -42,7 +42,7 @@ function done(r) {
   const out = {
     ll: ll === "1", mime, samples: s.length, errors: r.errors,
     glassToGlassMs: s.length ? { min: s[0], p50: pct(s, 0.5), p95: pct(s, 0.95), max: s[s.length - 1] } : null,
-    video: { currentTime: r.currentTime, readyState: r.readyState, buffered: [r.bufferedStart, r.bufferedEnd], decodedFrames: r.decodedFrames, hlsEvents: r.hlsEvents, publisherGapsMs: r.chunkGaps, waits: r.waits, wsMaxBufferedBytes: r.maxBuffered },
+    video: { currentTime: r.currentTime, readyState: r.readyState, buffered: [r.bufferedStart, r.bufferedEnd], decodedFrames: r.decodedFrames, hlsEvents: r.hlsEvents, requestQueueMs: r.queue, levels: r.levels, levelsSeen: r.levelsSeen, publisherGapsMs: r.chunkGaps, waits: r.waits, wsMaxBufferedBytes: r.maxBuffered },
     hlsjsLatencyMs: p.length ? { p50: Math.round(pct(p, 0.5)) } : null,
   };
   console.log(JSON.stringify(out));
@@ -51,9 +51,13 @@ function done(r) {
 
 server.listen(0, "127.0.0.1", () => {
   const port = server.address().port;
-  const page = `http://127.0.0.1:${port}/page.html?live=${encodeURIComponent(live)}&key=${key}&ll=${ll}&seconds=${secs}&mime=${encodeURIComponent(mime)}${external ? "&external=1" : ""}${process.env.PLAYER ? "&player=" + process.env.PLAYER : ""}${process.env.RATE ? "&rate=" + process.env.RATE : ""}${process.env.DEBUG_HLS ? "&debug=1" : ""}${process.env.SYNC ? "&sync=" + process.env.SYNC : ""}`;
+  const page = `http://127.0.0.1:${port}/page.html?live=${encodeURIComponent(live)}&key=${key}&ll=${ll}&seconds=${secs}&mime=${encodeURIComponent(mime)}${external ? "&external=1" : ""}${process.env.SWITCH ? "&switch=1" : ""}${process.env.PLAYER ? "&player=" + process.env.PLAYER : ""}${process.env.RATE ? "&rate=" + process.env.RATE : ""}${process.env.DEBUG_HLS ? "&debug=1" : ""}${process.env.SYNC ? "&sync=" + process.env.SYNC : ""}`;
   proc = spawn(chrome, [
     "--headless=new", "--disable-gpu", "--no-sandbox", "--mute-audio",
+    // A headless page counts as backgrounded: without these, timers (dash.js schedules
+    // everything with setTimeout) and rendering are throttled and playback starves.
+    "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows", "--disable-features=CalculateNativeWinOcclusion",
     "--autoplay-policy=no-user-gesture-required", `--user-data-dir=${profile}`,
     ...(process.env.CHROME_LOG ? ["--enable-logging=stderr", "--v=0"] : []), page,
   ], { stdio: ["ignore", "ignore", process.env.CHROME_LOG ? "inherit" : "ignore"] });

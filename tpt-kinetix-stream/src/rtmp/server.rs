@@ -103,13 +103,6 @@ pub enum RtmpMediaEvent {
         /// The HDR metadata payload.
         hdr: flv::HdrMetadata,
     },
-    /// The publisher selected a multitrack number (Enhanced-RTMP packet kind
-    /// `Multitrack`). Frames that follow belong to this track until the next
-    /// such event.
-    Multitrack {
-        /// The selected track number.
-        track_number: u8,
-    },
     /// The publisher stopped or disconnected.
     PublishStop,
 }
@@ -427,22 +420,22 @@ where
                         .await?;
                     events.into_iter().for_each(&mut emit);
                 }
-                Some(MessageTypeId::Video) => match flv::parse_video_tag(&msg.payload) {
-                    Ok(tag) => {
-                        if let Some(hdr) = tag.hdr.clone() {
-                            emit(RtmpMediaEvent::Hdr {
-                                timestamp: msg.timestamp,
-                                hdr,
-                            });
-                        } else if let Some(mt) = tag.multitrack {
-                            emit(RtmpMediaEvent::Multitrack {
-                                track_number: mt.track_number,
-                            });
-                        } else {
-                            emit(RtmpMediaEvent::Video {
-                                timestamp: msg.timestamp,
-                                tag,
-                            });
+                // One message can carry several tracks (Enhanced RTMP Multitrack):
+                // each becomes its own event, tagged with its `track_id`.
+                Some(MessageTypeId::Video) => match flv::parse_video_tags(&msg.payload) {
+                    Ok(tags) => {
+                        for tag in tags {
+                            if let Some(hdr) = tag.hdr.clone() {
+                                emit(RtmpMediaEvent::Hdr {
+                                    timestamp: msg.timestamp,
+                                    hdr,
+                                });
+                            } else {
+                                emit(RtmpMediaEvent::Video {
+                                    timestamp: msg.timestamp,
+                                    tag,
+                                });
+                            }
                         }
                     }
                     Err(e) => tracing::warn!(error = %e, "bad FLV video tag"),

@@ -10,9 +10,10 @@ pub mod hls;
 pub mod live;
 pub mod policy;
 pub mod record;
-pub mod ws;
 pub mod rtmp;
 pub mod rtmp_live;
+pub mod whip;
+pub mod ws;
 
 pub use hls::{
     playlist::HlsPlaylist,
@@ -23,3 +24,4 @@ pub use policy::IngestPolicy;
 pub use record::{Recorder, RecordingLimits};
 pub use rtmp::server::{RtmpConfig, RtmpServer};
 pub use rtmp_live::RtmpLiveSession;
+pub use whip::WhipConfig;

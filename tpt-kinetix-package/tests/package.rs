@@ -184,7 +184,20 @@ fn segments_are_independently_addressable_with_their_own_sequence_numbers() {
     // Fetch segment 3 first, alone: it must be a valid moof+mdat with sequence 3
     // and a tfdt at its own start time, not zero.
     let seg = block_on(p.media_segment(&Blocking(&file), 0, 3)).unwrap();
-    assert_eq!(&seg[4..8], b"moof");
+    // A DASH-IF media segment: `styp`, a one-reference `sidx` covering exactly the
+    // `moof` + `mdat` that follow it, then the fragment.
+    assert_eq!(&seg[4..8], b"styp");
+    let styp_len = u32::from_be_bytes(seg[0..4].try_into().unwrap()) as usize;
+    assert_eq!(&seg[styp_len + 4..styp_len + 8], b"sidx");
+    let sidx_len = u32::from_be_bytes(seg[styp_len..styp_len + 4].try_into().unwrap()) as usize;
+    let moof_at = styp_len + sidx_len;
+    assert_eq!(&seg[moof_at + 4..moof_at + 8], b"moof");
+    let sidx = &seg[styp_len + 8..moof_at];
+    assert_eq!(sidx[0], 1, "sidx version 1");
+    // version/flags(4) ref_id(4) timescale(4) earliest(8) first_offset(8) rsv(2) count(2)
+    assert_eq!(u16::from_be_bytes(sidx[30..32].try_into().unwrap()), 1);
+    let ref_size = u32::from_be_bytes(sidx[32..36].try_into().unwrap()) & 0x7FFF_FFFF;
+    assert_eq!(ref_size as usize, seg.len() - moof_at);
     let at = seg.windows(4).position(|w| w == b"mfhd").unwrap() + 8;
     assert_eq!(u32::from_be_bytes(seg[at..at + 4].try_into().unwrap()), 3);
     let tf = seg.windows(4).position(|w| w == b"tfdt").unwrap() + 4;

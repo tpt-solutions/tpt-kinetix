@@ -213,19 +213,8 @@ async fn publish_inner(
     ))
     .await
     .unwrap();
-    // Multitrack + HDR metadata packets (Enhanced RTMP v2 follow-ups): the
-    // server must accept them without disturbing the media flow. Track 0 is
-    // selected, then a synthetic HDR metadata packet is sent.
-    wr.write_all(&chunks(
-        4,
-        0,
-        9,
-        1,
-        &ex(0x80 | 0x10 | 5, fourcc, &[0]),
-        CHUNK,
-    ))
-    .await
-    .unwrap();
+    // An HDR metadata packet (Enhanced RTMP): the server must accept it without
+    // disturbing the media flow.
     wr.write_all(&chunks(
         4,
         0,
@@ -514,18 +503,35 @@ async fn capability_exchange_reaches_publish_start() {
     .unwrap();
     // HDR metadata + multitrack packets must surface as their own events.
     let ex = |first: u8, cc: &[u8], body: &[u8]| [&[first][..], cc, body].concat();
-    s.write_all(&chunks(4, 0, 9, 1, &ex(0x80 | 0x10 | 4, b"av01", &[9, 9]), 128))
-        .await
-        .unwrap();
-    s.write_all(&chunks(4, 1, 9, 1, &ex(0x80 | 0x10 | 5, b"av01", &[2]), 128))
-        .await
-        .unwrap();
+    s.write_all(&chunks(
+        4,
+        0,
+        9,
+        1,
+        &ex(0x80 | 0x10 | 4, b"av01", &[9, 9]),
+        128,
+    ))
+    .await
+    .unwrap();
+    // A real Enhanced RTMP v2 Multitrack message: ManyTracks (1), CodedFramesX (3),
+    // one shared FourCC, then tracks 2 and 3 each with a 24-bit size.
+    let mt = [
+        &[0x80 | 0x10 | 6, (1 << 4) | 3][..],
+        b"av01",
+        &[2, 0, 0, 3, 1, 2, 3],
+        &[3, 0, 0, 2, 4, 5],
+    ]
+    .concat();
+    s.write_all(&chunks(4, 1, 9, 1, &mt, 128)).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let events = seen.lock().unwrap().clone();
     let Some(RtmpMediaEvent::PublishStart {
         stream_key,
         capabilities,
-    }) = events.iter().find(|e| matches!(e, RtmpMediaEvent::PublishStart { .. })).cloned()
+    }) = events
+        .iter()
+        .find(|e| matches!(e, RtmpMediaEvent::PublishStart { .. }))
+        .cloned()
     else {
         panic!("no PublishStart; got {events:?}");
     };
@@ -536,15 +542,22 @@ async fn capability_exchange_reaches_publish_start() {
     assert!(capabilities.audio_four_ccs.contains(b"Opus"));
     assert!(capabilities.multitrack);
     assert!(
-        events.iter().any(|e| matches!(e, RtmpMediaEvent::Hdr { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, RtmpMediaEvent::Hdr { .. })),
         "HDR metadata event missing: {events:?}"
     );
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            RtmpMediaEvent::Multitrack { track_number: 2 }
-        )),
-        "multitrack event missing: {events:?}"
+    let track_ids: Vec<(u8, Vec<u8>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            RtmpMediaEvent::Video { tag, .. } => Some((tag.track_id, tag.data.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        track_ids,
+        vec![(2, vec![1, 2, 3]), (3, vec![4, 5])],
+        "each track of a Multitrack message is its own event: {events:?}"
     );
 }
 
@@ -578,7 +591,10 @@ async fn rtmp_publish_honours_token_and_limits() {
     assert!(full >= 4, "{pl}");
     let (_, metrics) = http_get(http, "/metrics").await;
     let metrics = String::from_utf8(metrics).unwrap();
-    assert!(metrics.contains("kinetix_publishes_refused_auth_total 2"), "{metrics}");
+    assert!(
+        metrics.contains("kinetix_publishes_refused_auth_total 2"),
+        "{metrics}"
+    );
 
     // A byte limit cuts the publish off: what arrived stays playable, but it is
     // much shorter than the source.
@@ -590,10 +606,16 @@ async fn rtmp_publish_honours_token_and_limits() {
     publish(rtmp, "cut", &src, true).await;
     let pl = wait_complete(http, "cut").await;
     let cut = pl.matches("#EXTINF").count();
-    assert!(cut >= 1 && cut < full, "cut at {cut} segments vs {full} in full");
+    assert!(
+        cut >= 1 && cut < full,
+        "cut at {cut} segments vs {full} in full"
+    );
     let (_, metrics) = http_get(http, "/metrics").await;
     let metrics = String::from_utf8(metrics).unwrap();
-    assert!(metrics.contains("kinetix_publishes_cut_off_total 1"), "{metrics}");
+    assert!(
+        metrics.contains("kinetix_publishes_cut_off_total 1"),
+        "{metrics}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -632,8 +654,251 @@ async fn rtmp_idle_publisher_is_ended() {
     assert!(pl.matches("#EXTINF").count() >= 2, "{pl}");
     let (_, metrics) = http_get(http, "/metrics").await;
     let metrics = String::from_utf8(metrics).unwrap();
-    assert!(metrics.contains("kinetix_publishes_cut_off_total 1"), "{metrics}");
+    assert!(
+        metrics.contains("kinetix_publishes_cut_off_total 1"),
+        "{metrics}"
+    );
     assert!(metrics.contains("kinetix_publishers_active 0"), "{metrics}");
     publisher.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An Enhanced RTMP v2 *multitrack* publisher (what OBS Enhanced Broadcasting
+/// sends): two video renditions in one message per frame, plus Opus audio.
+async fn publish_ladder(port: u16, key: &str, src: &std::path::Path) {
+    const CHUNK: usize = 4096;
+    let mut parser = MkvStream::new();
+    let bytes = std::fs::read(src).unwrap();
+    let mut events = parser.push(&bytes).unwrap();
+    events.extend(parser.finish().unwrap());
+    let (mut tracks, mut frames) = (Vec::new(), Vec::new());
+    for e in events {
+        match e {
+            MkvEvent::Tracks(t) => tracks = t,
+            MkvEvent::Cue(_) => {}
+            MkvEvent::Frame(f) => frames.push(f),
+        }
+    }
+    assert_eq!(tracks.len(), 3, "two video renditions and audio");
+
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    s.write_all(&[3]).await.unwrap();
+    let c1: Vec<u8> = (0..1536).map(|i| (i * 13 % 251) as u8).collect();
+    s.write_all(&c1).await.unwrap();
+    let mut srv = vec![0u8; 1 + 1536 + 1536];
+    s.read_exact(&mut srv).await.unwrap();
+    s.write_all(&srv[1..1537]).await.unwrap();
+    let (mut rd, mut wr) = s.into_split();
+    let drain = tokio::spawn(async move {
+        let mut b = [0u8; 4096];
+        while rd.read(&mut b).await.map(|n| n > 0).unwrap_or(false) {}
+    });
+    let cmd = |values: &[Amf0Value]| chunks(3, 0, 20, 0, &amf::encode_all(values), CHUNK);
+    wr.write_all(&chunks(2, 0, 1, 0, &(CHUNK as u32).to_be_bytes(), 128))
+        .await
+        .unwrap();
+    wr.write_all(&cmd(&[
+        Amf0Value::String("connect".into()),
+        Amf0Value::Number(1.0),
+        Amf0Value::Object(vec![
+            ("app".into(), Amf0Value::String("live".into())),
+            ("multitrack".into(), Amf0Value::Boolean(true)),
+            (
+                "fourCcList".into(),
+                Amf0Value::StrictArray(vec![
+                    Amf0Value::String("vp09".into()),
+                    Amf0Value::String("Opus".into()),
+                ]),
+            ),
+        ]),
+    ]))
+    .await
+    .unwrap();
+    wr.write_all(&cmd(&[
+        Amf0Value::String("createStream".into()),
+        Amf0Value::Number(2.0),
+        Amf0Value::Null,
+    ]))
+    .await
+    .unwrap();
+    wr.write_all(&cmd(&[
+        Amf0Value::String("publish".into()),
+        Amf0Value::Number(0.0),
+        Amf0Value::Null,
+        Amf0Value::String(key.into()),
+        Amf0Value::String("live".into()),
+    ]))
+    .await
+    .unwrap();
+
+    // ManyTracks (1), one shared FourCC, each track `id, size24, payload`.
+    let multitrack = |first: u8, inner: u8, parts: &[(u8, &[u8])]| {
+        let mut v = vec![first, (1 << 4) | inner];
+        v.extend_from_slice(b"vp09");
+        for (id, data) in parts {
+            v.push(*id);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes()[1..]);
+            v.extend_from_slice(data);
+        }
+        v
+    };
+    // One multitrack message carries both renditions' sequence starts.
+    let start = multitrack(
+        0x80 | 0x10 | 6,
+        0,
+        &[(0, &tracks[0].extradata), (1, &tracks[1].extradata)],
+    );
+    wr.write_all(&chunks(4, 0, 9, 1, &start, CHUNK))
+        .await
+        .unwrap();
+    let ex = |first: u8, cc: &[u8], body: &[u8]| [&[first][..], cc, body].concat();
+    wr.write_all(&chunks(
+        5,
+        0,
+        8,
+        1,
+        &ex(0x90, b"Opus", &opus_head(&tracks[2].extradata)),
+        CHUNK,
+    ))
+    .await
+    .unwrap();
+
+    // Frames of the two renditions that share a timestamp travel in one message.
+    let mut pending: Vec<(u8, bool, Vec<u8>)> = Vec::new();
+    let mut pending_ts = 0u32;
+    let flush = |pending: &mut Vec<(u8, bool, Vec<u8>)>, ts: u32| -> Vec<u8> {
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let key = pending[0].1;
+        assert!(
+            pending.iter().all(|p| p.1 == key),
+            "renditions must share key frames"
+        );
+        let first = 0x80 | (if key { 0x10 } else { 0x20 }) | 6;
+        let parts: Vec<(u8, &[u8])> = pending.iter().map(|p| (p.0, p.2.as_slice())).collect();
+        let msg = multitrack(first, 3, &parts);
+        pending.clear();
+        chunks(4, ts, 9, 1, &msg, CHUNK)
+    };
+    for f in &frames {
+        let ts = f.pts_ms.max(0) as u32;
+        if f.stream < 2 {
+            if !pending.is_empty() && pending_ts != ts {
+                let m = flush(&mut pending, pending_ts);
+                wr.write_all(&m).await.unwrap();
+            }
+            pending_ts = ts;
+            pending.push((f.stream as u8, f.key, f.data.clone()));
+        } else {
+            let m = flush(&mut pending, pending_ts);
+            wr.write_all(&m).await.unwrap();
+            wr.write_all(&chunks(5, ts, 8, 1, &ex(0x91, b"Opus", &f.data), CHUNK))
+                .await
+                .unwrap();
+        }
+    }
+    let m = flush(&mut pending, pending_ts);
+    wr.write_all(&m).await.unwrap();
+    wr.write_all(&cmd(&[
+        Amf0Value::String("deleteStream".into()),
+        Amf0Value::Number(3.0),
+        Amf0Value::Null,
+        Amf0Value::Number(1.0),
+    ]))
+    .await
+    .unwrap();
+    wr.flush().await.unwrap();
+    drop(wr);
+    let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
+}
+
+/// OBS-style multitrack publishing becomes a multi-rendition ladder: each video
+/// track is its own HLS variant, with its own resolution, and decodes exactly
+/// like the matching rendition of the source.
+#[tokio::test]
+async fn multitrack_rtmp_publish_becomes_a_ladder() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livertmp_ladder_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("ladder.webm");
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=25",
+            "-t",
+            "8",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "8",
+        ])
+        .args(["-filter_complex", "[0:v]split=2[a][b];[b]scale=320:180[c]"])
+        .args([
+            "-map", "[a]", "-map", "[c]", "-map", "1:a", "-pix_fmt", "yuv420p",
+        ])
+        .args([
+            "-c:v",
+            "libvpx-vp9",
+            "-g",
+            "25",
+            "-keyint_min",
+            "25",
+            "-sc_threshold",
+            "0",
+        ])
+        .args([
+            "-b:v:0", "600k", "-b:v:1", "200k", "-c:a", "libopus", "-ac", "2", "-b:a", "64k",
+        ])
+        .arg(&src)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    }
+    let (http, rtmp) = start().await;
+    publish_ladder(rtmp, "cam", &src).await;
+    wait_complete(http, "cam").await;
+
+    let (code, master) = http_get(http, "/cam/master.m3u8").await;
+    let master = String::from_utf8(master).unwrap();
+    assert_eq!(code, 200, "{master}");
+    let variants = master
+        .lines()
+        .filter(|l| l.starts_with("#EXT-X-STREAM-INF"))
+        .count();
+    assert_eq!(variants, 2, "{master}");
+    assert!(
+        master.contains("RESOLUTION=640x360") && master.contains("RESOLUTION=320x180"),
+        "{master}"
+    );
+
+    for (track, map) in [(0usize, "0:v:0"), (1usize, "0:v:1")] {
+        let url = format!("http://127.0.0.1:{http}/cam/track-{track}.m3u8");
+        let src_s = src.to_str().unwrap().to_string();
+        let (want, got) =
+            tokio::task::spawn_blocking(move || (framemd5(&src_s, map), framemd5(&url, "0:v:0")))
+                .await
+                .unwrap();
+        assert!(!want.is_empty());
+        assert_eq!(
+            got, want,
+            "rendition {track} decodes differently from the source"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -46,9 +46,7 @@ async fn http(port: u16, method: &str, path: &str, extra: &str, body: &[u8]) -> 
 /// Opens a chunked publish and leaves it hanging (a publisher that stalls).
 async fn hanging_publish(port: u16, path: &str) -> TcpStream {
     let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
-    );
+    let req = format!("POST {path} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
     s
 }
@@ -73,7 +71,14 @@ async fn token_is_required_and_checked() {
     .await;
     let (st, _) = http(port, "POST", "/ingest/cam", "", b"x").await;
     assert_eq!(st, 401);
-    let (st, _) = http(port, "POST", "/ingest/cam", "Authorization: Bearer wrong\r\n", b"x").await;
+    let (st, _) = http(
+        port,
+        "POST",
+        "/ingest/cam",
+        "Authorization: Bearer wrong\r\n",
+        b"x",
+    )
+    .await;
     assert_eq!(st, 401);
     // The right token gets past auth (the garbage body is then a 400, not a 401).
     let (st, _) = http(port, "POST", "/ingest/cam?token=s3cret", "", b"not webm").await;
@@ -87,7 +92,10 @@ async fn token_is_required_and_checked() {
     )
     .await;
     assert_ne!(st, 401);
-    assert_eq!(metric(port, "kinetix_publishes_refused_auth_total").await, 2);
+    assert_eq!(
+        metric(port, "kinetix_publishes_refused_auth_total").await,
+        2
+    );
 }
 
 #[tokio::test]
@@ -139,7 +147,10 @@ async fn concurrent_publisher_and_stream_limits() {
     assert_eq!(st, 409);
     let (st, _) = http(port, "POST", "/ingest/b", "", b"x").await;
     assert_eq!(st, 503);
-    assert_eq!(metric(port, "kinetix_publishes_refused_limit_total").await, 2);
+    assert_eq!(
+        metric(port, "kinetix_publishes_refused_limit_total").await,
+        2
+    );
 }
 
 #[tokio::test]

@@ -11,6 +11,12 @@
 //! and either the audio configuration has arrived or a second of media has gone
 //! by without any (a video-only publisher). Frames that arrive earlier wait in a
 //! bounded queue.
+//!
+//! **Multitrack** (Enhanced RTMP v2, e.g. OBS Enhanced Broadcasting): a message may
+//! carry several video tracks, identified by `trackId`. Each becomes its own
+//! packager track, so the presentation is a multi-rendition ladder (one HLS variant
+//! / DASH Representation per track) with no transcoding. The renditions must share
+//! key frame timestamps, as adaptive bitrate switching requires anyway.
 
 use tpt_kinetix_core::codec::CodecId;
 use tpt_kinetix_core::stream::StreamInfo;
@@ -27,8 +33,18 @@ const MAX_QUEUED_FRAMES: usize = 2000;
 /// How long to wait for an audio configuration before assuming video only.
 const AUDIO_WAIT_MS: u32 = 1000;
 
+/// One video track of the publish (`trackId`), as configured so far.
+struct VideoTrack {
+    info: Option<StreamInfo>,
+    /// VP9 needs a key frame to learn the picture size (and, without a
+    /// sequence-start record, its configuration).
+    needs_frame: bool,
+}
+
 struct Queued {
     audio: bool,
+    /// The video `trackId` (unused for audio).
+    track: u8,
     pts_ms: i64,
     key: bool,
     data: Vec<u8>,
@@ -81,11 +97,15 @@ pub struct RtmpLiveSession {
     guard: std::sync::Arc<std::sync::Mutex<Option<crate::policy::ActiveGuard>>>,
     started: std::time::Instant,
     received: u64,
-    video: Option<StreamInfo>,
+    videos: std::collections::BTreeMap<u8, VideoTrack>,
     audio: Option<StreamInfo>,
-    /// VP9 needs a key frame to learn the picture size (and, without a
-    /// sequence-start record, its configuration).
-    vp9_needs_frame: bool,
+    /// The publisher said it would send several video tracks, so the tracks are
+    /// only announced after the settle wait: their sequence starts may not all
+    /// have arrived yet.
+    expect_multitrack: bool,
+    /// Video `trackId` -> packager track index, fixed when the tracks are announced.
+    track_index: std::collections::HashMap<u8, usize>,
+    warned_track: bool,
     announced: bool,
     has_audio_track: bool,
     first_ts: Option<u32>,
@@ -104,9 +124,11 @@ impl RtmpLiveSession {
             guard: Default::default(),
             started: std::time::Instant::now(),
             received: 0,
-            video: None,
+            videos: Default::default(),
             audio: None,
-            vp9_needs_frame: false,
+            expect_multitrack: false,
+            track_index: Default::default(),
+            warned_track: false,
             announced: false,
             has_audio_track: false,
             first_ts: None,
@@ -139,6 +161,7 @@ impl RtmpLiveSession {
                     "RTMP capabilities"
                 );
                 self.start(stream_key);
+                self.expect_multitrack = capabilities.multitrack;
                 return;
             }
             RtmpMediaEvent::PublishStop => {
@@ -154,12 +177,6 @@ impl RtmpLiveSession {
                 }
                 return;
             }
-            // Multitrack selection is accepted and logged; the live packager
-            // carries a single video track, so frames keep flowing there.
-            RtmpMediaEvent::Multitrack { track_number } => {
-                tracing::info!(track_number, "RTMP multitrack select");
-                return;
-            }
             RtmpMediaEvent::Video { timestamp, tag } => {
                 if self.live.is_none() {
                     return;
@@ -171,9 +188,15 @@ impl RtmpLiveSession {
                 };
                 self.first_ts.get_or_insert(*timestamp);
                 if tag.is_sequence_header() {
-                    self.video_config(codec, &tag.data);
+                    self.video_config(tag.track_id, codec, &tag.data);
                 } else if tag.avc_packet_type == AvcPacketType::Nalu && !tag.data.is_empty() {
-                    self.video_frame(codec, *timestamp, tag.frame_type.is_keyframe(), &tag.data);
+                    self.video_frame(
+                        tag.track_id,
+                        codec,
+                        *timestamp,
+                        tag.frame_type.is_keyframe(),
+                        &tag.data,
+                    );
                 }
                 *timestamp
             }
@@ -188,7 +211,7 @@ impl RtmpLiveSession {
                 match tag.aac_packet_type {
                     AacPacketType::SequenceHeader => self.audio_config(&tag.data),
                     AacPacketType::Raw if !tag.data.is_empty() => {
-                        self.enqueue(true, *timestamp, true, tag.data.clone());
+                        self.enqueue(true, 0, *timestamp, true, tag.data.clone());
                     }
                     _ => {}
                 }
@@ -203,7 +226,11 @@ impl RtmpLiveSession {
         // The key may carry a publish token (`name?token=...`); only the name is kept.
         let (live, key, guard) = match self.server.begin(key) {
             Some((key, live, guard)) => (Some(live), key, Some(guard)),
-            None => (None, key.split('?').next().unwrap_or_default().to_string(), None),
+            None => (
+                None,
+                key.split('?').next().unwrap_or_default().to_string(),
+                None,
+            ),
         };
         *self = Self {
             live,
@@ -279,7 +306,8 @@ impl RtmpLiveSession {
         }
     }
 
-    fn video_config(&mut self, codec: CodecId, record: &[u8]) {
+    fn video_config(&mut self, track_id: u8, codec: CodecId, record: &[u8]) {
+        let mut needs_frame = false;
         let mut info = StreamInfo::new(0, codec, 90_000);
         match codec {
             CodecId::Av1 => {
@@ -290,15 +318,25 @@ impl RtmpLiveSession {
             }
             _ => {
                 // The record is a `vpcC` payload, with or without its version/flags word.
-                info.extradata = if record.len() >= 4 && record[..4] == [1, 0, 0, 0] {
+                // An empty record (WHIP, or a publisher that sends none) leaves the
+                // configuration to be derived from the first key frame.
+                info.extradata = if record.is_empty() {
+                    Vec::new()
+                } else if record.len() >= 4 && record[..4] == [1, 0, 0, 0] {
                     record.to_vec()
                 } else {
                     [&[1u8, 0, 0, 0][..], record].concat()
                 };
-                self.vp9_needs_frame = true;
+                needs_frame = true;
             }
         }
-        self.video = Some(info);
+        self.videos.insert(
+            track_id,
+            VideoTrack {
+                info: Some(info),
+                needs_frame,
+            },
+        );
     }
 
     fn audio_config(&mut self, head: &[u8]) {
@@ -313,25 +351,28 @@ impl RtmpLiveSession {
         self.audio = Some(info);
     }
 
-    fn video_frame(&mut self, codec: CodecId, ts: u32, key: bool, data: &[u8]) {
-        if self.vp9_needs_frame && key {
-            if let Some(cfg) = vp9_config_from_frame(data, 0, 0) {
-                let info = self
-                    .video
-                    .get_or_insert_with(|| StreamInfo::new(0, codec, 90_000));
-                (info.width, info.height) = (cfg.width, cfg.height);
-                if info.extradata.is_empty() {
-                    info.extradata = vpcc_record(&cfg);
+    fn video_frame(&mut self, track_id: u8, codec: CodecId, ts: u32, key: bool, data: &[u8]) {
+        if let Some(t) = self.videos.get_mut(&track_id) {
+            if t.needs_frame && key {
+                if let Some(cfg) = vp9_config_from_frame(data, 0, 0) {
+                    let info = t
+                        .info
+                        .get_or_insert_with(|| StreamInfo::new(0, codec, 90_000));
+                    (info.width, info.height) = (cfg.width, cfg.height);
+                    if info.extradata.is_empty() {
+                        info.extradata = vpcc_record(&cfg);
+                    }
+                    t.needs_frame = false;
                 }
-                self.vp9_needs_frame = false;
             }
         }
-        self.enqueue(false, ts, key, data.to_vec());
+        self.enqueue(false, track_id, ts, key, data.to_vec());
     }
 
-    fn enqueue(&mut self, audio: bool, ts: u32, key: bool, data: Vec<u8>) {
+    fn enqueue(&mut self, audio: bool, track: u8, ts: u32, key: bool, data: Vec<u8>) {
         let q = Queued {
             audio,
+            track,
             pts_ms: i64::from(ts),
             key,
             data,
@@ -349,19 +390,30 @@ impl RtmpLiveSession {
         if self.announced || self.live.is_none() {
             return;
         }
-        let video_ready = self
-            .video
-            .as_ref()
-            .is_some_and(|v| !self.vp9_needs_frame || v.codec != CodecId::Vp9);
+        // Every video track seen so far must be configured (a VP9 track also needs
+        // a key frame for its picture size).
+        let video_ready = !self.videos.is_empty()
+            && self
+                .videos
+                .values()
+                .all(|v| v.info.is_some() && !v.needs_frame);
         if !video_ready {
             return;
         }
         let waited = ts.saturating_sub(self.first_ts.unwrap_or(ts)) >= AUDIO_WAIT_MS;
-        if self.audio.is_none() && !waited {
+        if (self.audio.is_none() || self.expect_multitrack) && !waited {
             return;
         }
-        let mut tracks = vec![self.video.clone().unwrap()];
-        if let Some(a) = self.audio.clone() {
+        // Video tracks by ascending `trackId` (0 is the default track), then audio.
+        let mut tracks = Vec::new();
+        for (i, (id, v)) in self.videos.iter().enumerate() {
+            let mut info = v.info.clone().unwrap();
+            info.index = i as u32;
+            tracks.push(info);
+            self.track_index.insert(*id, i);
+        }
+        if let Some(mut a) = self.audio.clone() {
+            a.index = tracks.len() as u32;
             tracks.push(a);
             self.has_audio_track = true;
         }
@@ -395,7 +447,25 @@ impl RtmpLiveSession {
             return;
         }
         let Some(live) = &self.live else { return };
-        let track = usize::from(q.audio);
+        let track = if q.audio {
+            self.track_index.len()
+        } else {
+            match self.track_index.get(&q.track) {
+                Some(&i) => i,
+                None => {
+                    // A track whose sequence start never arrived (or arrived after
+                    // the tracks were announced) cannot be added mid-stream.
+                    if !self.warned_track {
+                        self.warned_track = true;
+                        tracing::warn!(
+                            track_id = q.track,
+                            "ignoring frames of an unconfigured video track"
+                        );
+                    }
+                    return;
+                }
+            }
+        };
         let result = live
             .lock()
             .unwrap()

@@ -271,11 +271,7 @@ impl LivePackager {
     pub fn accepts_tracks(&self, infos: &[StreamInfo]) -> bool {
         self.tracks.is_empty()
             || (self.tracks.len() == infos.len()
-                && self
-                    .tracks
-                    .iter()
-                    .zip(infos)
-                    .all(|(t, i)| {
+                && self.tracks.iter().zip(infos).all(|(t, i)| {
                     // VP9's `vpcC` carries no size, so compare the dimensions too.
                     t.info.extradata == i.extradata
                         && t.info.width == i.width
@@ -438,7 +434,15 @@ impl LivePackager {
             self.last_lead_ms = pts_ms;
         } else if self.seg_start_ms.is_none() {
             return Ok(());
+        } else if !key
+            && self.tracks[stream].pending.is_empty()
+            && self.tracks[stream].next_dts.is_none()
+        {
+            // A further rendition joins at its first key frame: a segment cannot
+            // start on a delta frame.
+            return Ok(());
         }
+        self.tracks[stream].next_dts = Some(dts);
         self.tracks[stream].pending.push(Sample {
             dts,
             cts: 0,
@@ -553,11 +557,14 @@ impl LivePackager {
         let mut start_ticks = Vec::with_capacity(self.tracks.len());
         for (i, t) in self.tracks.iter_mut().enumerate() {
             let rate = u64::from(t.info.timescale);
-            let mut current = if t.info.media_type == MediaType::Video {
+            let mut current = if t.info.media_type == MediaType::Video && i == self.lead {
                 std::mem::take(&mut t.pending)
             } else {
-                // Audio: everything decoded before the boundary (all of it when the
-                // stream ends, so no tail packets are lost).
+                // Audio, and any further video rendition: everything decoded before
+                // the boundary (all of it when the stream ends, so no tail packets
+                // are lost). A rendition's key frame at the boundary starts its next
+                // segment, so renditions must share key frame timestamps (as
+                // adaptive bitrate switching requires anyway).
                 let boundary = (end_ms.max(0) as u64) * rate / 1000;
                 let split = if flush_all {
                     t.pending.len()
@@ -576,10 +583,17 @@ impl LivePackager {
             let part_bytes: Vec<u8> = if prefix.is_empty() {
                 Vec::new()
             } else {
-                self.parts[i].iter().flat_map(|p| p.data.iter().copied()).collect()
+                self.parts[i]
+                    .iter()
+                    .flat_map(|p| p.data.iter().copied())
+                    .collect()
             };
             let tail_only = !part_bytes.is_empty();
-            let tail = if tail_only { std::mem::take(&mut current) } else { Vec::new() };
+            let tail = if tail_only {
+                std::mem::take(&mut current)
+            } else {
+                Vec::new()
+            };
             prefix.append(&mut current);
             let current = prefix;
             if current.is_empty() && tail.is_empty() {
@@ -788,19 +802,18 @@ impl LivePackager {
         // Prefer the in-progress segment (the true live edge); fall back to
         // the newest retained segment when nothing is in flight. `None` only
         // before tracks exist or when no segment has ever completed.
-        if self.tracks.get(self.lead).is_none() {
-            return None;
-        }
-        Some(self.pending_secs().or_else(|| {
+        self.tracks.get(self.lead)?;
+        self.pending_secs().or_else(|| {
             self.segments
                 .back()
                 .and_then(|s| s.seconds.get(self.lead).copied())
-        })?)
+        })
     }
 
     /// Target part duration in seconds (`None` when parts are disabled).
     pub fn part_seconds(&self) -> Option<f64> {
-        self.parts_enabled().then(|| self.opts.part_seconds.unwrap_or(0.0))
+        self.parts_enabled()
+            .then(|| self.opts.part_seconds.unwrap_or(0.0))
     }
 
     /// Target segment duration in seconds.
@@ -964,7 +977,15 @@ impl LivePackager {
             // answerable as soon as that part is published: that is the point of
             // a low-latency blocking reload. Waiting for the whole segment would
             // hold the player for up to a segment duration.
-            Some(p) => msn <= self.next_number && self.part(track, msn, p).is_some(),
+            //
+            // A segment that has already completed answers any part index at once:
+            // its playlist lists every part it has, and the player moves on to the
+            // next segment (RFC 8216bis 6.2.5.2). Waiting for a part it will never
+            // gain would hold the request until the server's wait cap and then fail.
+            Some(p) => {
+                msn < self.next_number
+                    || (msn == self.next_number && self.part(track, msn, p).is_some())
+            }
             // A whole segment: it must be complete.
             None => msn < self.next_number,
         }
@@ -1129,7 +1150,11 @@ impl LivePackager {
                 bandwidth.max(1)
             );
             if t.info.media_type == MediaType::Video {
-                let _ = write!(rep, " width=\"{}\" height=\"{}\"", t.info.width, t.info.height);
+                let _ = write!(
+                    rep,
+                    " width=\"{}\" height=\"{}\"",
+                    t.info.width, t.info.height
+                );
             } else {
                 let _ = write!(rep, " audioSamplingRate=\"{}\"", t.info.sample_rate);
             }

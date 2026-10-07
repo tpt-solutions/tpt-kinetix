@@ -492,8 +492,15 @@ async fn reconnecting_publisher_continues_the_presentation() {
     assert_eq!(st, 200);
     let (_, both) = http(port, "GET", "/cam/track-0.m3u8", b"").await;
     let both = String::from_utf8(both).unwrap();
-    assert_eq!(both.matches("#EXT-X-DISCONTINUITY
-").count(), 1, "{both}");
+    assert_eq!(
+        both.matches(
+            "#EXT-X-DISCONTINUITY
+"
+        )
+        .count(),
+        1,
+        "{both}"
+    );
     assert!(both.matches("#EXTINF").count() > first_segments);
     assert!(both.contains("#EXT-X-ENDLIST"));
     for l in both.lines().filter(|l| l.starts_with("seg-")) {
@@ -538,12 +545,21 @@ async fn recording_serves_a_vod_after_the_publish_ends() {
     let (st, pl) = http(port, "GET", "/cam/dvr/track-0.m3u8", b"").await;
     assert_eq!(st, 200);
     let pl = String::from_utf8(pl).unwrap();
-    assert!(pl.contains("PLAYLIST-TYPE:VOD") && pl.contains("#EXT-X-ENDLIST"), "{pl}");
+    assert!(
+        pl.contains("PLAYLIST-TYPE:VOD") && pl.contains("#EXT-X-ENDLIST"),
+        "{pl}"
+    );
     let first_segments = pl.matches("#EXTINF").count();
     assert!(first_segments >= 3, "{pl}");
     // The live window kept at most `window` of them; the recording kept all.
     let (_, live_pl) = http(port, "GET", "/cam/track-0.m3u8", b"").await;
-    assert!(String::from_utf8(live_pl).unwrap().matches("#EXTINF").count() <= 2);
+    assert!(
+        String::from_utf8(live_pl)
+            .unwrap()
+            .matches("#EXTINF")
+            .count()
+            <= 2
+    );
 
     // Reconnect: the same recording grows, with a discontinuity.
     let (st, _) = http(port, "POST", "/ingest/cam", &webm).await;
@@ -567,7 +583,10 @@ async fn recording_serves_a_vod_after_the_publish_ends() {
     }
     // Path tricks and unknown keys are refused.
     assert_eq!(http(port, "GET", "/cam/dvr/..%2Fx", b"").await.0, 404);
-    assert_eq!(http(port, "GET", "/nokey/dvr/track-0.m3u8", b"").await.0, 404);
+    assert_eq!(
+        http(port, "GET", "/nokey/dvr/track-0.m3u8", b"").await.0,
+        404
+    );
     // The recorded video decodes in ffmpeg.
     let out = dir.join("rec.mp4");
     std::fs::write(&out, &media).unwrap();
@@ -577,7 +596,11 @@ async fn recording_serves_a_vod_after_the_publish_ends() {
         .args(["-map", "0:v:0", "-f", "null", "-"])
         .output()
         .unwrap();
-    assert!(frames.status.success(), "{}", String::from_utf8_lossy(&frames.stderr));
+    assert!(
+        frames.status.success(),
+        "{}",
+        String::from_utf8_lossy(&frames.stderr)
+    );
     // And it is on disk where the server says.
     assert!(rec_dir.join("cam").join("g1").join("track-0.m3u8").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -623,7 +646,10 @@ async fn recording_depth_and_generations_are_bounded() {
     let pl = String::from_utf8(pl).unwrap();
     let kept = pl.matches("#EXTINF").count();
     assert!((1..=3).contains(&kept), "5 s depth of 2 s segments: {pl}");
-    assert!(!pl.contains("MEDIA-SEQUENCE:1\n"), "the head must have slid: {pl}");
+    assert!(
+        !pl.contains("MEDIA-SEQUENCE:1\n"),
+        "the head must have slid: {pl}"
+    );
     // Trimmed segments are gone from disk, retained ones are served.
     let g1 = rec_dir.join("cam").join("g1");
     let files = std::fs::read_dir(&g1)
@@ -633,7 +659,10 @@ async fn recording_depth_and_generations_are_bounded() {
         .count();
     assert_eq!(files, kept);
     for l in pl.lines().filter(|l| l.starts_with("seg-")) {
-        assert_eq!(http(port, "GET", &format!("/cam/dvr/{l}"), b"").await.0, 200);
+        assert_eq!(
+            http(port, "GET", &format!("/cam/dvr/{l}"), b"").await.0,
+            200
+        );
     }
 
     // A restarted server (no in-memory state) starts generation 2 and prunes g1.
@@ -695,15 +724,27 @@ async fn recording_byte_budget_trims_oldest_segments() {
         .map(|e| e.metadata().unwrap().len())
         .sum();
     // At most the budget, plus slack for the one segment per track that is always kept.
-    assert!(seg_bytes < budget * 3, "{seg_bytes} bytes kept for a {budget} budget");
+    assert!(
+        seg_bytes < budget * 3,
+        "{seg_bytes} bytes kept for a {budget} budget"
+    );
     let (_, pl) = http(port, "GET", "/cam/dvr/track-0.m3u8", b"").await;
     let pl = String::from_utf8(pl).unwrap();
-    assert!(!pl.contains("MEDIA-SEQUENCE:1
-"), "the head must have been trimmed: {pl}");
+    assert!(
+        !pl.contains(
+            "MEDIA-SEQUENCE:1
+"
+        ),
+        "the head must have been trimmed: {pl}"
+    );
     assert!(pl.contains("#EXT-X-ENDLIST"), "{pl}");
     // Every segment the playlist still names is on disk and served.
     for l in pl.lines().filter(|l| l.starts_with("seg-")) {
-        assert_eq!(http(port, "GET", &format!("/cam/dvr/{l}"), b"").await.0, 200, "{l}");
+        assert_eq!(
+            http(port, "GET", &format!("/cam/dvr/{l}"), b"").await.0,
+            200,
+            "{l}"
+        );
     }
     // Nothing the playlist dropped is left behind.
     let named: Vec<&str> = pl.lines().filter(|l| l.starts_with("seg-0-")).collect();
@@ -735,8 +776,11 @@ async fn read_chunked(
             });
             let Some(mut at) = p else { break };
             // `at` is the start of the next chunk-size line.
-            let Some(eol) = buf[at..].windows(2).position(|w| w == b"\r\n") else { break };
-            let size = usize::from_str_radix(std::str::from_utf8(&buf[at..at + eol]).unwrap(), 16).unwrap();
+            let Some(eol) = buf[at..].windows(2).position(|w| w == b"\r\n") else {
+                break;
+            };
+            let size = usize::from_str_radix(std::str::from_utf8(&buf[at..at + eol]).unwrap(), 16)
+                .unwrap();
             let data_start = at + eol + 2;
             if buf.len() < data_start + size + 2 {
                 break;
@@ -772,7 +816,11 @@ async fn ll_dash_segment_streams_while_it_is_published() {
     }
     let dir = std::env::temp_dir().join(format!("tpt_lldash_stream_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"], 10) else {
+    let Some(src) = make_webm(
+        &dir,
+        &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"],
+        10,
+    ) else {
         eprintln!("skipping: libvpx-vp9 unavailable");
         return;
     };
@@ -804,21 +852,27 @@ async fn ll_dash_segment_streams_while_it_is_published() {
         }
         assert!(
             started.elapsed() < Duration::from_secs(20),
-            "no segment appeared (last _stats: {last_stats:?}, publisher: {:?}, last status {code})",
-            child.try_wait()
+            "no segment appeared (last _stats: {last_stats:?}, last status {code})"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     let target = latest + 1;
     let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    s.write_all(format!("GET /ll/seg-0-{target}.m4s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
+    s.write_all(
+        format!("GET /ll/seg-0-{target}.m4s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    )
+    .await
+    .unwrap();
     let t0 = Instant::now();
     let mut arrivals: Vec<(usize, Duration)> = Vec::new();
     let streamed = read_chunked(&mut s, t0, |n, at| arrivals.push((n, at))).await;
     let total = t0.elapsed();
-    assert!(arrivals.len() >= 3, "expected several CMAF chunks, got {}", arrivals.len());
+    assert!(
+        arrivals.len() >= 3,
+        "expected several CMAF chunks, got {}",
+        arrivals.len()
+    );
     let first = arrivals[0].1;
     assert!(
         total - first >= Duration::from_millis(500),
@@ -827,8 +881,12 @@ async fn ll_dash_segment_streams_while_it_is_published() {
     // The streamed bytes are the finished segment.
     let (code, whole) = http(port, "GET", &format!("/ll/seg-0-{target}.m4s"), b"").await;
     assert_eq!(code, 200);
-    assert_eq!(streamed, whole, "streamed chunks differ from the completed segment");
+    assert_eq!(
+        streamed, whole,
+        "streamed chunks differ from the completed segment"
+    );
     assert_eq!(&whole[4..8], b"moof");
     let _ = child.kill();
+    let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }

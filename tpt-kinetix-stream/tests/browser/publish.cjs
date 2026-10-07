@@ -13,6 +13,7 @@ const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 
 const [chrome, base, key = "browsercam", token = ""] = process.argv.slice(2);
+const transport = process.env.TRANSPORT || "ws"; // ws | whip
 if (!chrome || !base) {
   console.error("usage: node publish.cjs <chrome> <base-url> [key] [token]");
   process.exit(2);
@@ -30,12 +31,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "tpt-publish-"));
-  const url = `${base}/publish?auto=1&key=${key}` + (token ? `&token=${token}` : "");
+  const url = `${base}/publish?auto=1&transport=${transport}&key=${key}` + (token ? `&token=${token}` : "");
   const proc = spawn(chrome, [
     "--headless=new", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`,
     "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
-    "--autoplay-policy=no-user-gesture-required", url,
-  ], { stdio: "ignore" });
+    "--disable-features=WebRtcHideLocalIpsWithMdns",
+    "--autoplay-policy=no-user-gesture-required",
+    ...(process.env.CHROME_LOG ? ["--enable-logging=stderr", "--v=0"] : []), url,
+  ], { stdio: ["ignore", "ignore", process.env.CHROME_LOG ? "inherit" : "ignore"] });
   let failure = null;
   try {
     let playlist = "";
@@ -74,7 +77,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     if (ff.status !== 0 || ff.stderr.trim() || frames < 10) {
       throw new Error(`recorded video does not decode cleanly (frames=${frames}): ${ff.stderr}`);
     }
-    console.log(`browser publish OK: ${segs.length} segments live, ${frames} frames decoded from the first 3`);
+    console.log(`browser publish (${transport}) OK: ${segs.length} segments live, ${frames} frames decoded from the first 3`);
   } catch (e) {
     failure = e;
   } finally {

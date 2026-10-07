@@ -103,9 +103,11 @@ pub enum ExVideoPacketType {
     CodedFramesX,
     /// Video metadata (HDR/color info, SEI, ...).
     Metadata,
-    /// Carries the multitrack number (MPEG-TS style multi-program).
+    /// MPEG-2 TS sequence start (an AV1 video descriptor).
+    Mpeg2TsSequenceStart,
+    /// Several tracks in one message (Enhanced RTMP v2).
     Multitrack,
-    /// ModEx (returns a modifier + extended timestamp offset).
+    /// ModEx (a modifier such as a nanosecond timestamp offset).
     ModEx,
     /// Unknown / reserved value.
     Unknown(u8),
@@ -119,8 +121,9 @@ impl ExVideoPacketType {
             2 => Self::SequenceEnd,
             3 => Self::CodedFramesX,
             4 => Self::Metadata,
-            5 => Self::Multitrack,
-            6 => Self::ModEx,
+            5 => Self::Mpeg2TsSequenceStart,
+            6 => Self::Multitrack,
+            7 => Self::ModEx,
             other => Self::Unknown(other),
         }
     }
@@ -140,13 +143,6 @@ pub struct HdrMetadata {
     pub fourcc: [u8; 4],
 }
 
-/// A parsed Enhanced-RTMP multitrack header (packet type 5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MultitrackInfo {
-    /// Track number carried after the FourCC.
-    pub track_number: u8,
-}
-
 /// A parsed FLV video payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlvVideoTag {
@@ -163,8 +159,9 @@ pub struct FlvVideoTag {
     pub packet_kind: ExVideoPacketType,
     /// HDR/color metadata when `packet_kind == Metadata`.
     pub hdr: Option<HdrMetadata>,
-    /// Multitrack number when `packet_kind == Multitrack`.
-    pub multitrack: Option<MultitrackInfo>,
+    /// The Enhanced RTMP track this tag belongs to (`0` for single-track streams,
+    /// which is also the spec's default-track convention).
+    pub track_id: u8,
     /// The codec payload: an AVCDecoderConfigurationRecord when
     /// `avc_packet_type == SequenceHeader`, otherwise AVCC NAL data.
     pub data: Vec<u8>,
@@ -186,15 +183,15 @@ pub enum FlvError {
     Truncated,
 }
 
-/// Parses an Enhanced RTMP `ExVideoTagHeader` payload (first byte has bit 7 set).
-fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
-    let first = payload[0];
-    let frame_type = FlvFrameType::from_nibble((first >> 4) & 7);
-    let packet_type = first & 0x0F;
-    if payload.len() < 5 {
-        return Err(FlvError::Truncated);
-    }
-    let codec = match &payload[1..5] {
+/// Builds the tag for one track's payload of an Enhanced RTMP video message.
+fn ex_tag_from_body(
+    frame_type: FlvFrameType,
+    packet_type: u8,
+    fourcc: [u8; 4],
+    mut body: &[u8],
+    track_id: u8,
+) -> Result<FlvVideoTag, FlvError> {
+    let codec = match &fourcc {
         b"av01" => FlvVideoCodec::Av1,
         b"vp09" => FlvVideoCodec::Vp9,
         b"avc1" => FlvVideoCodec::Avc,
@@ -208,14 +205,9 @@ fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
         composition_time: 0,
         packet_kind: ExVideoPacketType::from_nibble(packet_type),
         hdr: None,
-        multitrack: None,
+        track_id,
         data: Vec::new(),
     };
-    // A video-info frame carries a command byte, not coded data.
-    if frame_type == FlvFrameType::VideoInfo {
-        return Ok(tag);
-    }
-    let mut body = &payload[5..];
     tag.avc_packet_type = match packet_type {
         0 => AvcPacketType::SequenceHeader,
         // CodedFrames (with a composition time only for AVC/HEVC) and CodedFramesX.
@@ -235,10 +227,7 @@ fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
     }
     // Metadata packets carry HDR/color info, not coded frames: surface the raw
     // payload so the ingest layer can forward it (SEI / colr / mdcv / clli).
-    // (Checked before the non-media early return: metadata/multitrack arrive
-    // as `AvcPacketType::Unknown`, which is exactly how they are told apart.)
     if tag.packet_kind == ExVideoPacketType::Metadata {
-        let fourcc: [u8; 4] = payload[1..5].try_into().unwrap_or([0; 4]);
         tag.hdr = Some(HdrMetadata {
             raw: body.to_vec(),
             fourcc,
@@ -246,21 +235,133 @@ fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
         tag.data = body.to_vec();
         return Ok(tag);
     }
-    // Multitrack packets select a track number; the payload after the track
-    // byte is empty (the actual frames follow as CodedFrames).
-    if tag.packet_kind == ExVideoPacketType::Multitrack {
-        let track_number = body.first().copied().unwrap_or(0);
-        tag.multitrack = Some(MultitrackInfo { track_number });
-        tag.data = Vec::new();
-        return Ok(tag);
-    }
     if matches!(tag.avc_packet_type, AvcPacketType::Unknown(_)) {
         return Ok(tag);
     }
-    // ModEx carries a modifier + extended timestamp offset; treat like
-    // CodedFramesX payload (no cts) and keep the raw bytes.
     tag.data = body.to_vec();
     Ok(tag)
+}
+
+/// Parses an Enhanced RTMP `ExVideoTagHeader` message (first byte has bit 7 set)
+/// into one tag, or one tag per track for a `Multitrack` message.
+///
+/// Layout (Enhanced RTMP v2): the first byte is `IsExHeader | FrameType | PacketType`.
+/// `ModEx` (7) prefixes are skipped (`modExDataSize`, the data, then a byte holding
+/// the modifier type and the next packet type). `Multitrack` (6) is followed by
+/// one byte `AvMultitrackType << 4 | VideoPacketType` and, unless the tracks use
+/// several codecs, one shared FourCC. Each track is then `[FourCC if many codecs]
+/// trackId(8) [sizeOfVideoTrack(24) unless OneTrack] payload`.
+fn parse_ex_video_tags(payload: &[u8]) -> Result<Vec<FlvVideoTag>, FlvError> {
+    let first = *payload.first().ok_or(FlvError::Truncated)?;
+    let frame_type = FlvFrameType::from_nibble((first >> 4) & 7);
+    let mut packet_type = first & 0x0F;
+    let mut pos = 1usize;
+    let byte = |pos: usize| payload.get(pos).copied().ok_or(FlvError::Truncated);
+    let slice = |from: usize, len: usize| payload.get(from..from + len).ok_or(FlvError::Truncated);
+
+    // ModEx: modifiers that extend the packet (a nanosecond timestamp offset). The
+    // base RTMP timestamp is what the packager uses, so they are skipped.
+    while packet_type == 7 {
+        let mut size = usize::from(byte(pos)?) + 1;
+        pos += 1;
+        if size == 256 {
+            let b = slice(pos, 2)?;
+            size = usize::from(u16::from_be_bytes([b[0], b[1]])) + 1;
+            pos += 2;
+        }
+        slice(pos, size)?;
+        pos += size;
+        packet_type = byte(pos)? & 0x0F;
+        pos += 1;
+    }
+
+    // A video-info (command) frame has a command byte instead of a FourCC and body.
+    if frame_type == FlvFrameType::VideoInfo && packet_type != 4 {
+        return Ok(vec![FlvVideoTag {
+            frame_type,
+            codec: FlvVideoCodec::Other(0xF0),
+            avc_packet_type: AvcPacketType::Unknown(packet_type),
+            composition_time: 0,
+            packet_kind: ExVideoPacketType::from_nibble(packet_type),
+            hdr: None,
+            track_id: 0,
+            data: Vec::new(),
+        }]);
+    }
+
+    if packet_type != 6 {
+        let fourcc: [u8; 4] = slice(pos, 4)?.try_into().map_err(|_| FlvError::Truncated)?;
+        let body = payload.get(pos + 4..).ok_or(FlvError::Truncated)?;
+        return Ok(vec![ex_tag_from_body(
+            frame_type,
+            packet_type,
+            fourcc,
+            body,
+            0,
+        )?]);
+    }
+
+    // Multitrack.
+    let b = byte(pos)?;
+    pos += 1;
+    let (multitrack_type, inner_type) = (b >> 4, b & 0x0F);
+    if inner_type == 6 {
+        return Err(FlvError::Truncated); // a Multitrack may not nest
+    }
+    let read_fourcc = |pos: &mut usize| -> Result<[u8; 4], FlvError> {
+        let f: [u8; 4] = slice(*pos, 4)?
+            .try_into()
+            .map_err(|_| FlvError::Truncated)?;
+        *pos += 4;
+        Ok(f)
+    };
+    let shared = if multitrack_type != 2 {
+        Some(read_fourcc(&mut pos)?)
+    } else {
+        None
+    };
+    let mut tags = Vec::new();
+    while pos < payload.len() {
+        let fourcc = match shared {
+            Some(f) => f,
+            None => read_fourcc(&mut pos)?,
+        };
+        let track_id = byte(pos)?;
+        pos += 1;
+        let len = if multitrack_type != 0 {
+            let b = slice(pos, 3)?;
+            pos += 3;
+            (usize::from(b[0]) << 16) | (usize::from(b[1]) << 8) | usize::from(b[2])
+        } else {
+            payload.len() - pos
+        };
+        let body = slice(pos, len)?;
+        pos += len;
+        tags.push(ex_tag_from_body(
+            frame_type, inner_type, fourcc, body, track_id,
+        )?);
+    }
+    Ok(tags)
+}
+
+/// Parses an Enhanced RTMP video message into its first tag (see
+/// [`parse_video_tags`] for messages that carry several tracks).
+fn parse_ex_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
+    parse_ex_video_tags(payload)?
+        .into_iter()
+        .next()
+        .ok_or(FlvError::Truncated)
+}
+
+/// Parses an RTMP `Video` message into every tag it carries: one for a classic or
+/// single-track Enhanced message, one per track for an Enhanced RTMP `Multitrack`
+/// message (e.g. OBS Enhanced Broadcasting, which sends several renditions).
+pub fn parse_video_tags(payload: &[u8]) -> Result<Vec<FlvVideoTag>, FlvError> {
+    match payload.first() {
+        None => Err(FlvError::Truncated),
+        Some(b) if b & 0x80 != 0 => parse_ex_video_tags(payload),
+        Some(_) => Ok(vec![parse_video_tag(payload)?]),
+    }
 }
 
 /// Parse an RTMP `Video` message payload into a [`FlvVideoTag`]. Understands both
@@ -300,7 +401,7 @@ pub fn parse_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
                 composition_time,
                 packet_kind,
                 hdr: None,
-                multitrack: None,
+                track_id: 0,
                 data: payload[5..].to_vec(),
             })
         }
@@ -311,7 +412,7 @@ pub fn parse_video_tag(payload: &[u8]) -> Result<FlvVideoTag, FlvError> {
             composition_time: 0,
             packet_kind: ExVideoPacketType::CodedFramesX,
             hdr: None,
-            multitrack: None,
+            track_id: 0,
             data: payload[1..].to_vec(),
         }),
     }
@@ -480,15 +581,145 @@ mod tests {
             (t.codec, t.composition_time, t.data),
             (FlvVideoCodec::Hevc, 40, vec![9])
         );
-        // Metadata packets surface HDR info; multitrack packets select a track.
+        // Metadata packets surface HDR info.
         let t = parse_video_tag(&[0x80 | 0x10 | 4, b'a', b'v', b'0', b'1', 7]).unwrap();
         assert_eq!(t.packet_kind, ExVideoPacketType::Metadata);
         assert!(t.hdr.is_some() && !t.is_sequence_header());
         assert_eq!(t.hdr.as_ref().unwrap().fourcc, *b"av01");
-        let t = parse_video_tag(&[0x80 | 0x10 | 5, b'a', b'v', b'0', b'1', 2]).unwrap();
-        assert_eq!(t.packet_kind, ExVideoPacketType::Multitrack);
-        assert_eq!(t.multitrack, Some(MultitrackInfo { track_number: 2 }));
         assert!(parse_video_tag(&[0x81, b'a', b'v']).is_err());
+    }
+
+    /// One track of a multitrack message: (its own FourCC if the tracks mix codecs, id, payload).
+    type TestTrack<'a> = (Option<&'a [u8; 4]>, u8, &'a [u8]);
+
+    fn multitrack(kind: u8, inner: u8, fourcc: Option<&[u8; 4]>, tracks: &[TestTrack]) -> Vec<u8> {
+        // IsExHeader | key frame | Multitrack(6), then AvMultitrackType<<4 | packet type.
+        let mut v = vec![0x80 | 0x10 | 6, (kind << 4) | inner];
+        if let Some(f) = fourcc {
+            v.extend_from_slice(f);
+        }
+        for (cc, id, body) in tracks {
+            if let Some(f) = cc {
+                v.extend_from_slice(*f);
+            }
+            v.push(*id);
+            if kind != 0 {
+                v.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+            }
+            v.extend_from_slice(body);
+        }
+        v
+    }
+
+    #[test]
+    fn multitrack_one_track() {
+        // OneTrack: no size field, the payload runs to the end.
+        let p = multitrack(0, 3, Some(b"vp09"), &[(None, 5, &[1, 2, 3])]);
+        let tags = parse_video_tags(&p).unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!((tags[0].track_id, tags[0].codec), (5, FlvVideoCodec::Vp9));
+        assert_eq!(tags[0].data, vec![1, 2, 3]);
+        assert_eq!(tags[0].packet_kind, ExVideoPacketType::CodedFramesX);
+    }
+
+    #[test]
+    fn multitrack_many_tracks_share_a_codec() {
+        let p = multitrack(
+            1,
+            3,
+            Some(b"av01"),
+            &[(None, 0, &[9, 9, 9]), (None, 1, &[7]), (None, 2, &[])],
+        );
+        let tags = parse_video_tags(&p).unwrap();
+        let got: Vec<(u8, Vec<u8>)> = tags.iter().map(|t| (t.track_id, t.data.clone())).collect();
+        assert_eq!(got, vec![(0, vec![9, 9, 9]), (1, vec![7]), (2, vec![])]);
+        assert!(tags.iter().all(|t| t.codec == FlvVideoCodec::Av1));
+    }
+
+    #[test]
+    fn multitrack_many_codecs() {
+        let p = multitrack(
+            2,
+            3,
+            None,
+            &[(Some(b"av01"), 0, &[1, 1]), (Some(b"vp09"), 3, &[2, 2, 2])],
+        );
+        let tags = parse_video_tags(&p).unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!((tags[0].track_id, tags[0].codec), (0, FlvVideoCodec::Av1));
+        assert_eq!((tags[1].track_id, tags[1].codec), (3, FlvVideoCodec::Vp9));
+        assert_eq!(tags[1].data, vec![2, 2, 2]);
+    }
+
+    #[test]
+    fn multitrack_sequence_start_per_track() {
+        let p = multitrack(
+            1,
+            0,
+            Some(b"vp09"),
+            &[(None, 0, &[0xAA]), (None, 1, &[0xBB])],
+        );
+        let tags = parse_video_tags(&p).unwrap();
+        assert!(tags.iter().all(|t| t.is_sequence_header()));
+        assert_eq!(tags[1].track_id, 1);
+        assert_eq!(tags[1].data, vec![0xBB]);
+    }
+
+    #[test]
+    fn modex_prefix_is_skipped() {
+        // ModEx(7): size-1 = 2 (3 bytes of nanosecond offset), then type(0)<<4 | CodedFramesX(3).
+        let mut p = vec![0x80 | 0x10 | 7, 2, 0x00, 0x03, 0xE8, 0x03];
+        p.extend_from_slice(b"vp09");
+        p.extend_from_slice(&[4, 5]);
+        let tags = parse_video_tags(&p).unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].packet_kind, ExVideoPacketType::CodedFramesX);
+        assert_eq!(tags[0].data, vec![4, 5]);
+        // ModEx wrapping a multitrack message.
+        let mut p = vec![0x80 | 0x10 | 7, 0, 0xAA, 0x06];
+        p.extend_from_slice(
+            &multitrack(1, 3, Some(b"av01"), &[(None, 1, &[1]), (None, 2, &[2])])[1..],
+        );
+        let tags = parse_video_tags(&p).unwrap();
+        assert_eq!(
+            tags.iter().map(|t| t.track_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn truncated_multitrack_is_an_error_not_a_panic() {
+        let p = multitrack(1, 3, Some(b"av01"), &[(None, 0, &[1, 2, 3, 4])]);
+        for cut in 1..p.len() {
+            let _ = parse_video_tags(&p[..cut]); // must not panic
+        }
+        // A track claiming more bytes than the message holds.
+        let mut bad = p.clone();
+        bad[7] = 0xFF;
+        assert!(parse_video_tags(&bad).is_err());
+    }
+
+    #[test]
+    fn video_parsers_never_panic_on_arbitrary_bytes() {
+        // A xorshift stream of random messages, biased toward the Enhanced RTMP
+        // header (bit 7 set, with Multitrack / ModEx packet types).
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..30_000 {
+            let len = (next() % 48) as usize;
+            let mut msg: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            if let Some(first) = msg.first_mut() {
+                let ptype = [6u8, 7, 1, 3, 0, 4][(next() % 6) as usize];
+                *first = 0x80 | (*first & 0x70) | ptype;
+            }
+            let _ = parse_video_tags(&msg);
+            let _ = parse_video_tag(&msg);
+        }
     }
 
     #[test]

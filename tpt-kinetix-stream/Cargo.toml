@@ -17,6 +17,10 @@ documentation = "https://docs.rs/tpt-kinetix-stream"
 # base crate stays dependency-light; enable for deployments that take
 # `rtmps://` publishers.
 rtmps = ["dep:tokio-rustls", "dep:rustls-pemfile"]
+# WHIP (WebRTC-HTTP ingest): browsers and OBS publish VP9/AV1 + Opus over WebRTC. Uses the
+# sans-I/O `str0m` stack with its pure-Rust crypto (no OpenSSL, no C), so the
+# memory-safe story holds. Off by default: it pulls in the WebRTC dependency tree.
+whip = ["dep:str0m"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -29,10 +33,12 @@ bytes = "1.5"
 nom = { workspace = true }
 tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2.2", optional = true }
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"], optional = true }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-package = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 tokio-test = "0.4"
 tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
