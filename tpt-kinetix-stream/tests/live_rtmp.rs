@@ -1065,3 +1065,127 @@ async fn audio_multitrack_rtmp_publish_becomes_two_audio_renditions() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Enhanced RTMP v2 capability exchange: the client's `capsEx` and FourCC info
+/// maps reach `PublishStart`, and the server's `_result` states its own.
+#[tokio::test]
+async fn v2_capability_exchange_is_parsed_and_answered() {
+    use std::sync::{Arc, Mutex};
+    use tpt_kinetix_stream::rtmp::server::{
+        RtmpConfig, RtmpMediaEvent, RtmpServer, CAPS_EX_MODEX, CAPS_EX_MULTITRACK,
+        CAPS_EX_RECONNECT, FOUR_CC_CAN_ENCODE,
+    };
+    let rtmp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let rtmp_port = rtmp.local_addr().unwrap().port();
+    let seen: Arc<Mutex<Vec<RtmpMediaEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let server = RtmpServer::new(RtmpConfig {
+        bind_addr: String::new(),
+        tls: None,
+    })
+    .with_handler({
+        let seen = seen.clone();
+        move |e| seen.lock().unwrap().push(e.clone())
+    });
+    tokio::spawn(async move { server.serve(rtmp).await });
+
+    let mut s = TcpStream::connect(("127.0.0.1", rtmp_port)).await.unwrap();
+    s.write_all(&[3]).await.unwrap();
+    s.write_all(&vec![0u8; 1536]).await.unwrap();
+    let mut srv = vec![0u8; 1 + 1536 + 1536];
+    s.read_exact(&mut srv).await.unwrap();
+    s.write_all(&srv[1..1537]).await.unwrap();
+    // The connect object is over 128 bytes: raise the client's chunk size first.
+    s.write_all(&chunks(2, 0, 1, 0, &4096u32.to_be_bytes(), 128))
+        .await
+        .unwrap();
+    let cmd = |values: &[Amf0Value]| chunks(3, 0, 20, 0, &amf::encode_all(values), 4096);
+    let map = |kv: &[(&str, f64)]| {
+        Amf0Value::Object(
+            kv.iter()
+                .map(|(k, v)| (k.to_string(), Amf0Value::Number(*v)))
+                .collect(),
+        )
+    };
+    // A v2-only client: no `fourCcList`, just the info maps and `capsEx`.
+    s.write_all(&cmd(&[
+        Amf0Value::String("connect".into()),
+        Amf0Value::Number(1.0),
+        Amf0Value::Object(vec![
+            ("app".into(), Amf0Value::String("live".into())),
+            (
+                "capsEx".into(),
+                Amf0Value::Number(f64::from(CAPS_EX_RECONNECT | CAPS_EX_MULTITRACK)),
+            ),
+            // encode (2) | forward (4); and a decode-only codec that must not count.
+            (
+                "videoFourCcInfoMap".into(),
+                map(&[("av01", 6.0), ("hvc1", 1.0)]),
+            ),
+            ("audioFourCcInfoMap".into(), map(&[("Opus", 2.0)])),
+        ]),
+    ]))
+    .await
+    .unwrap();
+    s.write_all(&cmd(&[
+        Amf0Value::String("createStream".into()),
+        Amf0Value::Number(2.0),
+        Amf0Value::Null,
+    ]))
+    .await
+    .unwrap();
+    s.write_all(&cmd(&[
+        Amf0Value::String("publish".into()),
+        Amf0Value::Number(0.0),
+        Amf0Value::Null,
+        Amf0Value::String("v2".into()),
+        Amf0Value::String("live".into()),
+    ]))
+    .await
+    .unwrap();
+
+    // The server's reply carries its capsEx and info maps.
+    let mut reply = Vec::new();
+    let mut buf = [0u8; 2048];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !reply.windows(18).any(|w| w == b"videoFourCcInfoMap")
+        && std::time::Instant::now() < deadline
+    {
+        match tokio::time::timeout(Duration::from_secs(1), s.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => reply.extend_from_slice(&buf[..n]),
+            _ => break,
+        }
+    }
+    for key in ["capsEx", "videoFourCcInfoMap", "audioFourCcInfoMap"] {
+        assert!(
+            reply.windows(key.len()).any(|w| w == key.as_bytes()),
+            "`_result` lacks {key}"
+        );
+    }
+    // capsEx = Multitrack | ModEx as an AMF0 number right after its key.
+    let at = reply.windows(6).position(|w| w == b"capsEx").unwrap() + 6;
+    assert_eq!(reply[at], 0, "AMF0 number marker");
+    let n = f64::from_be_bytes(reply[at + 1..at + 9].try_into().unwrap());
+    assert_eq!(n as u32, CAPS_EX_MULTITRACK | CAPS_EX_MODEX);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let events = seen.lock().unwrap().clone();
+    let Some(RtmpMediaEvent::PublishStart { capabilities, .. }) = events
+        .iter()
+        .find(|e| matches!(e, RtmpMediaEvent::PublishStart { .. }))
+        .cloned()
+    else {
+        panic!("no PublishStart; got {events:?}");
+    };
+    assert_eq!(capabilities.caps_ex, CAPS_EX_RECONNECT | CAPS_EX_MULTITRACK);
+    assert_eq!(
+        capabilities.video_four_cc_info,
+        vec![("av01".to_string(), 6), ("hvc1".to_string(), 1)]
+    );
+    assert_eq!(
+        capabilities.audio_four_cc_info,
+        vec![("Opus".to_string(), FOUR_CC_CAN_ENCODE)]
+    );
+    // Only what the client can encode (send) is folded into the plain lists.
+    assert_eq!(capabilities.video_four_ccs, vec![*b"av01"]);
+    assert_eq!(capabilities.audio_four_ccs, vec![*b"Opus"]);
+}

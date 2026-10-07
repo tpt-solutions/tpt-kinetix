@@ -48,6 +48,21 @@ impl Default for RtmpConfig {
     }
 }
 
+/// `capsEx` bit: the sender supports reconnection.
+pub const CAPS_EX_RECONNECT: u32 = 0x01;
+/// `capsEx` bit: the sender supports multitrack.
+pub const CAPS_EX_MULTITRACK: u32 = 0x02;
+/// `capsEx` bit: the sender can parse `ModEx` signals.
+pub const CAPS_EX_MODEX: u32 = 0x04;
+/// `capsEx` bit: the sender supports the timestamp nanosecond offset.
+pub const CAPS_EX_TIMESTAMP_NANO_OFFSET: u32 = 0x08;
+/// `FourCcInfoMask`: can decode the codec.
+pub const FOUR_CC_CAN_DECODE: u8 = 0x01;
+/// `FourCcInfoMask`: can encode the codec.
+pub const FOUR_CC_CAN_ENCODE: u8 = 0x02;
+/// `FourCcInfoMask`: can forward the codec.
+pub const FOUR_CC_CAN_FORWARD: u8 = 0x04;
+
 /// What the client announced during the capability exchange (`connect` +
 /// `releaseStream`/`FCPublish` hints and the audio/video codec fields of the
 /// `connect` command object). OBS 30+ sends `fourCcList` / `audioFourCcList`
@@ -61,6 +76,13 @@ pub struct RtmpCapabilities {
     pub audio_four_ccs: Vec<[u8; 4]>,
     /// Whether the client asked for multitrack mode (`multitrack: true`).
     pub multitrack: bool,
+    /// Enhanced RTMP v2 `capsEx` flags the client declared ([`CAPS_EX_RECONNECT`] etc.).
+    pub caps_ex: u32,
+    /// Enhanced RTMP v2 `videoFourCcInfoMap`: FourCC (or `"*"`) -> [`FOUR_CC_CAN_DECODE`] /
+    /// `ENCODE` / `FORWARD` flags. Empty when the client sent none.
+    pub video_four_cc_info: Vec<(String, u8)>,
+    /// Enhanced RTMP v2 `audioFourCcInfoMap`, as above.
+    pub audio_four_cc_info: Vec<(String, u8)>,
     /// The `app` the client connected to.
     pub app: Option<String>,
 }
@@ -311,7 +333,29 @@ fn command(values: &[Amf0Value]) -> Vec<u8> {
 
 /// The `_result` reply to `connect`.
 fn connect_result(transaction_id: f64) -> Vec<u8> {
-    command(&[
+    command(&connect_result_values(transaction_id))
+}
+
+/// The AMF values of the `connect` `_result`: the server's side of the Enhanced
+/// RTMP capability exchange (`fourCcList` for v1 clients, `capsEx` and the
+/// FourCC info maps for v2). The server repackages what it receives, so it
+/// states `CanForward` for the codecs it ingests (AV1, VP9, Opus), and
+/// multitrack plus `ModEx` parsing (nanosecond offsets are parsed and ignored).
+fn connect_result_values(transaction_id: f64) -> Vec<Amf0Value> {
+    let info_map = |codecs: &[&str]| {
+        Amf0Value::Object(
+            codecs
+                .iter()
+                .map(|c| {
+                    (
+                        (*c).to_string(),
+                        Amf0Value::Number(f64::from(FOUR_CC_CAN_FORWARD)),
+                    )
+                })
+                .collect(),
+        )
+    };
+    vec![
         Amf0Value::String("_result".into()),
         Amf0Value::Number(transaction_id),
         Amf0Value::Object(vec![
@@ -326,6 +370,12 @@ fn connect_result(transaction_id: f64) -> Vec<u8> {
                     Amf0Value::String("Opus".into()),
                 ]),
             ),
+            (
+                "capsEx".into(),
+                Amf0Value::Number(f64::from(CAPS_EX_MULTITRACK | CAPS_EX_MODEX)),
+            ),
+            ("videoFourCcInfoMap".into(), info_map(&["av01", "vp09"])),
+            ("audioFourCcInfoMap".into(), info_map(&["Opus"])),
         ]),
         Amf0Value::Object(vec![
             ("level".into(), Amf0Value::String("status".into())),
@@ -338,7 +388,7 @@ fn connect_result(transaction_id: f64) -> Vec<u8> {
                 Amf0Value::String("Connection succeeded.".into()),
             ),
         ]),
-    ])
+    ]
 }
 
 /// The `_result` reply to `createStream`, returning a stream id.
@@ -471,6 +521,18 @@ where
     Ok(())
 }
 
+/// Read an Enhanced-RTMP v2 `[audio|video]FourCcInfoMap` from a `connect` command
+/// object: an object of FourCC (or `"*"`) -> capability flags.
+fn four_cc_info_map(obj: &Amf0Value, key: &str) -> Vec<(String, u8)> {
+    let Some(Amf0Value::Object(props) | Amf0Value::EcmaArray(props)) = obj.get(key) else {
+        return Vec::new();
+    };
+    props
+        .iter()
+        .filter_map(|(k, v)| Some((k.clone(), v.as_f64()? as u8)))
+        .collect()
+}
+
 /// Read an Enhanced-RTMP FourCC list (`fourCcList` / `audioFourCcList`) from a
 /// `connect` command object: a strict array of 4-char strings.
 fn four_cc_list(obj: &Amf0Value, key: &str) -> Vec<[u8; 4]> {
@@ -531,6 +593,28 @@ where
                         _ => None,
                     })
                     .unwrap_or(false);
+                caps.caps_ex = obj
+                    .get("capsEx")
+                    .and_then(Amf0Value::as_f64)
+                    .map_or(0, |n| n as u32);
+                caps.video_four_cc_info = four_cc_info_map(obj, "videoFourCcInfoMap");
+                caps.audio_four_cc_info = four_cc_info_map(obj, "audioFourCcInfoMap");
+                // A v2 client may send only the info maps: what it can encode is
+                // what it may send, so fold those into the plain lists.
+                for (list, info) in [
+                    (&mut caps.video_four_ccs, &caps.video_four_cc_info),
+                    (&mut caps.audio_four_ccs, &caps.audio_four_cc_info),
+                ] {
+                    for (key, flags) in info {
+                        let b = key.as_bytes();
+                        if b.len() == 4 && flags & FOUR_CC_CAN_ENCODE != 0 {
+                            let cc = [b[0], b[1], b[2], b[3]];
+                            if !list.contains(&cc) {
+                                list.push(cc);
+                            }
+                        }
+                    }
+                }
             }
             // Standard control message sequence, then _result.
             stream.write_all(&window_ack_size(2_500_000)).await?;
