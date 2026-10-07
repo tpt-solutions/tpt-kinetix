@@ -599,3 +599,17 @@ fn conformance_vp9_multitile() {
         &["-cpu-used", "4", "-tile-columns", "2"],
     );
 }
+
+/// 1024 wide allows up to four tile columns (VP9 minimum tile width is 256px),
+/// so this exercises the parallel tile-column decode path, with tile rows too.
+#[test]
+fn conformance_vp9_multitile_columns_parallel() {
+    check_clip(
+        "tiled1024x288",
+        1024,
+        288,
+        "testsrc",
+        4,
+        &["-cpu-used", "4", "-tile-columns", "2", "-tile-rows", "1"],
+    );
+}

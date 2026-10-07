@@ -433,6 +433,57 @@ fn ffmpeg_decode_to_raw(clip: &Path) -> Option<PathBuf> {
     status.success().then_some(out)
 }
 
+// ── Peak-heap tracking ───────────────────────────────────────────────────────
+
+/// Wraps the system allocator to track live and peak heap bytes. Tracking is
+/// always on (two relaxed atomics per allocation, negligible next to decode);
+/// [`peak_heap_of`] resets the peak, runs a closure and reads it back.
+struct PeakAlloc;
+
+static LIVE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PEAK_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe impl std::alloc::GlobalAlloc for PeakAlloc {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let p = std::alloc::System.alloc(l);
+        if !p.is_null() {
+            let now = LIVE_BYTES.fetch_add(l.size(), Relaxed) + l.size();
+            PEAK_BYTES.fetch_max(now, Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        LIVE_BYTES.fetch_sub(l.size(), std::sync::atomic::Ordering::Relaxed);
+        std::alloc::System.dealloc(p, l)
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, new: usize) -> *mut u8 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let q = std::alloc::System.realloc(p, l, new);
+        if !q.is_null() {
+            if new >= l.size() {
+                let now = LIVE_BYTES.fetch_add(new - l.size(), Relaxed) + (new - l.size());
+                PEAK_BYTES.fetch_max(now, Relaxed);
+            } else {
+                LIVE_BYTES.fetch_sub(l.size() - new, Relaxed);
+            }
+        }
+        q
+    }
+}
+
+#[global_allocator]
+static ALLOC: PeakAlloc = PeakAlloc;
+
+/// Peak extra heap (bytes above the level at entry) while `f` runs.
+fn peak_heap_of<R>(f: impl FnOnce() -> R) -> (R, usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let base = LIVE_BYTES.load(Relaxed);
+    PEAK_BYTES.store(base, Relaxed);
+    let r = f();
+    (r, PEAK_BYTES.load(Relaxed).saturating_sub(base))
+}
+
 // ── Corpus ───────────────────────────────────────────────────────────────────
 
 struct Corpus {
@@ -570,6 +621,19 @@ fn ensure_corpus(cfg: &Config) -> Corpus {
                 "0",
             ])
             .merged(frames),
+        );
+    }
+    // Multi-tile VP9 clip: the standard clips are single-tile, so tile-column
+    // threading only shows up here (1280 wide allows 4 tile columns).
+    if !cfg.quick {
+        let src = "testsrc=size=1280x720:rate=30";
+        generate(
+            "vp9tiles_1280x720.ivf",
+            vec_args(&[
+                "-f", "lavfi", "-i", src, "-pix_fmt", "yuv420p", "-c:v", "libvpx-vp9", "-deadline",
+                "good", "-cpu-used", "4", "-lag-in-frames", "0", "-tile-columns", "2",
+            ])
+            .merged(["-frames:v", "60"]),
         );
     }
 
@@ -782,6 +846,13 @@ fn run_decode_section(cfg: &Config, corpus: &Corpus, fate: &[PathBuf], report: &
             corpus.dir.join(format!("h264_{w}x{h}.h264")),
         ));
     }
+    if !cfg.quick {
+        targets.push((
+            "vp9".into(),
+            "testsrc 1280x720 4 tile cols (libvpx)".into(),
+            corpus.dir.join("vp9tiles_1280x720.ivf"),
+        ));
+    }
     for p in fate {
         let name = p
             .file_stem()
@@ -903,6 +974,13 @@ fn run_decode_section(cfg: &Config, corpus: &Corpus, fate: &[PathBuf], report: &
             frames
         });
         let elems = elems_per_pass * loops;
+        // One untimed pass with the allocator's peak tracker (heap only; the
+        // output frames Kinetix returns are included, as they are in use).
+        let (_, peak_heap) = peak_heap_of(|| match codec.as_str() {
+            "av1" => av1_decode_all(&data).0,
+            "vp9" => vp9_decode_all(&data).0,
+            _ => h264_decode_all(&data).0,
+        });
 
         let clip = path.to_string_lossy().replace('\\', "/");
         // NOTE: no `-v error` here — ffmpeg prints the `bench:` line at info
@@ -966,6 +1044,7 @@ fn run_decode_section(cfg: &Config, corpus: &Corpus, fate: &[PathBuf], report: &
             "ffmpeg_default_mpxs": round2(mt_mpx),
             "ratio_kinetix_over_ffmpeg_1thread": if verified { Some(round2(ratio)) } else { None },
             "ffmpeg_1thread_maxrss_kb": st.maxrss_kb,
+            "kinetix_peak_heap_kb": peak_heap / 1024,
         }));
 
         println!(

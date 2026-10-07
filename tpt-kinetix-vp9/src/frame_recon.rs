@@ -5,7 +5,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use tpt_kinetix_core::error::KinetixError;
 
@@ -436,7 +436,7 @@ impl<'a> TileDecoder<'a> {
         Ok(())
     }
 
-    fn ref_frame_rc(&self, slot: u8) -> Result<Rc<crate::frame::FrameData>, KinetixError> {
+    fn ref_frame_rc(&self, slot: u8) -> Result<Arc<crate::frame::FrameData>, KinetixError> {
         self.fctx.refs[slot as usize]
             .clone()
             .ok_or_else(|| KinetixError::Parse(format!("vp9: reference {slot} unavailable")))
@@ -445,7 +445,7 @@ impl<'a> TileDecoder<'a> {
     fn mc_luma(
         &mut self,
         mv: Mv,
-        frame_rc: &Rc<crate::frame::FrameData>,
+        frame_rc: &Arc<crate::frame::FrameData>,
         ref_slot: usize,
         px: usize,
         py: usize,
@@ -512,7 +512,7 @@ impl<'a> TileDecoder<'a> {
     fn mc_chroma(
         &mut self,
         mv: Mv,
-        frame_rc: &Rc<crate::frame::FrameData>,
+        frame_rc: &Arc<crate::frame::FrameData>,
         ref_slot: usize,
         px_uv: usize,
         py_uv: usize,

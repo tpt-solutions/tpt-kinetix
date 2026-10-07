@@ -841,21 +841,27 @@ path kept as oracle. Commit or stash unrelated working-tree edits before A/B wor
   - [ ] VP9 loop filter (`tpt-kinetix-vp9/src/loop_filter.rs`, 49-63% of VP9) — still the best
     candidate in the whole file, but see the VP9 correctness prerequisite below
   - [x] ~~AV1 inverse transforms~~ — **struck 2026-10-03: measured at 1-2% of a frame**
-  - [ ] AV1/VP9 motion-compensation filters — unmeasured (the AV1 inter path is unattributed)
-  - [ ] AV1 CDEF + loop restoration — ~0 on the current corpus only because it does not enable
-    them; still unmeasured for performance
+  - [~] AV1/VP9 motion-compensation filters — AV1 done (AVX2 `filter_h_row`/`filter_v_row`);
+    **VP9 MC not started** (VP9 has no SIMD code at all)
+  - [x] AV1 CDEF (AVX2, -14%), loop restoration sgrproj (restructure, -3.7%), warp (AVX2, -4.1%)
+    and MC filter rows (AVX2, -5.8%) — **done 2026-10-03**, see the "real profile" section
+    (the all-thread sampler showed these were hot even where the phase timers said ~0)
   - [x] ~~Intra predictors~~ — **struck 2026-10-03: measured at <1% of a frame**
 
   **Caveat earned the hard way**: the first kernel attempted (AV1 `add_residual_row`) measured
   neutral in two profiles and six cases, because LLVM already auto-vectorises that pattern.
   Do not assume hand-SIMD wins here — measure each candidate against its own scalar form
   *first*, and prefer item 5 where the hot code is branchy rather than arithmetic.
-- [ ] 4. Parallelism on single-tile streams:
-  - [ ] Superblock-row post-filters (needs dav1d-style delayed horizontal pass to stay bit-exact)
-  - [ ] Frame-level overlap of loop filter (frame N) with entropy decode (N+1)
-  - [ ] VP9 tile-column threading
-- [ ] 5. Entropy decode: symbol decoder refill, branchless CDF adaptation, coef-context lookups.
-- [ ] 6. Allocation/memory: only if the profiler shows it matters (AV1 evidence says no).
+- [~] 4. Parallelism on single-tile streams:
+  - [x] Plane-parallel post-filters (AV1 + VP9) — done 2026-10-06, AV1 -6..-17%
+  - [x] ~~Superblock-row post-filters~~ — **struck**: within a plane the deblock chain is
+    inherently sequential; only tile/frame-level parallelism is bit-exact (see item 4a)
+  - [ ] Frame-level overlap of loop filter (frame N) with entropy decode (N+1) — the one
+    large structural win left; needs a reference-readiness handshake in the decoder
+  - [x] VP9 tile-column threading — done 2026-10-08: columns decode in parallel into private `FrameState`/`Counts`, merged per column (byte-exact; test `conformance_vp9_multitile_columns_parallel`, 1024x288, 4 cols x 2 rows). Speedup unmeasured (needs quiet machine + multi-tile clip in the perf corpus)
+- [x] 5. Entropy decode: done 2026-10-03 (refill/CDF micro-opts, bit-exact, measured neutral —
+  `read_symbol` is only ~3-4.5% of decode, so this was never the bottleneck)
+- [x] 6. Allocation/memory: done 2026-10-03 (pooling, ~-8% cumulative; allocator no longer a lever)
 - [x] Prerequisite for trustworthy VP9 speed numbers: the "loop-filter skip-edge correctness
   bug" turned out to be the n>4 D153/D117 intra predictors (fixed 2026-10-06, see
   todo-vp9.md); the perf corpus verifies byte-exact again.
@@ -1095,7 +1101,28 @@ least cross-crate information. Re-measuring it under fat LTO is still open.
   nightly's sysroot is missing `librustc-nightly_rt.asan.a`; `--sanitizer none`
   still links it). CI's scheduled `fuzz.yml` workflow is the coverage path;
   local runs need a nightly reinstall first
-- [ ] CI nightly/manual bench job uploads the report
+- [x] CI nightly/manual bench job uploads the report (`.github/workflows/bench.yml`, weekly + dispatch, no gate)
+
+## Remaining work — feasibility assessment (2026-10-08)
+
+Every Phase 0-2 item is closed; Bug 1 (screen partial blocks) and the `"lossy"` reporting bug are
+fixed (no `#[ignore]` left in `tpt-kinetix-screen/tests/roundtrip.rs`). What is still open:
+
+| Item | Doable? | Notes |
+|:---|:---|:---|
+| Refresh `just bench-ffmpeg` headline ratio | **Yes, now** | ~32 min, no code. Last numbers (6-9x) predate ~-33% AV1 and plane-parallel gains; VP9 rows are verifiable again. Do not run anything else concurrently |
+| CI nightly/manual bench job uploading the report | **Yes** | small workflow addition (`workflow_dispatch` + schedule, upload `docs/perf/*.json` artifact). Shared runners are noisy, so upload-only, no regression gate |
+| Fuzz >= 60 s locally | **Yes, cheap** | nightly toolchain is installed; reinstall it (`rustup toolchain uninstall/install nightly`) to restore the missing asan runtime, or rely on `fuzz.yml` |
+| Peak-memory measurement (Kinetix side) | **Yes** | counting allocator already exists in `prof_sample.rs`; reuse for a peak-bytes column |
+| VP9 loop-filter AVX2 | **Doable, moderate risk** | best remaining VP9 target (49-63%). Scalar rewrites lost 2x, so it must be real SIMD; the AV1 deblock AVX2 attempt was bit-exact but gave no gain, which is a warning — prototype one filter width and A/B before committing |
+| VP9 MC SIMD | **Doable** | same register-resident pattern as AV1's `filter_h_row` (-5.8%); reuse the kernel shape. Profile VP9 inter first (no breakdown exists) |
+| VP9 tile-column threading | **Doable, small** | independent tile columns, bit-exact by construction. Only helps multi-tile streams; the perf corpus is single-tile, so it needs a new corpus clip (`--tile-columns`) to show anything |
+| Frame-level LF/entropy overlap | **Hard** | real architectural change (reference-readiness sync, shared frame buffers); the biggest remaining lever but multi-session and risky |
+| vision/face vs AV1/x264 | **Blocked on research** | needs a detector-accuracy study / matched-quality clips; not a coding task |
+| volumetric vs Draco / TMC13 | **Blocked** | codec is not byte-compatible with `tmc3` |
+| Target hardware (ARM?) / bench-compare threshold | **Needs a decision** | drift floor measured at ±10-25% cross-session, so 5% default is not meaningful |
+
+Suggested order: bench-ffmpeg refresh -> CI bench job -> VP9 MC/LF SIMD (measure first) -> VP9 tile threading.
 
 ## Open questions
 

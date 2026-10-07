@@ -8,7 +8,7 @@
 //! frame width plus per-tile left caches, per-superblock loop-filter level and
 //! edge masks, and a per-8px MV/reference grid used by MV prediction.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use tpt_kinetix_core::error::KinetixError;
 
@@ -182,6 +182,41 @@ impl FrameData {
             segmap: vec![0; grid_len],
             seg_stride,
             mvrefs: vec![MvrefPair::default(); grid_len],
+        }
+    }
+
+    /// Copy one tile column's output (`col_start..col_end` in 8px mi units,
+    /// all rows) from `src` into `self`. `last` extends the luma/chroma copy to
+    /// the end of the row so right-edge block overhang matches the serial path.
+    pub fn copy_tile_columns(
+        &mut self,
+        src: &FrameData,
+        col_start: usize,
+        col_end: usize,
+        last: bool,
+    ) {
+        let stride = self.stride;
+        let (x0, mut x1) = (col_start * 8, col_end * 8);
+        if last {
+            x1 = stride;
+        }
+        for r in 0..self.buf_h {
+            let o = r * stride;
+            self.y[o + x0..o + x1].copy_from_slice(&src.y[o + x0..o + x1]);
+        }
+        let cs = stride >> 1;
+        for r in 0..(self.buf_h >> 1) {
+            let o = r * cs;
+            let (c0, c1) = (x0 >> 1, x1 >> 1);
+            self.u[o + c0..o + c1].copy_from_slice(&src.u[o + c0..o + c1]);
+            self.v[o + c0..o + c1].copy_from_slice(&src.v[o + c0..o + c1]);
+        }
+        let ss = self.seg_stride;
+        let (m0, m1) = (col_start, if last { ss } else { col_end.min(ss) });
+        for r in 0..self.mi_rows {
+            let o = r * ss;
+            self.segmap[o + m0..o + m1].copy_from_slice(&src.segmap[o + m0..o + m1]);
+            self.mvrefs[o + m0..o + m1].clone_from_slice(&src.mvrefs[o + m0..o + m1]);
         }
     }
 
@@ -361,6 +396,51 @@ impl Counts {
         }
     }
 
+    /// Add another tile column's statistics into this set (counts are plain sums).
+    pub fn merge(&mut self, o: &Counts) {
+        fn add(a: &mut [u32], b: &[u32]) {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x += *y;
+            }
+        }
+        add(self.y_mode.as_flattened_mut(), o.y_mode.as_flattened());
+        add(self.uv_mode.as_flattened_mut(), o.uv_mode.as_flattened());
+        add(self.filter.as_flattened_mut(), o.filter.as_flattened());
+        add(self.mv_mode.as_flattened_mut(), o.mv_mode.as_flattened());
+        add(self.intra.as_flattened_mut(), o.intra.as_flattened());
+        add(self.comp.as_flattened_mut(), o.comp.as_flattened());
+        add(
+            self.single_ref.as_flattened_mut().as_flattened_mut(),
+            o.single_ref.as_flattened().as_flattened(),
+        );
+        add(self.comp_ref.as_flattened_mut(), o.comp_ref.as_flattened());
+        add(self.tx32p.as_flattened_mut(), o.tx32p.as_flattened());
+        add(self.tx16p.as_flattened_mut(), o.tx16p.as_flattened());
+        add(self.tx8p.as_flattened_mut(), o.tx8p.as_flattened());
+        add(self.skip.as_flattened_mut(), o.skip.as_flattened());
+        add(&mut self.mv_joint, &o.mv_joint);
+        for (a, b) in self.mv_comp.iter_mut().zip(&o.mv_comp) {
+            add(&mut a.sign, &b.sign);
+            add(&mut a.classes, &b.classes);
+            add(&mut a.class0, &b.class0);
+            add(a.bits.as_flattened_mut(), b.bits.as_flattened());
+            add(a.class0_fp.as_flattened_mut(), b.class0_fp.as_flattened());
+            add(&mut a.fp, &b.fp);
+            add(&mut a.class0_hp, &b.class0_hp);
+            add(&mut a.hp, &b.hp);
+        }
+        add(
+            self.partition.as_flattened_mut().as_flattened_mut(),
+            o.partition.as_flattened().as_flattened(),
+        );
+        for (a, b) in self.coef.iter_mut().zip(&o.coef) {
+            add(a, b);
+        }
+        for (a, b) in self.eob.iter_mut().zip(&o.eob) {
+            add(a, b);
+        }
+    }
+
     /// Context index for the coefficient count bins (compact band-0 layout).
     #[inline]
     pub fn coef_bin(tx: usize, bt: usize, pt: usize, band: usize, ctx: usize) -> usize {
@@ -376,7 +456,7 @@ impl Counts {
 
 /// Everything the tile decoder needs that lives beyond one frame.
 pub struct FrameDecodeCtx<'a> {
-    pub refs: &'a [Option<Rc<FrameData>>; 8],
+    pub refs: &'a [Option<Arc<FrameData>>; 8],
     /// Previous decoded frame's MV grid (`REF_FRAME_MVPAIR`).
     pub mvpair: Option<&'a [MvrefPair]>,
     pub mvpair_w: usize,

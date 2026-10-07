@@ -62,7 +62,13 @@
       // playhead) alongside the usual progress fields.
       const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30, liveSyncDurationCount: 1 });
       window.__hls = hls;
-      hls.on(Hls.Events.ERROR, (_, d) => errors.push(`${d.type}/${d.details}${d.fatal ? " (fatal)" : ""}`));
+      // A non-fatal bufferStalledError is expected when a live playhead sits at the
+      // live edge on a slow runner (hls.js recovers by itself); progress is still
+      // required by the harness, so only record other errors.
+      hls.on(Hls.Events.ERROR, (_, d) => {
+        if (!d.fatal && d.details === "bufferStalledError") { console.warn("hls: non-fatal stall"); return; }
+        errors.push(`${d.type}/${d.details}${d.fatal ? " (fatal)" : ""}`);
+      });
       hls.loadSource(url);
       hls.attachMedia(v);
       v.play().catch((e) => errors.push("play: " + e));

@@ -575,7 +575,7 @@ unsafe fn warp_core_avx2(
 
 /// Scalar reference for [`warp_core_avx2`] (test oracle; mirrors the passes in
 /// [`warp_affine_8x8`] exactly).
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 #[allow(clippy::too_many_arguments)]
 fn warp_core_scalar(
     patch: &[[i32; 15]; 15],
@@ -998,6 +998,7 @@ pub(super) fn block_warp_prep(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "x86_64")]
     mod warp_simd {
         use super::super::*;
         use proptest::prelude::*;

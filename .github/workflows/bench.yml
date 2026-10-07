@@ -1,0 +1,51 @@
+name: Bench (scheduled)
+
+# Runs the Criterion benches and the Kinetix-vs-ffmpeg comparison on a schedule
+# (weekly) and on manual dispatch, then uploads the reports as an artifact.
+# Shared runners are noisy (cross-session drift is +-10-25%), so this job is
+# upload-only: there is deliberately no regression gate. Compare artifacts by
+# eye / with `just bench-compare` against a baseline measured on one machine.
+
+on:
+  schedule:
+    # 04:23 UTC every Sunday
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "Label for the report files (default: run date)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Bench report
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Resolve label
+        id: label
+        run: |
+          L="${{ github.event.inputs.label }}"
+          echo "value=${L:-$(date -u +%Y-%m-%d)}" >> "$GITHUB_OUTPUT"
+      - name: Criterion baseline snapshot
+        run: cargo run --release -p tpt-kinetix-test-utils --example bench_baseline -- --label "ci-${{ steps.label.outputs.value }}"
+      - name: Kinetix vs ffmpeg comparison
+        # Sections whose ffmpeg encoder is missing degrade to `skipped`.
+        run: cargo run --release -p tpt-kinetix-test-utils --example ffmpeg_compare -- --label "ci-${{ steps.label.outputs.value }}"
+      - name: Upload reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ steps.label.outputs.value }}
+          path: |
+            docs/perf/*ci-${{ steps.label.outputs.value }}*.json
+            docs/PERFORMANCE.md
+          if-no-files-found: warn

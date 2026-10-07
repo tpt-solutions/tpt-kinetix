@@ -2,8 +2,9 @@
 //! splitting), reference frame management, frame-context probability
 //! adaptation and the [`tpt_kinetix_core`] decode API.
 
+use rayon::prelude::*;
 use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tpt_kinetix_core::{
@@ -22,13 +23,13 @@ use crate::loop_filter::{loopfilter_sb, loopfilter_sb_chroma, loopfilter_sb_luma
 /// A VP9 decoder.
 pub struct Vp9Decoder {
     strict: bool,
-    refs: [Option<Rc<FrameData>>; 8],
+    refs: [Option<Arc<FrameData>>; 8],
     frame_ctxs: [FrameCtx; 4],
     /// The previously decoded frame (the reference decoder's pre-update
     /// `CUR_FRAME`), used for `REF_FRAME_SEGMAP` / `REF_FRAME_MVPAIR`.
-    prev: Option<Rc<FrameData>>,
+    prev: Option<Arc<FrameData>>,
     /// `REF_FRAME_SEGMAP`: the segmentation map reference frame.
-    segmap_src: Option<Rc<FrameData>>,
+    segmap_src: Option<Arc<FrameData>>,
     prev_invisible: bool,
     prev_was_keyframe: bool,
     /// Loop filter header state carried between frames: the ref/mode deltas
@@ -260,12 +261,14 @@ perf-clip envelope (mid-stream keyframes included)",
 
         let tile_cols = h.tile.tile_cols();
         let tile_rows = h.tile.tile_rows();
+        // Split the tile payload into per-tile chunks (row-major in the stream).
+        let mut chunks: Vec<Vec<&[u8]>> = vec![Vec::with_capacity(tile_rows); tile_cols];
         let mut offset = 0usize;
         for tr in 0..tile_rows {
-            for tc in 0..tile_cols {
+            for (tc, col_chunks) in chunks.iter_mut().enumerate() {
                 let is_last = tr == tile_rows - 1 && tc == tile_cols - 1;
-                let (size, chunk): (usize, &[u8]) = if is_last {
-                    (tile_data.len() - offset, &tile_data[offset..])
+                let chunk: &[u8] = if is_last {
+                    &tile_data[offset..]
                 } else {
                     if offset + 4 > tile_data.len() {
                         return Err(KinetixError::Parse("vp9: truncated tile size field".into()));
@@ -282,57 +285,96 @@ perf-clip envelope (mid-stream keyframes included)",
                             "vp9: tile data overruns the frame".into(),
                         ));
                     }
-                    (sz, &tile_data[offset..offset + sz])
+                    &tile_data[offset..offset + sz]
                 };
-                let _ = size;
                 offset += chunk.len();
-
-                // Tile boundaries are superblock-granular (reference
-                // `set_tile_offset`): (idx * sb_count) >> log2, in SB units.
-                let sb_cols = h.mi_cols.div_ceil(8);
-                let sb_rows = h.mi_rows.div_ceil(8);
-                let sb_col_start = (tc * sb_cols) >> h.tile.log2_tile_cols;
-                let sb_col_end = ((tc + 1) * sb_cols) >> h.tile.log2_tile_cols;
-                let sb_row_start = (tr * sb_rows) >> h.tile.log2_tile_rows;
-                let sb_row_end = ((tr + 1) * sb_rows) >> h.tile.log2_tile_rows;
-                let col_start = sb_col_start * 8;
-                let col_end = sb_col_end * 8;
-                let row_start = sb_row_start * 8;
-                let row_end = sb_row_end * 8;
-
-                let mut tbc = BoolDecoder::new(chunk)?;
-                if tbc.read_bool(128) {
-                    return Err(KinetixError::Parse("vp9: tile marker bit set".into()));
-                }
-
-                let fctx = FrameDecodeCtx {
-                    refs: &self.refs,
-                    mvpair: mvpair_src.as_deref().map(|f| f.mvrefs.as_slice()),
-                    mvpair_w: mvpair_src.as_ref().map_or(0, |f| f.seg_stride),
-                    prev_segmap: self.segmap_src.as_deref().map(|f| f.segmap.as_slice()),
-                    prev_segmap_w: self.segmap_src.as_ref().map_or(0, |f| f.seg_stride),
-                    mvscale,
-                    mvstep,
-                    fixcompref,
-                    varcompref,
-                };
-                {
-                    let mut tile = TileDecoder::new(
-                        &h,
-                        &probs,
-                        &seg,
-                        fctx,
-                        &mut state,
-                        &mut counts,
-                        col_start,
-                        col_end,
-                    );
-                    tile.tile_row_start = row_start;
-                    tile.tile_row_end = row_end;
-                    timed(&|p| &p.tile_ns, || tile.decode_tile(&mut tbc))?;
-                }
+                col_chunks.push(chunk);
             }
         }
+
+        // Tile boundaries are superblock-granular (reference `set_tile_offset`):
+        // (idx * sb_count) >> log2, in SB units.
+        let sb_cols = h.mi_cols.div_ceil(8);
+        let sb_rows = h.mi_rows.div_ceil(8);
+        let col_range = |tc: usize| {
+            (
+                ((tc * sb_cols) >> h.tile.log2_tile_cols) * 8,
+                (((tc + 1) * sb_cols) >> h.tile.log2_tile_cols) * 8,
+            )
+        };
+
+        // Decode every tile row of one tile column into `state` / `counts`.
+        // Tile columns share no entropy, context or pixel state (left context
+        // is unavailable at a column edge, above-right never leaves the
+        // block), so columns can be decoded independently.
+        let decode_col =
+            |tc: usize, state: &mut FrameState, counts: &mut Counts| -> Result<(), KinetixError> {
+                let (col_start, col_end) = col_range(tc);
+                for (tr, chunk) in chunks[tc].iter().enumerate() {
+                    let row_start = ((tr * sb_rows) >> h.tile.log2_tile_rows) * 8;
+                    let row_end = (((tr + 1) * sb_rows) >> h.tile.log2_tile_rows) * 8;
+                    let mut tbc = BoolDecoder::new(chunk)?;
+                    if tbc.read_bool(128) {
+                        return Err(KinetixError::Parse("vp9: tile marker bit set".into()));
+                    }
+                    let fctx = FrameDecodeCtx {
+                        refs: &self.refs,
+                        mvpair: mvpair_src.as_deref().map(|f| f.mvrefs.as_slice()),
+                        mvpair_w: mvpair_src.as_ref().map_or(0, |f| f.seg_stride),
+                        prev_segmap: self.segmap_src.as_deref().map(|f| f.segmap.as_slice()),
+                        prev_segmap_w: self.segmap_src.as_ref().map_or(0, |f| f.seg_stride),
+                        mvscale,
+                        mvstep,
+                        fixcompref,
+                        varcompref,
+                    };
+                    let mut tile =
+                        TileDecoder::new(&h, &probs, &seg, fctx, state, counts, col_start, col_end);
+                    tile.tile_row_start = row_start;
+                    tile.tile_row_end = row_end;
+                    tile.decode_tile(&mut tbc)?;
+                }
+                Ok(())
+            };
+
+        let trace_on = crate::dbg_env::var_os("TPT_VP9_TRACE").is_some()
+            || crate::dbg_env::var_os("TPT_VP9_OPS").is_some();
+        timed(&|p| &p.tile_ns, || -> Result<(), KinetixError> {
+            if tile_cols == 1 || trace_on {
+                for tc in 0..tile_cols {
+                    decode_col(tc, &mut state, &mut counts)?;
+                }
+                return Ok(());
+            }
+            // Each column decodes into a private frame state and counter set
+            // (in parallel); the results are merged column by column, so the
+            // output is bit-identical to the serial path.
+            let results: Vec<Result<(FrameState, Counts), KinetixError>> = (0..tile_cols)
+                .into_par_iter()
+                .map(|tc| {
+                    let mut st = FrameState::new(&h);
+                    let mut cn = Counts::new();
+                    decode_col(tc, &mut st, &mut cn)?;
+                    Ok((st, cn))
+                })
+                .collect();
+            for (tc, r) in results.into_iter().enumerate() {
+                let (st, cn) = r?;
+                let (col_start, col_end) = col_range(tc);
+                state
+                    .frame
+                    .copy_tile_columns(&st.frame, col_start, col_end, tc == tile_cols - 1);
+                let (s0, s1) = (col_start / 8, col_end / 8);
+                for sb_row in 0..sb_rows {
+                    for sb_col in s0..s1.min(sb_cols) {
+                        let i = sb_row * state.frame.sb64_cols + sb_col;
+                        state.lflvl[i] = st.lflvl[i].clone();
+                    }
+                }
+                counts.merge(&cn);
+            }
+            Ok(())
+        })?;
 
         // probability adaptation
         if h.refresh_frame_context && !h.frame_parallel_decoding_mode {
@@ -434,7 +476,7 @@ perf-clip envelope (mid-stream keyframes included)",
             }
         }
 
-        let frame_rc = Rc::new(std::mem::replace(
+        let frame_rc = Arc::new(std::mem::replace(
             &mut state.frame,
             FrameData::new(h.width, h.height),
         ));
