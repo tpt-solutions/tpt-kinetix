@@ -4,6 +4,7 @@
 
 use rayon::prelude::*;
 use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,6 +21,33 @@ use crate::header::{
 };
 use crate::loop_filter::{loopfilter_sb, loopfilter_sb_chroma, loopfilter_sb_luma, FilterLut};
 
+/// Raw pointers to the three planes, shared by the loop-filter wavefront
+/// workers (see the safety argument at the use site).
+struct SharedPlanes {
+    y: *mut u8,
+    y_len: usize,
+    u: *mut u8,
+    v: *mut u8,
+    c_len: usize,
+}
+
+// SAFETY: access is coordinated by the wavefront progress counters.
+unsafe impl Sync for SharedPlanes {}
+
+impl SharedPlanes {
+    /// # Safety
+    /// The caller must ensure no other thread concurrently accesses the
+    /// samples the filters touch through the returned slices.
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn slices(&self) -> (&mut [u8], &mut [u8], &mut [u8]) {
+        (
+            std::slice::from_raw_parts_mut(self.y, self.y_len),
+            std::slice::from_raw_parts_mut(self.u, self.c_len),
+            std::slice::from_raw_parts_mut(self.v, self.c_len),
+        )
+    }
+}
+
 /// A VP9 decoder.
 pub struct Vp9Decoder {
     strict: bool,
@@ -35,6 +63,9 @@ pub struct Vp9Decoder {
     /// Loop filter header state carried between frames: the ref/mode deltas
     /// persist unless the frame resets or updates them.
     prev_lf: crate::header::LoopFilterHeader,
+    /// Per-tile-column working states, reused across frames of the same
+    /// geometry so the parallel tile path does not reallocate full frames.
+    col_pool: Vec<FrameState>,
 }
 
 impl Default for Vp9Decoder {
@@ -60,6 +91,7 @@ impl Vp9Decoder {
             prev_invisible: false,
             prev_was_keyframe: true,
             prev_lf: crate::header::LoopFilterHeader::default(),
+            col_pool: Vec::new(),
         }
     }
 
@@ -340,26 +372,43 @@ perf-clip envelope (mid-stream keyframes included)",
         let trace_on = crate::dbg_env::var_os("TPT_VP9_TRACE").is_some()
             || crate::dbg_env::var_os("TPT_VP9_OPS").is_some();
         timed(&|p| &p.tile_ns, || -> Result<(), KinetixError> {
-            if tile_cols == 1 || trace_on {
+            if tile_cols == 1 || trace_on || rayon::current_num_threads() == 1 {
                 for tc in 0..tile_cols {
                     decode_col(tc, &mut state, &mut counts)?;
                 }
                 return Ok(());
             }
-            // Each column decodes into a private frame state and counter set
-            // (in parallel); the results are merged column by column, so the
-            // output is bit-identical to the serial path.
-            let results: Vec<Result<(FrameState, Counts), KinetixError>> = (0..tile_cols)
-                .into_par_iter()
-                .map(|tc| {
-                    let mut st = FrameState::new(&h);
+            // Each column decodes into a private (pooled) frame state and
+            // counter set in parallel; the results are merged column by
+            // column, so the output is bit-identical to the serial path.
+            let mut pool = std::mem::take(&mut self.col_pool);
+            pool.retain(|st| st.frame.width == h.width && st.frame.height == h.height);
+            pool.truncate(tile_cols);
+            while pool.len() < tile_cols {
+                pool.push(FrameState::new(&h));
+            }
+            for st in &mut pool {
+                st.reset();
+            }
+            let results: Vec<Result<Counts, KinetixError>> = pool
+                .par_iter_mut()
+                .enumerate()
+                .map(|(tc, st)| {
                     let mut cn = Counts::new();
-                    decode_col(tc, &mut st, &mut cn)?;
-                    Ok((st, cn))
+                    decode_col(tc, st, &mut cn)?;
+                    Ok(cn)
                 })
                 .collect();
+            let mut first_err = None;
             for (tc, r) in results.into_iter().enumerate() {
-                let (st, cn) = r?;
+                let cn = match r {
+                    Ok(cn) => cn,
+                    Err(e) => {
+                        first_err.get_or_insert(e);
+                        continue;
+                    }
+                };
+                let st = &pool[tc];
                 let (col_start, col_end) = col_range(tc);
                 state
                     .frame
@@ -372,6 +421,10 @@ perf-clip envelope (mid-stream keyframes included)",
                     }
                 }
                 counts.merge(&cn);
+            }
+            self.col_pool = pool;
+            if let Some(e) = first_err {
+                return Err(e);
             }
             Ok(())
         })?;
@@ -437,6 +490,71 @@ perf-clip envelope (mid-stream keyframes included)",
                 let frame = &mut state.frame;
                 let FrameData { y, u, v, .. } = frame;
                 let (y, u, v) = (&mut **y, &mut **u, &mut **v);
+                let workers = rayon::current_num_threads().min(rows);
+                if workers > 1 {
+                    // Row wavefront (as libvpx's multithreaded loop filter):
+                    // superblock (r, c) runs once row r-1 has finished column
+                    // c+1, which is exactly the set of earlier raster-order
+                    // superblocks whose pixels it touches (a filter reaches
+                    // at most 8 samples into a neighbour), so the result is
+                    // identical to the sequential raster walk.
+                    let planes = SharedPlanes {
+                        y: y.as_mut_ptr(),
+                        y_len: y.len(),
+                        u: u.as_mut_ptr(),
+                        v: v.as_mut_ptr(),
+                        c_len: u.len(),
+                    };
+                    let lflvl = &state.lflvl;
+                    let progress: Vec<AtomicUsize> =
+                        (0..rows).map(|_| AtomicUsize::new(0)).collect();
+                    let next_row = AtomicUsize::new(0);
+                    rayon::scope(|scope| {
+                        for _ in 0..workers {
+                            scope.spawn(|_| {
+                                // Rows are claimed in order and a row only waits
+                                // on the previous one, so no worker ever waits on
+                                // a row nobody has started.
+                                loop {
+                                    let r = next_row.fetch_add(1, Ordering::SeqCst);
+                                    if r >= rows {
+                                        break;
+                                    }
+                                    for c in 0..cols {
+                                        if r > 0 {
+                                            let need = (c + 2).min(cols);
+                                            let mut spins = 0u32;
+                                            while progress[r - 1].load(Ordering::Acquire) < need {
+                                                spins += 1;
+                                                if spins < 64 {
+                                                    std::hint::spin_loop();
+                                                } else {
+                                                    std::thread::yield_now();
+                                                }
+                                            }
+                                        }
+                                        let sf = &lflvl[r * cols + c];
+                                        // SAFETY: the wavefront ordering above
+                                        // guarantees no other worker touches the
+                                        // samples this call reads or writes (see
+                                        // the comment on the enclosing block);
+                                        // the slices only span the full planes
+                                        // so the filters can use absolute indices.
+                                        let (y, u, v) = unsafe { planes.slices() };
+                                        loopfilter_sb_luma(
+                                            y, stride, mi_rows, mi_cols, sf, &luts, r, c,
+                                        );
+                                        loopfilter_sb_chroma(
+                                            u, v, stride, mi_rows, mi_cols, sf, &luts, r, c,
+                                        );
+                                        progress[r].store(c + 1, Ordering::Release);
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    return;
+                }
                 rayon::join(
                     || {
                         for sb_row in 0..rows {
@@ -476,10 +594,7 @@ perf-clip envelope (mid-stream keyframes included)",
             }
         }
 
-        let frame_rc = Arc::new(std::mem::replace(
-            &mut state.frame,
-            FrameData::new(h.width, h.height),
-        ));
+        let frame_rc = Arc::new(std::mem::replace(&mut state.frame, FrameData::empty()));
 
         // ref frame setup
         for i in 0..8 {

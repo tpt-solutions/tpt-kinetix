@@ -11,8 +11,8 @@ mod imp {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use tpt_kinetix_vp9::Vp9Decoder;
     use tpt_kinetix_core::{packet::Packet, timestamp::Timestamp};
+    use tpt_kinetix_vp9::Vp9Decoder;
 
     #[repr(C, align(16))]
     struct Context([u8; 1232]);
@@ -88,7 +88,8 @@ mod imp {
     static STACKS_ON: AtomicBool = AtomicBool::new(false);
 
     pub fn main() {
-        let dir = std::env::var("KINETIX_VP9_DIR").expect("set KINETIX_VP9_DIR (e.g. target/perf-corpus)");
+        let dir = std::env::var("KINETIX_VP9_DIR")
+            .expect("set KINETIX_VP9_DIR (e.g. target/perf-corpus)");
         let args: Vec<String> = std::env::args().skip(1).collect();
         let pat = args.first().cloned().unwrap_or_default();
         let iters: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);

@@ -157,6 +157,26 @@ pub struct FrameData {
 }
 
 impl FrameData {
+    /// A zero-sized placeholder (no buffers), used to take a finished frame
+    /// out of its owner without allocating a replacement.
+    pub fn empty() -> Self {
+        Self {
+            y: Vec::new(),
+            u: Vec::new(),
+            v: Vec::new(),
+            stride: 0,
+            buf_h: 0,
+            width: 0,
+            height: 0,
+            mi_cols: 0,
+            mi_rows: 0,
+            sb64_cols: 0,
+            segmap: Vec::new(),
+            seg_stride: 0,
+            mvrefs: Vec::new(),
+        }
+    }
+
     pub fn new(width: u32, height: u32) -> Self {
         let mi_cols = (width as usize).div_ceil(8);
         let mi_rows = (height as usize).div_ceil(8);
@@ -287,6 +307,31 @@ pub struct FrameState {
 }
 
 impl FrameState {
+    /// Reset a pooled state to the state `FrameState::new` would produce for
+    /// the same frame geometry, except the pixel planes, which keep their old
+    /// contents (every pixel a tile column reads was written earlier in the
+    /// same frame, and only the column's own range is merged out).
+    pub fn reset(&mut self) {
+        self.above_partition_ctx.fill(0);
+        self.above_mode_ctx.fill(NO_NEIGHBOUR_MODE);
+        self.above_y_nnz.fill(0);
+        self.above_uv_nnz[0].fill(0);
+        self.above_uv_nnz[1].fill(0);
+        self.above_skip_ctx.fill(0);
+        self.above_txfm_ctx.fill(0);
+        self.above_segpred_ctx.fill(0);
+        self.above_intra_ctx.fill(0);
+        self.above_comp_ctx.fill(0);
+        self.above_ref_ctx.fill(0);
+        self.above_filter_ctx.fill(0);
+        self.above_mv_ctx.fill(Default::default());
+        for f in &mut self.lflvl {
+            *f = SbFilter::default();
+        }
+        self.frame.segmap.fill(0);
+        self.frame.mvrefs.fill(Default::default());
+    }
+
     pub fn new(hdr: &FrameHeader) -> Self {
         let cols = hdr.mi_cols;
         let frame = FrameData::new(hdr.width, hdr.height);

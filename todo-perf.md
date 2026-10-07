@@ -1146,6 +1146,23 @@ frame, so LF is ~50% but is dominated by edge-scan overhead rather than filter a
 VP9 MC SIMD not attempted: the VP9 crate has no profiler hook (the AV1 `prof_sample` sampler is
 AV1-specific), and the analogous AV1 MC kernel gained only 5.8%.
 
+**VP9 decode speedups, 2026-10-08 (all bit-exact; probe = decode-only wall time, 8 rayon threads unless noted):**
+- Tile-column threading now pools its per-column `FrameState`s (the first version re-allocated + zeroed a
+  full frame per column per frame and cost ~30% at 1 thread: 0.765 s -> 0.54 s for vp9_1280x720 once the
+  1-thread case goes serial and the allocation is pooled). 720p: 0.4765 s -> 0.40 s.
+- Dropped a wasted per-frame `FrameData::new` (replaced by `FrameData::empty()`), stack buffers for MC patch/tmp.
+- **Loop filter is now a row wavefront** (as libvpx's MT loop filter: SB (r,c) waits for row r-1 to finish
+  col c+1; rows claimed in order so it cannot deadlock). Output hash identical to the serial path across
+  thread counts 3-8 on 1080p; conformance suite green. 720p: 0.385 s -> 0.334 s; 1080p: 0.765 s -> 0.577 s
+  (1 thread: 1080p 0.96 s, 720p 0.55 s; was 0.765 s / ~1.04 s). Uses `unsafe` shared plane slices with a
+  documented disjointness argument (decoder.rs `SharedPlanes`) — the one `unsafe` in the VP9 decode path;
+  falls back to the plane-parallel safe path on a single thread.
+- `examples/prof_sample.rs` ported to VP9 (`PROF_ALL=1 KINETIX_VP9_DIR=target/perf-corpus cargo run --profile
+  profiling -p tpt-kinetix-vp9 --example prof_sample -- vp9_1280x720 6`).
+- Fuzz: local libFuzzer cannot link on this Windows nightly (no asan runtime even after a clean reinstall); added
+  `tests/tile_mutation.rs` (1500 mutants of a real 4x2-tile frame) instead; `fuzz.yml` covers Linux CI.
+- Not re-run through `just bench-ffmpeg`: the committed 2026-10-08 table predates these VP9 gains.
+
 ## Open questions
 
 - Target hardware for headline numbers: dev machine only, or also RPi-class ARM (lean/face budgets)?

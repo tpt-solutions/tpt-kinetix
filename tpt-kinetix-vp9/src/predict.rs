@@ -642,7 +642,9 @@ pub fn mc_block(
     if need_left || need_top || need_right || need_bottom {
         let patch_w = bw + 8;
         let patch_h = bh + 8;
-        let mut patch = vec![0u8; patch_w * patch_h];
+        // Blocks are at most 64x64, so the patch fits a fixed stack buffer.
+        let mut patch_buf = [0u8; 72 * 72];
+        let patch = &mut patch_buf[..patch_w * patch_h];
         let patch_stride = patch_w;
         for r in 0..patch_h {
             let cy = (sy0 + r as i32).clamp(0, src_h as i32 - 1) as usize;
@@ -655,7 +657,7 @@ pub fn mc_block(
             dst,
             dst_off,
             dst_stride,
-            &patch,
+            patch,
             0,
             patch_stride,
             bw,
@@ -734,7 +736,8 @@ fn mc_filtered(
         // 2-D: horizontal pass into a temporary (h + 7 rows, as in the
         // reference), then vertical into dst.
         let tmp_stride = 64 + 8;
-        let mut tmp = vec![0u8; tmp_stride * (bh + 8)];
+        let mut tmp_buf = [0u8; 72 * 72];
+        let tmp = &mut tmp_buf[..tmp_stride * (bh + 8)];
         for r in 0..bh + 7 {
             let s = src_off + r * src_stride;
             for c in 0..bw {
@@ -745,7 +748,7 @@ fn mc_filtered(
             let t = r * tmp_stride;
             let d = dst_off + r * dst_stride;
             for c in 0..bw {
-                let v = filter8(&tmp, t + c, tmp_stride, fcol);
+                let v = filter8(tmp, t + c, tmp_stride, fcol);
                 if use_avg {
                     dst[d + c] = ((u16::from(dst[d + c]) + u16::from(v) + 1) >> 1) as u8;
                 } else {
