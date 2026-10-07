@@ -7,7 +7,7 @@
 //! streams Kinetix has no decoder for possible.
 
 use tpt_kinetix_core::codec::{CodecId, MediaType};
-use tpt_kinetix_core::stream::StreamInfo;
+use tpt_kinetix_core::stream::{StreamInfo, VideoColor};
 
 use crate::MuxError;
 
@@ -76,7 +76,39 @@ fn visual_entry(fourcc: &[u8; 4], info: &StreamInfo, config_kind: &[u8; 4]) -> V
     if !info.extradata.is_empty() {
         e.extend(boxed(config_kind, &info.extradata));
     }
+    if let Some(color) = &info.color {
+        e.extend(color_boxes(color));
+    }
     boxed(fourcc, &e)
+}
+
+/// The `colr` (`nclx`), `mdcv` and `clli` child boxes for `color`.
+fn color_boxes(color: &VideoColor) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(n) = &color.nclx {
+        let mut p = b"nclx".to_vec();
+        for v in [n.primaries, n.transfer, n.matrix] {
+            p.extend_from_slice(&v.to_be_bytes());
+        }
+        p.push(u8::from(n.full_range) << 7);
+        out.extend(boxed(b"colr", &p));
+    }
+    if let Some(m) = &color.mastering {
+        let mut p = Vec::with_capacity(24);
+        for (x, y) in m.primaries.iter().chain(std::iter::once(&m.white_point)) {
+            p.extend_from_slice(&x.to_be_bytes());
+            p.extend_from_slice(&y.to_be_bytes());
+        }
+        p.extend_from_slice(&m.max_luminance.to_be_bytes());
+        p.extend_from_slice(&m.min_luminance.to_be_bytes());
+        out.extend(boxed(b"mdcv", &p));
+    }
+    if let Some((max_cll, max_fall)) = color.content_light {
+        let mut p = max_cll.to_be_bytes().to_vec();
+        p.extend_from_slice(&max_fall.to_be_bytes());
+        out.extend(boxed(b"clli", &p));
+    }
+    out
 }
 
 fn audio_entry(fourcc: &[u8; 4], info: &StreamInfo, children: &[u8]) -> Vec<u8> {
@@ -179,6 +211,39 @@ mod tests {
         // 300 = 0b10_0101100 -> 0x82 0x2C
         assert_eq!(&big[..3], &[5, 0x82, 0x2C]);
         assert_eq!(big.len(), 3 + 300);
+    }
+
+    #[test]
+    fn color_boxes_follow_the_iso_layouts() {
+        use tpt_kinetix_core::stream::{MasteringDisplay, Nclx};
+        let c = VideoColor {
+            nclx: Some(Nclx {
+                primaries: 9,
+                transfer: 16,
+                matrix: 9,
+                full_range: false,
+            }),
+            mastering: Some(MasteringDisplay {
+                primaries: [(13250, 34500), (7500, 3000), (34000, 16000)],
+                white_point: (15635, 16450),
+                max_luminance: 10_000_000,
+                min_luminance: 1,
+            }),
+            content_light: Some((1000, 400)),
+        };
+        let b = color_boxes(&c);
+        // colr: 8 header + 4 'nclx' + 3 x u16 + 1 flags = 19
+        assert_eq!(&b[4..8], b"colr");
+        assert_eq!(&b[8..12], b"nclx");
+        assert_eq!(&b[12..18], &[0, 9, 0, 16, 0, 9]);
+        assert_eq!(b[18], 0);
+        // mdcv: 8 + 24 = 32
+        assert_eq!(&b[19 + 4..19 + 8], b"mdcv");
+        assert_eq!(&b[19..23], &32u32.to_be_bytes());
+        // clli: 8 + 4 = 12, MaxCLL then MaxFALL
+        let clli = &b[19 + 32..];
+        assert_eq!(&clli[4..8], b"clli");
+        assert_eq!(&clli[8..], &[0x03, 0xE8, 0x01, 0x90]);
     }
 
     #[test]

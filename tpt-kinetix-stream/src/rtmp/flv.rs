@@ -6,6 +6,8 @@
 //! separate codec configuration (sequence headers) from coded media data and
 //! forward the latter into the pipeline.
 
+use tpt_kinetix_core::stream::{MasteringDisplay, Nclx, VideoColor};
+
 /// FLV video frame type (high nibble of the first video byte).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlvFrameType {
@@ -141,6 +143,68 @@ pub struct HdrMetadata {
     pub raw: Vec<u8>,
     /// FourCC of the video codec this metadata applies to (`av01`, `hvc1`, ...).
     pub fourcc: [u8; 4],
+}
+
+impl HdrMetadata {
+    /// Decodes the Enhanced RTMP `colorInfo` payload (an AMF0 name, then an
+    /// object holding `colorConfig`, `hdrCll` and `hdrMdcv`) into the colour
+    /// description a sample entry carries. `None` when the payload is not
+    /// `colorInfo` or states nothing usable.
+    pub fn to_video_color(&self) -> Option<VideoColor> {
+        use super::amf::{decode_all, Amf0Value};
+        let values = decode_all(&self.raw).ok()?;
+        let [name, info, ..] = values.as_slice() else {
+            return None;
+        };
+        if name.as_str() != Some("colorInfo") {
+            return None;
+        }
+        let num = |obj: &Amf0Value, k: &str| obj.get(k).and_then(Amf0Value::as_f64);
+        let mut color = VideoColor::default();
+        if let Some(cfg) = info.get("colorConfig") {
+            if let (Some(p), Some(t), Some(m)) = (
+                num(cfg, "colorPrimaries"),
+                num(cfg, "transferCharacteristics"),
+                num(cfg, "matrixCoefficients"),
+            ) {
+                color.nclx = Some(Nclx {
+                    primaries: p as u16,
+                    transfer: t as u16,
+                    matrix: m as u16,
+                    full_range: false,
+                });
+            }
+        }
+        if let Some(cll) = info.get("hdrCll") {
+            if let (Some(max_fall), Some(max_cll)) = (num(cll, "maxFall"), num(cll, "maxCLL")) {
+                color.content_light = Some((max_cll as u16, max_fall as u16));
+            }
+        }
+        if let Some(m) = info.get("hdrMdcv") {
+            let xy = |kx: &str, ky: &str| -> Option<(u16, u16)> {
+                // 0.00002 units, as the `mdcv` box stores them.
+                let unit = |v: f64| (v * 50_000.0).round().clamp(0.0, 65_535.0) as u16;
+                Some((unit(num(m, kx)?), unit(num(m, ky)?)))
+            };
+            let lum = |v: f64| (v * 10_000.0).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+            if let (Some(r), Some(g), Some(b), Some(w), Some(max), Some(min)) = (
+                xy("redX", "redY"),
+                xy("greenX", "greenY"),
+                xy("blueX", "blueY"),
+                xy("whitePointX", "whitePointY"),
+                num(m, "maxLuminance"),
+                num(m, "minLuminance"),
+            ) {
+                color.mastering = Some(MasteringDisplay {
+                    primaries: [g, b, r],
+                    white_point: w,
+                    max_luminance: lum(max),
+                    min_luminance: lum(min),
+                });
+            }
+        }
+        (color != VideoColor::default()).then_some(color)
+    }
 }
 
 /// A parsed FLV video payload.
@@ -587,6 +651,70 @@ mod tests {
         assert!(t.hdr.is_some() && !t.is_sequence_header());
         assert_eq!(t.hdr.as_ref().unwrap().fourcc, *b"av01");
         assert!(parse_video_tag(&[0x81, b'a', b'v']).is_err());
+    }
+
+    #[test]
+    fn color_info_metadata_becomes_colr_mdcv_clli() {
+        use super::super::amf::{encode_all, Amf0Value as V};
+        let obj = |kv: &[(&str, f64)]| {
+            V::Object(
+                kv.iter()
+                    .map(|(k, v)| (k.to_string(), V::Number(*v)))
+                    .collect(),
+            )
+        };
+        let payload = encode_all(&[
+            V::String("colorInfo".into()),
+            V::Object(vec![
+                (
+                    "colorConfig".into(),
+                    obj(&[
+                        ("bitDepth", 10.0),
+                        ("colorPrimaries", 9.0),
+                        ("transferCharacteristics", 16.0),
+                        ("matrixCoefficients", 9.0),
+                    ]),
+                ),
+                (
+                    "hdrCll".into(),
+                    obj(&[("maxFall", 400.0), ("maxCLL", 1000.0)]),
+                ),
+                (
+                    "hdrMdcv".into(),
+                    obj(&[
+                        ("redX", 0.68),
+                        ("redY", 0.32),
+                        ("greenX", 0.265),
+                        ("greenY", 0.69),
+                        ("blueX", 0.15),
+                        ("blueY", 0.06),
+                        ("whitePointX", 0.3127),
+                        ("whitePointY", 0.329),
+                        ("maxLuminance", 1000.0),
+                        ("minLuminance", 0.0001),
+                    ]),
+                ),
+            ]),
+        ]);
+        let hdr = HdrMetadata {
+            raw: payload,
+            fourcc: *b"av01",
+        };
+        let c = hdr.to_video_color().unwrap();
+        let n = c.nclx.unwrap();
+        assert_eq!((n.primaries, n.transfer, n.matrix), (9, 16, 9));
+        assert_eq!(c.content_light, Some((1000, 400)));
+        let m = c.mastering.unwrap();
+        assert_eq!(m.primaries, [(13250, 34500), (7500, 3000), (34000, 16000)]);
+        assert_eq!(m.white_point, (15635, 16450));
+        assert_eq!((m.max_luminance, m.min_luminance), (10_000_000, 1));
+        // Anything that is not colorInfo yields nothing.
+        let other = HdrMetadata {
+            raw: encode_all(&[V::String("other".into()), V::Object(vec![])]),
+            fourcc: *b"av01",
+        };
+        assert!(other.to_video_color().is_none());
+        assert!(HdrMetadata::default().to_video_color().is_none());
     }
 
     /// One track of a multitrack message: (its own FourCC if the tracks mix codecs, id, payload).

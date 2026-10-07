@@ -10,6 +10,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::codec::{CodecId, MediaType};
 
+/// SMPTE ST 2086 mastering display colour volume (the `mdcv` box).
+///
+/// Chromaticities are CIE 1931 xy in units of 0.00002 and luminances in units
+/// of 0.0001 cd/m², exactly as the `mdcv` box stores them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MasteringDisplay {
+    /// Display primaries `(x, y)` in green, blue, red order.
+    pub primaries: [(u16, u16); 3],
+    /// White point `(x, y)`.
+    pub white_point: (u16, u16),
+    /// Maximum display luminance.
+    pub max_luminance: u32,
+    /// Minimum display luminance.
+    pub min_luminance: u32,
+}
+
+/// Colour description of a video stream: the `colr` (`nclx`), `mdcv` and `clli`
+/// boxes of an ISO-BMFF visual sample entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VideoColor {
+    /// The `colr` box contents; `None` writes no `colr` box.
+    pub nclx: Option<Nclx>,
+    /// Mastering display colour volume, when the source states one.
+    pub mastering: Option<MasteringDisplay>,
+    /// `(MaxCLL, MaxFALL)` in cd/m², when the source states them.
+    pub content_light: Option<(u16, u16)>,
+}
+
+/// The `nclx` payload of a `colr` box (H.273 code points).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Nclx {
+    /// Colour primaries.
+    pub primaries: u16,
+    /// Transfer characteristics.
+    pub transfer: u16,
+    /// Matrix coefficients.
+    pub matrix: u16,
+    /// Full-range samples.
+    pub full_range: bool,
+}
+
 /// One elementary stream (a track, a PID, a Matroska track).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamInfo {
@@ -55,6 +96,9 @@ pub struct StreamInfo {
     /// composition delay. `None` when the container has no edit list; a muxer
     /// then derives it from the first sample's composition offset.
     pub edit_media_time: Option<i64>,
+    /// Colour description (`colr` / `mdcv` / `clli`), for video; `None` when
+    /// the source did not state one.
+    pub color: Option<VideoColor>,
 }
 
 impl StreamInfo {
@@ -73,6 +117,7 @@ impl StreamInfo {
             bits_per_sample: 0,
             extradata: Vec::new(),
             edit_media_time: None,
+            color: None,
         }
     }
 
