@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
+
+### Other
+
+- bump all crates to 0.1.1 and fix crates.io publishing
+- fix five decode bugs that corrupted ordinary libvpx encodes
+- AV1 SIMD helpers and bitreader speedups; H.264 env-debug hooks; VP9 div128 fixture notes
+- inline RansDecoder::decode (+33%); reject a batch decode API
+- Add ffmpeg comparison harness and fix codec bugs it surfaced
+- Add per-crate Criterion benches, perf baseline/compare tooling, and publishing docs
+- Add conformance reporting, AV1 decoder updates, and per-crate changelogs
+- Advance AAC, AV1, and H.264 decode paths, plus realtime and face codec scaffolding
+- Advance AAC decode modules, AV1 reconstruction, and H.264 high-profile paths
+- Advance AAC decode modules, AV1 inter prediction, and face codec scaffolding
+- Add new codec crates (face, lossless, realtime, screen, volumetric) and bitstream foundation
+
 ### Changed
 
 - **Performance: `BitReader::read_bits` now refills a 64-bit window** instead of

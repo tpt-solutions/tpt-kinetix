@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
+
+### Fixed
+
+- fix two pre-existing bugs that made `transcode` unusable on VP9 input
+- *(vp9)* decode the conformance corpus byte-exact vs libvpx
+
+### Other
+
+- bump all crates to 0.1.1 and fix crates.io publishing
+- ingest policy and recording, RTMP live hardening, VP9 predict/loop-filter fixes
+- fix five decode bugs that corrupted ordinary libvpx encodes
+- AV1 SIMD helpers and bitreader speedups; H.264 env-debug hooks; VP9 div128 fixture notes
+- isolate a pre-existing luma bit-exactness gap; add realistic-size conformance
+- Add ffmpeg comparison harness and fix codec bugs it surfaced
+- Add per-crate Criterion benches, perf baseline/compare tooling, and publishing docs
+- VP9 oversized-frame guard tweak, regression test, and conformance test update
+- Tidy repo root: move H.264 oracle sources and tools, drop debug artifacts
+- VP9 oversized-frame header guard and test; template post-generate hook; workflow and test tweaks
+- AV1 decoder and coefficient/inter/transform updates; codec crate conformance reporting updates
+- Add conformance reporting, AV1 decoder updates, and per-crate changelogs
+- VP9 pixel-exact status; H.264 README status refresh; VP9 worklog
+- fix MBAFF B-slice field-picture ref indexing and chroma MC
+- HCAFR1 8x8 triage, AV1 inter fixes, VP9 decoder overhaul
+- scaffold new tpt-kinetix-vp9 decoder crate
+
 ### Changed
 
 - **Performance: the `TPT_VP9_*` debug switches no longer cost a full
