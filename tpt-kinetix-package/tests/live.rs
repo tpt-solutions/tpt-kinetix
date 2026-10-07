@@ -428,6 +428,66 @@ fn parts_of_the_segment_in_progress_are_visible() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Part boundaries sit on an even grid across the segment, so a segment never
+/// ends in a short remainder part (hls.js treats a tail shorter than its
+/// fragment look-up tolerance as already buffered and stalls), and completed
+/// audio segments drop their `EXT-X-PART` tags.
+#[test]
+fn parts_fill_the_segment_evenly_and_completed_audio_segments_drop_their_tags() {
+    let dir = std::env::temp_dir().join(format!("tpt_llgrid_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(webm) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-g", "50", "-b:v", "300k"]) else {
+        eprintln!("skipping: encoder unavailable");
+        return;
+    };
+    let mut live = LivePackager::new(LiveOptions {
+        segment_seconds: 2.0,
+        window: 10,
+        part_seconds: Some(1.0 / 3.0),
+    });
+    feed(&webm, &mut live);
+    let done = live.latest_segment();
+    assert!(done >= 3, "{done} segments");
+
+    // First `tfdt` of a fragment, in 90 kHz ticks.
+    let tfdt = |d: &[u8]| -> u64 {
+        let at = d.windows(4).position(|w| w == b"tfdt").unwrap() + 4;
+        match d[at] {
+            1 => u64::from_be_bytes(d[at + 4..at + 12].try_into().unwrap()),
+            _ => u64::from(u32::from_be_bytes(d[at + 4..at + 8].try_into().unwrap())),
+        }
+    };
+    for n in 1..done {
+        let mut starts = Vec::new();
+        while let Some(p) = live.part(0, n, starts.len() as u64) {
+            starts.push(tfdt(&p));
+        }
+        let next = tfdt(&live.part(0, n + 1, 0).expect("next segment's first part"));
+        starts.push(next);
+        assert_eq!(starts.len() - 1, 6, "segment {n}: parts of 1/3 s in 2 s");
+        for w in starts.windows(2) {
+            let s = (w[1] - w[0]) as f64 / 90_000.0;
+            assert!((0.3..=0.37).contains(&s), "segment {n}: a part of {s}s");
+        }
+    }
+
+    // Completed audio segments are listed without parts (hls.js stalls on them
+    // once the window slides); video keeps them.
+    let audio = live.media_playlist(1).unwrap();
+    assert!(
+        audio.find("#EXT-X-PART:").unwrap() > audio.rfind("#EXTINF").unwrap(),
+        "a completed audio segment lists parts:
+{audio}"
+    );
+    let video = live.media_playlist(0).unwrap();
+    assert!(
+        video.find("#EXT-X-PART:").unwrap() < video.find("#EXTINF").unwrap(),
+        "a completed video segment lost its parts:
+{video}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The live-edge latency estimate is `None` before tracks exist, `Some(0)`
 /// when idle, and grows while a segment is in progress. The part/segment
 /// targets are reported so the `/_stats` endpoint and the hls.js probe can

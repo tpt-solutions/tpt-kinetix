@@ -26,6 +26,9 @@ async fn main() -> anyhow::Result<()> {
         segment_seconds: env("SEGMENT_SECONDS").unwrap_or(2.0),
         ..LiveOptions::default()
     };
+    if let Some(w) = env("WINDOW") {
+        opts.window = w as usize;
+    }
     if let Some(p) = env("PART_SECONDS") {
         opts.part_seconds = (p > 0.0).then_some(p);
     }

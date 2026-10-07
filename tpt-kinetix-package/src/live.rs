@@ -418,12 +418,17 @@ impl LivePackager {
                 }
                 Some(start) => {
                     // Publish a partial segment before the segment is complete.
-                    if self.parts_enabled() {
-                        if let Some(part_start) = self.part_start_ms {
-                            let want = (self.opts.part_seconds.unwrap_or(0.0) * 1000.0) as i64;
-                            if (pts_ms - part_start) >= want {
-                                self.cut_part(pts_ms)?;
-                            }
+                    if self.parts_enabled() && self.part_start_ms.is_some() {
+                        // Part boundaries sit on an even grid across the segment
+                        // (the part count is `segment / part`, rounded), each part
+                        // closing at the first frame at or past its slot. Cutting
+                        // "a part length after the previous part" instead drifts by
+                        // the frame rounding of every part and leaves a short
+                        // remainder at the end of each segment, which hls.js
+                        // treats as already buffered and then stalls on.
+                        let slot = self.part_slot_ms();
+                        if pts_ms - start >= slot * (self.part_index as i64 + 1) {
+                            self.cut_part(pts_ms)?;
                         }
                     }
                     if key && (pts_ms - start) as f64 >= self.opts.segment_seconds * 1000.0 {
@@ -489,6 +494,15 @@ impl LivePackager {
             duration: Some(dur),
             data,
         });
+    }
+
+    /// The length of one slot of the part grid, in ms: the segment divided into
+    /// `round(segment / part)` equal slots (at least one).
+    fn part_slot_ms(&self) -> i64 {
+        let segment = self.opts.segment_seconds * 1000.0;
+        let part = (self.opts.part_seconds.unwrap_or(0.0) * 1000.0).max(1.0);
+        let count = (segment / part).round().max(1.0);
+        ((segment / count) as i64).max(1)
     }
 
     /// Whether partial segments are enabled and configured sanely.
@@ -924,7 +938,15 @@ impl LivePackager {
             if s.discontinuity && has {
                 out.push_str("#EXT-X-DISCONTINUITY\n");
             }
-            if parts {
+            // Completed *audio* segments are listed without their `EXT-X-PART`
+            // tags (the parts stay downloadable; RFC 8216bis 6.2.2 only says tags
+            // SHOULD go after three target durations). hls.js with a separate
+            // audio rendition stalls and falls behind each time the window slides
+            // while completed audio segments still carry parts. Measured over 75 s
+            // with audio: tags on every track drifted to ~12 s of latency; tags on
+            // the video track only held ~2.1 s. Video wants them: a video-only
+            // stream plays at ~1.2 s with them and ~2.1 s (a start-up stall) without.
+            if parts && self.tracks[track].info.media_type == MediaType::Video {
                 if let Some(ps) = s.parts.get(track) {
                     for (i, p) in ps.iter().enumerate() {
                         part_tag(&mut out, track, s.number, i as u64, p);
