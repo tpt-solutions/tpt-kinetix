@@ -39,10 +39,10 @@ impl Bits<'_> {
     }
 }
 
-/// The maximum coded size announced by the sequence header inside an `av1C`
-/// record (4 bytes of header, then `configOBUs`), or inside a bare sequence
-/// header OBU stream. `None` when no usable sequence header is present.
-pub fn av1_dimensions(av1c: &[u8]) -> Option<(u32, u32)> {
+/// Finds the first sequence-header OBU (type 1) in an `av1C` record (4 bytes of
+/// header, then `configOBUs`) or a bare OBU stream. Returns `(header byte,
+/// extension byte if any, payload)`.
+fn find_sequence_obu(av1c: &[u8]) -> Option<(u8, Option<u8>, &[u8])> {
     // An av1C record starts with marker(1)=1 version(7)=1.
     let mut obus = if av1c.first() == Some(&0x81) {
         av1c.get(4..)?
@@ -52,9 +52,9 @@ pub fn av1_dimensions(av1c: &[u8]) -> Option<(u32, u32)> {
     while !obus.is_empty() {
         let header = obus[0];
         let obu_type = (header >> 3) & 0xF;
-        let ext = usize::from(header & 4 != 0);
+        let ext = header & 4 != 0;
         let has_size = header & 2 != 0;
-        let mut at = 1 + ext;
+        let mut at = 1 + usize::from(ext);
         let size = if has_size {
             let mut v = 0u64;
             let mut i = 0;
@@ -76,23 +76,50 @@ pub fn av1_dimensions(av1c: &[u8]) -> Option<(u32, u32)> {
         };
         let payload = obus.get(at..at.checked_add(size)?)?;
         if obu_type == 1 {
-            return seq_header_dimensions(payload);
+            let ext_byte = if ext { obus.get(1).copied() } else { None };
+            return Some((header, ext_byte, payload));
         }
         obus = &obus[at + size..];
     }
     None
 }
 
-fn seq_header_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
+/// The maximum coded size announced by the sequence header inside an `av1C`
+/// record (4 bytes of header, then `configOBUs`), or inside a bare sequence
+/// header OBU stream. `None` when no usable sequence header is present.
+pub fn av1_dimensions(av1c: &[u8]) -> Option<(u32, u32)> {
+    let (_, _, payload) = find_sequence_obu(av1c)?;
+    let info = parse_sequence_header(payload)?;
+    Some((info.width, info.height))
+}
+
+/// What an AV1 sequence header says about the stream (the fields `av1C` carries).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeqInfo {
+    profile: u8,
+    level_idx0: u8,
+    tier0: u8,
+    width: u32,
+    height: u32,
+    high_bitdepth: bool,
+    twelve_bit: bool,
+    mono: bool,
+    ssx: u8,
+    ssy: u8,
+    chroma_sample_position: u8,
+}
+
+fn parse_sequence_header(payload: &[u8]) -> Option<SeqInfo> {
     let mut r = Bits {
         data: payload,
         pos: 0,
     };
-    r.bits(3)?; // seq_profile
+    let profile = r.bits(3)? as u8; // seq_profile
     r.bit()?; // still_picture
     let reduced = r.bit()? == 1;
+    let (mut level_idx0, mut tier0) = (0u8, 0u8);
     if reduced {
-        r.bits(5)?; // seq_level_idx[0]
+        level_idx0 = r.bits(5)? as u8; // seq_level_idx[0]
     } else {
         let timing_info = r.bit()? == 1;
         let mut decoder_model = false;
@@ -121,10 +148,16 @@ fn seq_header_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
         }
         let display_delay = r.bit()? == 1;
         let ops = r.bits(5)? + 1;
-        for _ in 0..ops {
+        for op in 0..ops {
             r.bits(12)?; // operating_point_idc
-            if r.bits(5)? > 7 {
-                r.bit()?; // seq_tier
+            let level = r.bits(5)?;
+            let mut tier = 0;
+            if level > 7 {
+                tier = r.bit()?; // seq_tier
+            }
+            if op == 0 {
+                level_idx0 = level as u8;
+                tier0 = tier as u8;
             }
             if decoder_model && r.bit()? == 1 {
                 r.bits(delay_len)?; // decoder_buffer_delay
@@ -138,9 +171,133 @@ fn seq_header_dimensions(payload: &[u8]) -> Option<(u32, u32)> {
     }
     let wbits = r.bits(4)? + 1;
     let hbits = r.bits(4)? + 1;
-    let w = r.bits(wbits)? + 1;
-    let h = r.bits(hbits)? + 1;
-    Some((w, h))
+    let width = r.bits(wbits)? + 1;
+    let height = r.bits(hbits)? + 1;
+    let mut info = SeqInfo {
+        profile,
+        level_idx0,
+        tier0,
+        width,
+        height,
+        high_bitdepth: false,
+        twelve_bit: false,
+        mono: false,
+        ssx: 1,
+        ssy: 1,
+        chroma_sample_position: 0,
+    };
+    // Everything after the size is only needed for `av1C`; a header that is cut
+    // short there still yields its dimensions.
+    let _ = parse_color_config(&mut r, reduced, &mut info);
+    Some(info)
+}
+
+fn parse_color_config(r: &mut Bits, reduced: bool, info: &mut SeqInfo) -> Option<()> {
+    if !reduced && r.bit()? == 1 {
+        // frame_id_numbers_present_flag
+        r.bits(4)?; // delta_frame_id_length_minus_2
+        r.bits(3)?; // additional_frame_id_length_minus_1
+    }
+    r.bits(3)?; // use_128x128_superblock, enable_filter_intra, enable_intra_edge_filter
+    if !reduced {
+        r.bits(4)?; // interintra, masked, warped motion, dual filter
+        let order_hint = r.bit()? == 1;
+        if order_hint {
+            r.bits(2)?; // enable_jnt_comp, enable_ref_frame_mvs
+        }
+        let force_sct = if r.bit()? == 1 { 2 } else { r.bit()? };
+        if force_sct > 0 && r.bit()? == 0 {
+            r.bit()?; // seq_force_integer_mv
+        }
+        if order_hint {
+            r.bits(3)?; // order_hint_bits_minus_1
+        }
+    }
+    r.bits(3)?; // enable_superres, enable_cdef, enable_restoration
+    // color_config()
+    info.high_bitdepth = r.bit()? == 1;
+    if info.profile == 2 && info.high_bitdepth {
+        info.twelve_bit = r.bit()? == 1;
+    }
+    info.mono = if info.profile == 1 { false } else { r.bit()? == 1 };
+    let (cp, tc, mc) = if r.bit()? == 1 {
+        (r.bits(8)?, r.bits(8)?, r.bits(8)?)
+    } else {
+        (2, 2, 2)
+    };
+    if info.mono {
+        r.bit()?; // color_range
+        info.ssx = 1;
+        info.ssy = 1;
+        return Some(());
+    }
+    if cp == 1 && tc == 13 && mc == 0 {
+        info.ssx = 0;
+        info.ssy = 0;
+        return Some(());
+    }
+    r.bit()?; // color_range
+    match info.profile {
+        0 => {
+            info.ssx = 1;
+            info.ssy = 1;
+        }
+        1 => {
+            info.ssx = 0;
+            info.ssy = 0;
+        }
+        _ => {
+            if info.twelve_bit {
+                info.ssx = r.bit()? as u8;
+                info.ssy = if info.ssx == 1 { r.bit()? as u8 } else { 0 };
+            } else {
+                info.ssx = 1;
+                info.ssy = 0;
+            }
+        }
+    }
+    if info.ssx == 1 && info.ssy == 1 {
+        info.chroma_sample_position = r.bits(2)? as u8;
+    }
+    Some(())
+}
+
+/// Builds an `av1C` (AV1CodecConfigurationRecord) from a stream's sequence-header
+/// OBU, for containers that omit it (a bare OBU stream, WebRTC, some IVF files).
+/// `obus` is a bare OBU stream (e.g. a key frame's temporal unit) or an existing
+/// record; the first sequence header found is embedded as `configOBUs`.
+pub fn av1c_from_sequence_header(obus: &[u8]) -> Option<Vec<u8>> {
+    let (header, ext, payload) = find_sequence_obu(obus)?;
+    let info = parse_sequence_header(payload)?;
+    let mut out = vec![
+        0x81,
+        (info.profile << 5) | (info.level_idx0 & 0x1F),
+        (info.tier0 << 7)
+            | (u8::from(info.high_bitdepth) << 6)
+            | (u8::from(info.twelve_bit) << 5)
+            | (u8::from(info.mono) << 4)
+            | (info.ssx << 3)
+            | (info.ssy << 2)
+            | info.chroma_sample_position,
+        0, // no initial_presentation_delay
+    ];
+    // configOBUs: the sequence header with obu_has_size_field set.
+    out.push(header | 2);
+    if let Some(e) = ext {
+        out.push(e);
+    }
+    let mut n = payload.len();
+    loop {
+        let b = (n & 0x7F) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(b);
+            break;
+        }
+        out.push(b | 0x80);
+    }
+    out.extend_from_slice(payload);
+    Some(out)
 }
 
 /// Parses the uncompressed header of a VP9 **key frame**. `hint_w`/`hint_h` are
@@ -407,6 +564,19 @@ mod tests {
         assert_eq!(av1_dimensions(&obu), Some((2, 2)));
         assert_eq!(av1_dimensions(&[]), None);
         assert_eq!(av1_dimensions(&[0x0A, 0x05, 0x00]), None);
+    }
+
+    #[test]
+    fn av1c_is_synthesised_from_a_sequence_header() {
+        // A real libaom 4:2:0 8-bit stream's av1C, and the same stream as bare
+        // OBUs (temporal delimiter, then the sequence header).
+        let seq = [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x02, 0xAF, 0xF7, 0x9B, 0x5F, 0x20, 0x08];
+        let record = [&[0x81, 0x00, 0x0C, 0x00][..], &seq[..]].concat();
+        let stream = [&[0x12, 0x00][..], &seq[..], &[0x32, 0x01, 0x00][..]].concat();
+        assert_eq!(av1c_from_sequence_header(&stream), Some(record.clone()));
+        assert_eq!(av1c_from_sequence_header(&record), Some(record));
+        assert_eq!(av1c_from_sequence_header(&[0x12, 0x00]), None);
+        assert_eq!(av1c_from_sequence_header(&[]), None);
     }
 
     #[test]
