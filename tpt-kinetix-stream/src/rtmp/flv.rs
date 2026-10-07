@@ -934,7 +934,7 @@ mod tests {
             x ^= x << 17;
             x
         };
-        for _ in 0..30_000 {
+        for _ in 0..fuzz_iterations() {
             let len = (next() % 48) as usize;
             let mut msg: Vec<u8> = (0..len).map(|_| next() as u8).collect();
             if let Some(first) = msg.first_mut() {
@@ -969,6 +969,16 @@ mod tests {
             v.extend_from_slice(data);
         }
         v
+    }
+
+    /// Random-input iterations: 30 000 by default; set `KINETIX_FUZZ_ITERS` for a
+    /// long run (`cargo test --release`), which stands in for libFuzzer where that
+    /// cannot be linked.
+    fn fuzz_iterations() -> u64 {
+        std::env::var("KINETIX_FUZZ_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000)
     }
 
     #[test]
@@ -1035,7 +1045,7 @@ mod tests {
             x ^= x << 17;
             x
         };
-        for _ in 0..30_000 {
+        for _ in 0..fuzz_iterations() {
             let len = (next() % 48) as usize;
             let mut msg: Vec<u8> = (0..len).map(|_| next() as u8).collect();
             if let Some(first) = msg.first_mut() {
