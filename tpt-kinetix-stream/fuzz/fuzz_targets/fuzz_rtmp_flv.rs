@@ -1,7 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tpt_kinetix_stream::rtmp::{parse_audio_tag, parse_video_tag, parse_video_tags};
+use tpt_kinetix_stream::rtmp::{
+    parse_audio_tag, parse_audio_tags, parse_video_tag, parse_video_tags,
+};
 
 fuzz_target!(|data: &[u8]| {
     // FLV depacketization of arbitrary payloads must never panic.
@@ -9,4 +11,6 @@ fuzz_target!(|data: &[u8]| {
     // Enhanced RTMP multitrack / ModEx messages carry several tracks.
     let _ = parse_video_tags(data);
     let _ = parse_audio_tag(data);
+    // ... and so do audio Multitrack / ModEx messages.
+    let _ = parse_audio_tags(data);
 });

@@ -523,6 +523,9 @@ pub struct FlvAudioTag {
     pub codec: FlvAudioCodec,
     /// AAC packet type (only meaningful for AAC).
     pub aac_packet_type: AacPacketType,
+    /// The Enhanced RTMP track this tag belongs to (`0` for single-track streams,
+    /// which is also the spec's default-track convention).
+    pub track_id: u8,
     /// The codec payload.
     pub data: Vec<u8>,
 }
@@ -534,36 +537,127 @@ impl FlvAudioTag {
     }
 }
 
-/// Parse an RTMP `Audio` message payload into a [`FlvAudioTag`].
+/// Builds the tag for one track's payload of an Enhanced RTMP audio message.
+fn ex_audio_tag(packet_type: u8, fourcc: &[u8], body: &[u8], track_id: u8) -> FlvAudioTag {
+    let codec = if fourcc == b"Opus" {
+        FlvAudioCodec::Opus
+    } else {
+        FlvAudioCodec::Other(9)
+    };
+    let aac_packet_type = match packet_type {
+        0 => AacPacketType::SequenceHeader,
+        1 => AacPacketType::Raw,
+        other => AacPacketType::Unknown(other),
+    };
+    let data = if matches!(
+        aac_packet_type,
+        AacPacketType::SequenceHeader | AacPacketType::Raw
+    ) {
+        body.to_vec()
+    } else {
+        Vec::new()
+    };
+    FlvAudioTag {
+        codec,
+        aac_packet_type,
+        track_id,
+        data,
+    }
+}
+
+/// Parses an Enhanced RTMP `ExAudioTagHeader` message (SoundFormat 9) into one tag,
+/// or one tag per track for a `Multitrack` message.
+///
+/// Layout: the first byte is `SoundFormat(4) | AudioPacketType(4)`. `ModEx` (7)
+/// prefixes are skipped as for video. `Multitrack` (5) is followed by one byte
+/// `AvMultitrackType << 4 | AudioPacketType` and, unless the tracks use several
+/// codecs, one shared FourCC. Each track is then `[FourCC if many codecs]
+/// trackId(8) [sizeOfAudioTrack(24) unless OneTrack] payload`.
+fn parse_ex_audio_tags(payload: &[u8]) -> Result<Vec<FlvAudioTag>, FlvError> {
+    let first = *payload.first().ok_or(FlvError::Truncated)?;
+    let mut packet_type = first & 0x0F;
+    let mut pos = 1usize;
+    let byte = |pos: usize| payload.get(pos).copied().ok_or(FlvError::Truncated);
+    let slice = |from: usize, len: usize| payload.get(from..from + len).ok_or(FlvError::Truncated);
+
+    while packet_type == 7 {
+        let mut size = usize::from(byte(pos)?) + 1;
+        pos += 1;
+        if size == 256 {
+            let b = slice(pos, 2)?;
+            size = usize::from(u16::from_be_bytes([b[0], b[1]])) + 1;
+            pos += 2;
+        }
+        slice(pos, size)?;
+        pos += size;
+        packet_type = byte(pos)? & 0x0F;
+        pos += 1;
+    }
+
+    if packet_type != 5 {
+        let fourcc = slice(pos, 4)?;
+        let body = payload.get(pos + 4..).ok_or(FlvError::Truncated)?;
+        return Ok(vec![ex_audio_tag(packet_type, fourcc, body, 0)]);
+    }
+
+    let b = byte(pos)?;
+    pos += 1;
+    let (multitrack_type, inner_type) = (b >> 4, b & 0x0F);
+    if inner_type == 5 {
+        return Err(FlvError::Truncated); // a Multitrack may not nest
+    }
+    let shared = if multitrack_type != 2 {
+        let f = slice(pos, 4)?;
+        pos += 4;
+        Some(f)
+    } else {
+        None
+    };
+    let mut tags = Vec::new();
+    while pos < payload.len() {
+        let fourcc = match shared {
+            Some(f) => f,
+            None => {
+                let f = slice(pos, 4)?;
+                pos += 4;
+                f
+            }
+        };
+        let track_id = byte(pos)?;
+        pos += 1;
+        let len = if multitrack_type != 0 {
+            let b = slice(pos, 3)?;
+            pos += 3;
+            (usize::from(b[0]) << 16) | (usize::from(b[1]) << 8) | usize::from(b[2])
+        } else {
+            payload.len() - pos
+        };
+        let body = slice(pos, len)?;
+        pos += len;
+        tags.push(ex_audio_tag(inner_type, fourcc, body, track_id));
+    }
+    Ok(tags)
+}
+
+/// Parses an RTMP `Audio` message into every tag it carries: one for a classic or
+/// single-track message, one per track for an Enhanced RTMP `Multitrack` message.
+pub fn parse_audio_tags(payload: &[u8]) -> Result<Vec<FlvAudioTag>, FlvError> {
+    match payload.first() {
+        None => Err(FlvError::Truncated),
+        Some(b) if b >> 4 == 9 => parse_ex_audio_tags(payload),
+        Some(_) => Ok(vec![parse_audio_tag(payload)?]),
+    }
+}
+
+/// Parse an RTMP `Audio` message payload into its first [`FlvAudioTag`] (see
+/// [`parse_audio_tags`] for messages that carry several tracks).
 pub fn parse_audio_tag(payload: &[u8]) -> Result<FlvAudioTag, FlvError> {
     let first = *payload.first().ok_or(FlvError::Truncated)?;
-    // Enhanced RTMP: SoundFormat 9 (ExHeader), the low nibble is the packet type,
-    // then a FourCC.
     if first >> 4 == 9 {
-        let fourcc = payload.get(1..5).ok_or(FlvError::Truncated)?;
-        let codec = if fourcc == b"Opus" {
-            FlvAudioCodec::Opus
-        } else {
-            FlvAudioCodec::Other(9)
-        };
-        let aac_packet_type = match first & 0x0F {
-            0 => AacPacketType::SequenceHeader,
-            1 => AacPacketType::Raw,
-            other => AacPacketType::Unknown(other),
-        };
-        let data = if matches!(
-            aac_packet_type,
-            AacPacketType::SequenceHeader | AacPacketType::Raw
-        ) {
-            payload[5..].to_vec()
-        } else {
-            Vec::new()
-        };
-        return Ok(FlvAudioTag {
-            codec,
-            aac_packet_type,
-            data,
-        });
+        return parse_ex_audio_tags(payload)?
+            .into_iter()
+            .next()
+            .ok_or(FlvError::Truncated);
     }
     let codec = FlvAudioCodec::from_nibble(first >> 4);
 
@@ -580,12 +674,14 @@ pub fn parse_audio_tag(payload: &[u8]) -> Result<FlvAudioTag, FlvError> {
             Ok(FlvAudioTag {
                 codec,
                 aac_packet_type,
+                track_id: 0,
                 data: payload[2..].to_vec(),
             })
         }
         _ => Ok(FlvAudioTag {
             codec,
             aac_packet_type: AacPacketType::Unknown(0),
+            track_id: 0,
             data: payload[1..].to_vec(),
         }),
     }
@@ -847,6 +943,107 @@ mod tests {
             }
             let _ = parse_video_tags(&msg);
             let _ = parse_video_tag(&msg);
+        }
+    }
+
+    /// An audio `Multitrack` message: `AvMultitrackType << 4 | inner`, then a shared
+    /// FourCC (unless many codecs) and per track `[FourCC] id [size24] payload`.
+    fn audio_multitrack(
+        kind: u8,
+        inner: u8,
+        fourcc: Option<&[u8; 4]>,
+        tracks: &[TestTrack],
+    ) -> Vec<u8> {
+        let mut v = vec![0x95, (kind << 4) | inner];
+        if let Some(f) = fourcc {
+            v.extend_from_slice(f);
+        }
+        for (cc, id, data) in tracks {
+            if let Some(cc) = cc {
+                v.extend_from_slice(*cc);
+            }
+            v.push(*id);
+            if kind != 0 {
+                v.extend_from_slice(&(data.len() as u32).to_be_bytes()[1..]);
+            }
+            v.extend_from_slice(data);
+        }
+        v
+    }
+
+    #[test]
+    fn audio_multitrack_yields_one_tag_per_track() {
+        // ManyTracks, shared Opus FourCC: sequence starts for tracks 0 and 2.
+        let p = audio_multitrack(
+            1,
+            0,
+            Some(b"Opus"),
+            &[(None, 0, &[1, 2]), (None, 2, &[3, 4, 5])],
+        );
+        let tags = parse_audio_tags(&p).unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!((tags[0].track_id, tags[0].data.clone()), (0, vec![1, 2]));
+        assert_eq!((tags[1].track_id, tags[1].data.clone()), (2, vec![3, 4, 5]));
+        assert!(tags
+            .iter()
+            .all(|t| t.codec == FlvAudioCodec::Opus && t.is_sequence_header()));
+        // The first-tag accessor still works on a multitrack message.
+        assert_eq!(parse_audio_tag(&p).unwrap().track_id, 0);
+
+        // OneTrack (no size field), coded frames.
+        let p = audio_multitrack(0, 1, Some(b"Opus"), &[(None, 7, &[9, 9])]);
+        let tags = parse_audio_tags(&p).unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            (tags[0].track_id, tags[0].aac_packet_type),
+            (7, AacPacketType::Raw)
+        );
+
+        // ManyTracksManyCodecs: each track names its own FourCC.
+        let p = audio_multitrack(
+            2,
+            1,
+            None,
+            &[(Some(b"Opus"), 0, &[1]), (Some(b"mp4a"), 1, &[2])],
+        );
+        let tags = parse_audio_tags(&p).unwrap();
+        assert_eq!(tags[0].codec, FlvAudioCodec::Opus);
+        assert_eq!(tags[1].codec, FlvAudioCodec::Other(9));
+
+        // A single-track message is one tag on the default track.
+        let t = parse_audio_tags(&[0x91, b'O', b'p', b'u', b's', 7]).unwrap();
+        assert_eq!((t.len(), t[0].track_id), (1, 0));
+    }
+
+    #[test]
+    fn audio_parsers_never_panic_on_arbitrary_bytes() {
+        let p = audio_multitrack(1, 1, Some(b"Opus"), &[(None, 0, &[1, 2, 3])]);
+        for cut in 0..p.len() {
+            let _ = parse_audio_tags(&p[..cut]); // must not panic
+        }
+        // A track claiming more bytes than the message holds.
+        let mut bad = p.clone();
+        bad[7] = 0xFF;
+        assert!(parse_audio_tags(&bad).is_err());
+        // A nested Multitrack is rejected.
+        assert!(parse_audio_tags(&[0x95, 0x15, b'O', b'p', b'u', b's', 0, 0, 0, 0]).is_err());
+
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..30_000 {
+            let len = (next() % 48) as usize;
+            let mut msg: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            if let Some(first) = msg.first_mut() {
+                let ptype = [5u8, 7, 1, 0, 4, 2][(next() % 6) as usize];
+                *first = 0x90 | ptype;
+            }
+            let _ = parse_audio_tags(&msg);
+            let _ = parse_audio_tag(&msg);
         }
     }
 

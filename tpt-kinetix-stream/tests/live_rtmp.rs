@@ -154,13 +154,20 @@ fn color_info() -> Vec<u8> {
 }
 
 async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config: bool) {
-    publish_inner(port, key, src, with_audio_config, None).await
+    publish_inner(port, key, src, with_audio_config, None, 1).await
+}
+
+/// Like [`publish`], but the Opus audio travels as an Enhanced RTMP audio
+/// `Multitrack` message carrying `audio_tracks` copies of the same track
+/// (`trackId` 0, 1, ...), as a publisher with several audio sources would send.
+async fn publish_audio_tracks(port: u16, key: &str, src: &std::path::Path, audio_tracks: u8) {
+    publish_inner(port, key, src, true, None, audio_tracks).await
 }
 
 /// Like [`publish`], but after the last frame the connection stays open and
 /// silent for `stall` instead of closing cleanly (a dead encoder).
 async fn publish_then_stall(port: u16, key: &str, src: &std::path::Path, stall: Duration) {
-    publish_inner(port, key, src, true, Some(stall)).await
+    publish_inner(port, key, src, true, Some(stall), 1).await
 }
 
 async fn publish_inner(
@@ -169,6 +176,7 @@ async fn publish_inner(
     src: &std::path::Path,
     with_audio_config: bool,
     stall: Option<Duration>,
+    audio_tracks: u8,
 ) {
     const CHUNK: usize = 4096;
     // Demux the WebM into tracks and frames.
@@ -247,6 +255,21 @@ async fn publish_inner(
         c => panic!("unexpected {c:?}"),
     };
     let ex = |first: u8, cc: &[u8], body: &[u8]| [&[first][..], cc, body].concat();
+    // An audio message: single-track, or a ManyTracks `Multitrack` (5) with one
+    // shared FourCC and `trackId, size24, payload` per track.
+    let audio_msg = |inner: u8, body: &[u8]| -> Vec<u8> {
+        if audio_tracks <= 1 {
+            return ex(0x90 | inner, b"Opus", body);
+        }
+        let mut v = vec![0x95, (1 << 4) | inner];
+        v.extend_from_slice(b"Opus");
+        for id in 0..audio_tracks {
+            v.push(id);
+            v.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+            v.extend_from_slice(body);
+        }
+        v
+    };
     // Sequence starts: video (av1C / vpcC), audio (OpusHead).
     wr.write_all(&chunks(
         4,
@@ -276,7 +299,7 @@ async fn publish_inner(
             0,
             8,
             1,
-            &ex(0x90, b"Opus", &opus_head(&tracks[1].extradata)),
+            &audio_msg(0, &opus_head(&tracks[1].extradata)),
             CHUNK,
         ))
         .await
@@ -288,7 +311,7 @@ async fn publish_inner(
             let first = 0x80 | (if f.key { 0x10 } else { 0x20 }) | 3; // CodedFramesX
             chunks(4, ts, 9, 1, &ex(first, fourcc, &f.data), CHUNK)
         } else {
-            chunks(5, ts, 8, 1, &ex(0x91, b"Opus", &f.data), CHUNK)
+            chunks(5, ts, 8, 1, &audio_msg(1, &f.data), CHUNK)
         };
         wr.write_all(&msg).await.unwrap();
     }
@@ -973,7 +996,7 @@ async fn rtmp_color_info_reaches_the_init_segment() {
     let find = |kind: &[u8; 4]| init.windows(4).position(|w| w == kind);
     // colr: 'nclx', BT.2020 (9), PQ (16), BT.2020 NCL (9), limited range.
     let colr = find(b"colr").expect("colr box");
-    assert_eq!(&init[colr + 4..colr + 15], b"nclx 	  	 ");
+    assert_eq!(&init[colr + 4..colr + 15], b"nclx\0\x09\0\x10\0\x09\0");
     // mdcv: G, B, R, white point, then max / min luminance.
     let mdcv = find(b"mdcv").expect("mdcv box");
     let want: Vec<u8> = [13250u16, 34500, 7500, 3000, 34000, 16000, 15635, 16450]
@@ -986,5 +1009,59 @@ async fn rtmp_color_info_reaches_the_init_segment() {
     // clli: MaxCLL then MaxFALL.
     let clli = find(b"clli").expect("clli box");
     assert_eq!(&init[clli + 4..clli + 8], &[0x03, 0xE8, 0x01, 0x90]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An Enhanced RTMP audio `Multitrack` publish becomes one audio rendition per
+/// `trackId`: both are announced, listed in the master playlist, complete, and
+/// decode exactly like the source audio.
+#[tokio::test]
+async fn audio_multitrack_rtmp_publish_becomes_two_audio_renditions() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livertmp_{}_amt", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-b:v", "300k"], 4) else {
+        eprintln!("skipping: encoder unavailable");
+        return;
+    };
+    let (http, rtmp) = start().await;
+    publish_audio_tracks(rtmp, "mt", &src, 2).await;
+    wait_complete(http, "mt").await;
+
+    let (code, master) = http_get(http, "/mt/master.m3u8").await;
+    let master = String::from_utf8(master).unwrap();
+    assert_eq!(code, 200, "{master}");
+    assert_eq!(
+        master.matches("TYPE=AUDIO").count(),
+        2,
+        "two audio renditions: {master}"
+    );
+    for track in [1, 2] {
+        let (code, pl) = http_get(http, &format!("/mt/track-{track}.m3u8")).await;
+        let pl = String::from_utf8(pl).unwrap();
+        assert_eq!(code, 200, "track {track}: {pl}");
+        assert!(pl.contains("#EXT-X-ENDLIST"), "track {track}: {pl}");
+    }
+
+    let src_s = src.to_str().unwrap().to_string();
+    let a_src = tokio::task::spawn_blocking({
+        let s = src_s.clone();
+        move || framemd5(&s, "0:a:0")
+    })
+    .await
+    .unwrap();
+    for track in [1, 2] {
+        let url = format!("http://127.0.0.1:{http}/mt/track-{track}.m3u8");
+        let a_live = tokio::task::spawn_blocking(move || framemd5(&url, "0:a:0"))
+            .await
+            .unwrap();
+        // Everything but the final packet (Matroska DiscardPadding trim) is identical.
+        assert_eq!(a_src.len(), a_live.len(), "audio track {track}");
+        let n = a_src.len() - 1;
+        assert_eq!(a_src[..n], a_live[..n], "audio track {track} differs");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

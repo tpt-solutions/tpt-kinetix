@@ -98,7 +98,10 @@ pub struct RtmpLiveSession {
     started: std::time::Instant,
     received: u64,
     videos: std::collections::BTreeMap<u8, VideoTrack>,
-    audio: Option<StreamInfo>,
+    /// Audio tracks by Enhanced RTMP `trackId` (`0` is the default track).
+    audios: std::collections::BTreeMap<u8, StreamInfo>,
+    /// Audio `trackId` -> packager track index, fixed when the tracks are announced.
+    audio_index: std::collections::HashMap<u8, usize>,
     /// The publisher said it would send several video tracks, so the tracks are
     /// only announced after the settle wait: their sequence starts may not all
     /// have arrived yet.
@@ -127,7 +130,8 @@ impl RtmpLiveSession {
             started: std::time::Instant::now(),
             received: 0,
             videos: Default::default(),
-            audio: None,
+            audios: Default::default(),
+            audio_index: Default::default(),
             expect_multitrack: false,
             track_index: Default::default(),
             warned_track: false,
@@ -216,9 +220,9 @@ impl RtmpLiveSession {
                 }
                 self.first_ts.get_or_insert(*timestamp);
                 match tag.aac_packet_type {
-                    AacPacketType::SequenceHeader => self.audio_config(&tag.data),
+                    AacPacketType::SequenceHeader => self.audio_config(tag.track_id, &tag.data),
                     AacPacketType::Raw if !tag.data.is_empty() => {
-                        self.enqueue(true, 0, *timestamp, true, tag.data.clone());
+                        self.enqueue(true, tag.track_id, *timestamp, true, tag.data.clone());
                     }
                     _ => {}
                 }
@@ -346,7 +350,7 @@ impl RtmpLiveSession {
         );
     }
 
-    fn audio_config(&mut self, head: &[u8]) {
+    fn audio_config(&mut self, track_id: u8, head: &[u8]) {
         let channels = head.get(9).copied().unwrap_or(2);
         let Some(dops) = opus_head_to_dops(head, channels) else {
             return tracing::warn!("unusable Opus identification header");
@@ -355,7 +359,7 @@ impl RtmpLiveSession {
         info.channels = u16::from(channels);
         info.sample_rate = 48_000;
         info.extradata = dops;
-        self.audio = Some(info);
+        self.audios.insert(track_id, info);
     }
 
     fn video_frame(&mut self, track_id: u8, codec: CodecId, ts: u32, key: bool, data: &[u8]) {
@@ -408,10 +412,10 @@ impl RtmpLiveSession {
             return;
         }
         let waited = ts.saturating_sub(self.first_ts.unwrap_or(ts)) >= AUDIO_WAIT_MS;
-        if (self.audio.is_none() || self.expect_multitrack) && !waited {
+        if (self.audios.is_empty() || self.expect_multitrack) && !waited {
             return;
         }
-        // Video tracks by ascending `trackId` (0 is the default track), then audio.
+        // Video tracks by ascending `trackId` (0 is the default track), then audio tracks likewise.
         let mut tracks = Vec::new();
         for (i, (id, v)) in self.videos.iter().enumerate() {
             let mut info = v.info.clone().unwrap();
@@ -420,8 +424,10 @@ impl RtmpLiveSession {
             tracks.push(info);
             self.track_index.insert(*id, i);
         }
-        if let Some(mut a) = self.audio.clone() {
+        for (id, a) in &self.audios {
+            let mut a = a.clone();
             a.index = tracks.len() as u32;
+            self.audio_index.insert(*id, tracks.len());
             tracks.push(a);
             self.has_audio_track = true;
         }
@@ -456,7 +462,10 @@ impl RtmpLiveSession {
         }
         let Some(live) = &self.live else { return };
         let track = if q.audio {
-            self.track_index.len()
+            match self.audio_index.get(&q.track) {
+                Some(&i) => i,
+                None => return, // an audio track that was never configured
+            }
         } else {
             match self.track_index.get(&q.track) {
                 Some(&i) => i,

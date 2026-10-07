@@ -353,6 +353,7 @@ mod engine {
                                             tag: FlvAudioTag {
                                                 codec: FlvAudioCodec::Opus,
                                                 aac_packet_type: AacPacketType::SequenceHeader,
+                                                track_id: 0,
                                                 data: opus_head(2),
                                             },
                                         });
@@ -366,6 +367,7 @@ mod engine {
                                         tag: FlvAudioTag {
                                             codec: FlvAudioCodec::Opus,
                                             aac_packet_type: AacPacketType::Raw,
+                                            track_id: 0,
                                             data: d.data.to_vec(),
                                         },
                                     });

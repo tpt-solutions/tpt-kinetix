@@ -450,11 +450,15 @@ where
                     }
                     Err(e) => tracing::warn!(error = %e, "bad FLV video tag"),
                 },
-                Some(MessageTypeId::Audio) => match flv::parse_audio_tag(&msg.payload) {
-                    Ok(tag) => emit(RtmpMediaEvent::Audio {
-                        timestamp: msg.timestamp,
-                        tag,
-                    }),
+                Some(MessageTypeId::Audio) => match flv::parse_audio_tags(&msg.payload) {
+                    Ok(tags) => {
+                        for tag in tags {
+                            emit(RtmpMediaEvent::Audio {
+                                timestamp: msg.timestamp,
+                                tag,
+                            });
+                        }
+                    }
                     Err(e) => tracing::warn!(error = %e, "bad FLV audio tag"),
                 },
                 _ => {
