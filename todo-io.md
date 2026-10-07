@@ -31,9 +31,11 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       `RtmpMediaEvent::Video` (`tag.track_id`) and becomes its own packager track, i.e. an OBS Enhanced Broadcasting
       publish is a multi-rendition ladder (`live_rtmp.rs::multitrack_rtmp_publish_becomes_a_ladder`: two renditions,
       each decoding frame-exactly). Parser tests + 30k random-input no-panic test + fuzz target updated. `Metadata`
-      (HDR colour info) is surfaced as an event but not yet forwarded into `colr`/`mdcv`/`clli`. Open follow-ups: the
+      (`colorInfo`: `colorConfig` / `hdrCll` / `hdrMdcv`) is now decoded (`HdrMetadata::to_video_color`) and written as
+      `colr` (nclx) / `mdcv` / `clli` in the video init segment (2026-10-07; `StreamInfo::color`,
+      `live_rtmp.rs::rtmp_color_info_reaches_the_init_segment`); it must arrive before the tracks are announced. Open follow-ups: the
       E-RTMP v2 capability exchange (`capsEx` / `videoFourCcInfoMap`; another session has started it), RTMPS (TLS;
-      in progress elsewhere), audio multitrack, and a real OBS pass. RTMP idle timeout DONE 2026-10-06 (a per-publisher watchdog in `rtmp_live.rs` completes the
+      in progress elsewhere), audio multitrack, `fullRange` (not in `colorConfig`; written as limited), and a real OBS pass. RTMP idle timeout DONE 2026-10-06 (a per-publisher watchdog in `rtmp_live.rs` completes the
       presentation and frees the slot when a publisher goes silent with the socket open; `rtmp_idle_publisher_is_ended`).
 - [ ] **Low-latency HLS** built 2026-10-04; **first real-player measurement 2026-10-06** (`just latency-test`,
       `tools/latency-test.sh`: headless Chrome publishes a wall-clock barcode through MediaRecorder + WebSocket, plays the
@@ -48,24 +50,45 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       (3) `PART-HOLD-BACK` was 12 *seconds* — now 3 x `PART-TARGET`, and `PART-TARGET` covers the longest published
       part (parts ran 0.36 s against a 0.333 s target); (4) the `EXT-X-PRELOAD-HINT` part URL answered 404 instead of
       blocking until published. Regression tests: `ll_playlist_tags_follow_the_spec`, `ll_hls_parts_are_served_*`.
-      **STILL OPEN — hls.js drops audio segments in low-latency mode.** Narrowed a lot (2026-10-07). With a steady
-      `ffmpeg -re` publisher, hls.js LL shows 2-5 `bufferStalledError` and sometimes `fragGap` per 30 s and its latency
-      drifts to 4-10 s, **but only with an audio rendition**: the identical stream *video-only* is stall-free
-      (1053 frames, 0 events, ~1.3 s), and dash.js plays the same video+audio output steadily at 1.9 s. The proxy log
-      shows what happens: hls.js fetches every video part but skips whole *audio* segments (e.g. 9, 16, 17 of 24; 109
-      audio part requests vs 134 video), and the hole starves the audio buffer. Ruled out: server part availability
-      (median 344 ms between parts, max 523 ms), part contents (durations match, contiguous), publisher gaps, hold-back
-      distance (`liveSyncDuration` 1.5-3.5 s), the catch-up speed-up, background-tab timer throttling (flags added to
-      the harness), the Chrome 6-connections-per-host limit (Resource Timing: no request queued > 65 ms), and playlist
-      structure (polled 21 segments: audio and video playlists describe every segment identically) and start-time
-      alignment (`tfdt` + sample durations of 5 audio/video segment pairs: identical start and end, 0.0 ms apart).
-      hls.js's own fragment tracker marks a fragment a gap when an elementary stream has no buffered data inside its
-      time range (`addAsGap`), so the remaining suspect is hls.js's own alternate-audio handling in LL mode (initPTS /
-      per-part start times / how it decides an audio fragment is already covered).
-      Next experiments: mux audio into the video track (no alternate rendition), compare with a reference LL-HLS server,
-      log hls.js `audio-stream-controller` decisions at debug level around a skipped segment. Treat ~4 s (non-LL) as the
-      dependable HLS number and ~1.6-1.8 s as the LL floor for video-only. Fixed on the way: a blocking reload for a
+      **hls.js + audio rendition in low-latency mode: ROOT-CAUSED and mostly fixed 2026-10-07.** Symptom: 2-5
+      `bufferStalledError` / `fragGap` per 30 s, whole audio segments skipped, latency drifting to 10-19 s, *only
+      with an audio rendition* (video-only is stall-free). What it was (found by diffing hls.js debug logs, per-part
+      append timestamps and an A/B on `WINDOW`): the audio controller goes IDLE for ~1.9 s after the last part of a
+      segment and then recovers by dropping out of part mode and loading whole segments (that is the "skipped
+      segments"). It only happens **once the playlist window slides** (`WINDOW=30` with a 30 s run: 1046 frames, 0
+      events, 1.5 s) **while completed segments still carry `EXT-X-PART` tags**. Measured over 30 s, ffmpeg publisher
+      with `-flush_packets 1`: parts kept for 3 completed segments: 3-4 stalls / ~4 s; 2: 2 / ~2.7 s; none: steady
+      state / ~2.1 s. So **completed audio segments are listed without their part tags** (video keeps them: a
+      video-only stream *needs* them, 1.2 s / 0 events with vs 2.1 s / a stall without; the part URIs stay fetchable and
+      RFC 8216bis 6.2.2 only says tags SHOULD go after 3 target durations). 75 s with audio: tags on every track drifted
+      to ~12 s; video-only tags held 2.14 s / 1 stall. Also changed: part
+      boundaries now sit on an even grid (`segment / round(segment / part)`, `part_slot_ms`) instead of "a part length
+      after the previous part", which left a 0.2 s tail part per segment (`parts_fill_the_segment_evenly_and_
+      completed_audio_segments_drop_their_tags`). The grid is performance-neutral (measured on its own) and the tail
+      was *not* the cause (disproved: part count/length variants, no `INDEPENDENT` on audio parts, delta updates off).
+      **Re-measured 2026-10-07 with a smooth publisher** (`ffmpeg -re ... -flush_packets 1 -cluster_time_limit 100`;
+      hls.js-reported latency, 30 s, 2 runs each): video-only **1.2 s, 0 events**; audio+video **2.1 s, 1-2 stalls**
+      (was 2.2-2.5 s with 4-6 stalls + `fragGap`s and whole audio segments skipped before the fix).
+      Every config with a stall sits at ~2.1 s and every stall-free one at ~1.2 s, because hls.js raises its target
+      latency ("Stall detected, adjusting target latency") after a stall - so the remaining ~0.9 s *is* the one
+      start-up stall (buffer ~0.05 s right after play begins), not packaging. Repo harness (Chrome MediaRecorder
+      publisher, `just latency-test`): **p50 ~4.2 s, p95 4.3 s, flat**, the same with or without audio; the original
+      code gave p50 5.4 s / p95 19 s (drifting) even video-only, so the "1.6-1.8 s at best" figure above was a
+      non-repeatable best case, not a floor. Treat ~4 s as the dependable number with that publisher, ~2 s with a
+      smooth one. **Start-up stall explained (2026-10-07, hls.js debug log):** hls.js starts *video* in part mode but
+      *audio* in whole-segment mode (`Loading audio sn: 1 (frag:[0-2])`), because the completed audio segment at its
+      start position has no part tags; it then gets the next audio segment only when that completes, so the combined
+      buffer is capped by audio at each segment boundary until a stall raises the target latency. A viewer joining
+      mid-stream hits the same thing (late join after 20 s, 30 s run: video-only 1.3 s / 0 events; audio+video 4.0 s /
+      2 stalls). Keeping tags on the latest completed audio segment helps one case (late join 4.0 -> 2.8 s, 1 stall) but
+      over 75 s gives 3-4 stalls vs 2 and neither setting is stable (2.1 s one run, 4.0 s the next), so it was NOT
+      adopted. **Still open:** (1) a way to start hls.js audio in part mode without the slide stalls (or an hls.js fix), (2) why hls.js stalls on retained *audio* completed-segment
+      parts (suspect its part-list merge on a sliding window) - worth an upstream issue with the repro below.
+      Fixed on the way: a blocking reload for a
       part index beyond a *completed* segment waited the full cap and 404'd (it must answer at once).
+      Repro: `live_server` (`WINDOW=n` now sets the playlist window) + `ffmpeg -re ... -flush_packets 1
+      -cluster_time_limit 100 -f webm -method POST http://127.0.0.1:PORT/ingest/KEY` + `EXTERNAL=1 KEY=KEY
+      DEBUG_HLS=1 CHROME_LOG=1 node tpt-kinetix-stream/tests/browser/latency.cjs ...` (console lines carry timestamps).
       Harness knobs: `EXTERNAL=1 KEY=..` (play an ffmpeg publisher), `SYNC`, `RATE`, `DEBUG_HLS`, `PLAYER=dash`, `SWITCH`.
 - [x] **Dynamic DASH MPD** for live, 2026-10-04: `LivePackager::dash_mpd()` emits `type="dynamic"` with
       `availabilityStartTime`, a `minimumUpdatePeriod` (half a segment), `minBufferTime`, and a
@@ -116,8 +139,7 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       vector). The server serves a ready-made page at **`/publish`** (camera or screen -> `MediaRecorder` AV1/VP9 +
       Opus, 250 ms chunks). VERIFIED with a real browser: `just browser-publish-test` runs headless Chrome with a fake
       camera/mic, which publishes AV1 + Opus; the live HLS appears, `/metrics` shows the publisher, and the segments
-      decode in ffmpeg (303 frames from the first 3). Rust-level tests in `tests/ws_ingest.rs`. OPEN: `wss://` (needs
-      TLS termination in front or `rustls` on the HTTP port), WebSocket ping keep-alive from the server, compressed
+      decode in ffmpeg (303 frames from the first 3). Rust-level tests in `tests/ws_ingest.rs`. Server ping keep-alive DONE 2026-10-07 (`IngestPolicy::ws_ping_interval`, default 15 s: a quiet publisher is pinged, one silent for a second interval is dropped; `silent_websocket_publishers_are_pinged_and_dead_ones_dropped`). `wss://` / HTTPS DONE 2026-10-07 (`LiveServer::with_tls`, feature `rtmps`; CLI `live --tls-cert/--tls-key`, build with `--features tls`, which also gives RTMPS; `tests/tls_ingest.rs` with a throwaway openssl cert; verified through the CLI with curl). OPEN: compressed
       frames (permessage-deflate is not offered), publishing from non-Chromium browsers (Firefox/Safari
       MediaRecorder does not produce AV1/VP9 WebM everywhere).
 - [ ] **Ingest hardening** — HTTP/WebSocket/RTMP ingest DONE 2026-10-06 (`IngestPolicy`, `LiveServer::with_policy`, `policy.rs`; CLI
@@ -126,7 +148,7 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       413; sustained-bitrate cap (after a 2 s grace) -> 429; max live streams -> 503; optional 409 on a second
       publisher for a live key; `GET /metrics` (Prometheus text: active publishers, started/refused/cut-off
       counters, bytes in, playback requests). A cut-off publish still finishes its playlists. Tested over real
-      HTTP in `tests/ingest_policy.rs`. STILL OPEN: per-key bitrate/duration overrides, bounded memory under
+      HTTP in `tests/ingest_policy.rs`. Per-key limit overrides DONE 2026-10-07 (`IngestPolicy::key_limits: HashMap<String, KeyLimits>`; idle / duration / bitrate / bytes, each replacing the global value for that key; CLI `live --key-limit KEY:idle_timeout=..,max_duration=..,max_bitrate_kbps=..,max_bytes=..`; `per_key_limits_override_the_global_ones`). STILL OPEN: bounded memory under
       slow *viewers* (responses are whole buffers today), auth on `/metrics`.
 - [x] **Reconnect handling (HTTP ingest)** DONE 2026-10-06: a publisher that drops and re-POSTs under the same key with
       the same codec configuration *resumes* the presentation — `LivePackager::set_tracks` on a finished stream reopens

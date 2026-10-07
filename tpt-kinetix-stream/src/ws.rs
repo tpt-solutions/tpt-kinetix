@@ -9,7 +9,9 @@
 //! No dependencies: SHA-1 and base64 are only used for the handshake accept key.
 
 use anyhow::{bail, Result};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::time::Duration;
+
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Largest single frame payload accepted (a `MediaRecorder` chunk is far smaller).
 const MAX_FRAME: u64 = 16 * 1024 * 1024;
@@ -133,12 +135,36 @@ pub(crate) async fn send_close<W: AsyncWrite + Unpin>(
 /// peer closes. Pings are answered; a text frame is rejected (the stream is
 /// binary WebM).
 ///
+/// With `keepalive`, a connection that stays silent for that long is pinged
+/// (which also keeps NATs and proxies from dropping it), and one that stays
+/// silent for a second interval after the ping is treated as dead: any bytes at
+/// all, a pong or media, count as proof of life.
+///
 /// `io` is both halves of the connection.
-pub(crate) async fn next_chunk<S>(io: &mut S) -> Result<Option<Vec<u8>>>
+pub(crate) async fn next_chunk<S>(
+    io: &mut S,
+    keepalive: Option<Duration>,
+) -> Result<Option<Vec<u8>>>
 where
-    S: AsyncReadExt + AsyncWrite + Unpin,
+    S: AsyncBufRead + AsyncWrite + Unpin,
 {
+    let mut pinged = false;
     loop {
+        if let Some(every) = keepalive {
+            // `fill_buf` is cancel-safe, unlike a partial `read_exact`.
+            match tokio::time::timeout(every, io.fill_buf()).await {
+                Ok(Ok([])) => return Ok(None),
+                Ok(Ok(_)) => pinged = false,
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) if pinged => bail!("websocket peer did not answer a ping"),
+                Err(_) => {
+                    io.write_all(&[0x89, 0]).await?;
+                    io.flush().await?;
+                    pinged = true;
+                    continue;
+                }
+            }
+        }
         let mut head = [0u8; 2];
         if io.read_exact(&mut head).await.is_err() {
             return Ok(None); // dropped without a close frame
@@ -239,7 +265,8 @@ mod tests {
 
     #[tokio::test]
     async fn frames_round_trip_and_pings_are_answered() {
-        let (mut client, mut server) = tokio::io::duplex(1 << 20);
+        let (mut client, server) = tokio::io::duplex(1 << 20);
+        let mut server = tokio::io::BufReader::new(server);
         let big = vec![7u8; 70_000]; // uses the 8-byte length form
         client
             .write_all(&client_frame(0x2, b"hello", [1, 2, 3, 4]))
@@ -257,9 +284,12 @@ mod tests {
             .write_all(&client_frame(0x8, &[], [0, 0, 0, 0]))
             .await
             .unwrap();
-        assert_eq!(next_chunk(&mut server).await.unwrap().unwrap(), b"hello");
-        assert_eq!(next_chunk(&mut server).await.unwrap().unwrap(), big);
-        assert!(next_chunk(&mut server).await.unwrap().is_none());
+        assert_eq!(
+            next_chunk(&mut server, None).await.unwrap().unwrap(),
+            b"hello"
+        );
+        assert_eq!(next_chunk(&mut server, None).await.unwrap().unwrap(), big);
+        assert!(next_chunk(&mut server, None).await.unwrap().is_none());
         let mut pong = [0u8; 3];
         client.read_exact(&mut pong).await.unwrap();
         assert_eq!(pong, [0x8A, 1, b'p']);
@@ -267,14 +297,47 @@ mod tests {
 
     #[tokio::test]
     async fn unmasked_and_text_frames_are_rejected() {
-        let (mut client, mut server) = tokio::io::duplex(1024);
+        let (mut client, server) = tokio::io::duplex(1024);
+        let mut server = tokio::io::BufReader::new(server);
         client.write_all(&[0x82, 0x01, 0xFF]).await.unwrap();
-        assert!(next_chunk(&mut server).await.is_err());
-        let (mut client, mut server) = tokio::io::duplex(1024);
+        assert!(next_chunk(&mut server, None).await.is_err());
+        let (mut client, server) = tokio::io::duplex(1024);
+        let mut server = tokio::io::BufReader::new(server);
         client
             .write_all(&client_frame(0x1, b"hi", [1, 1, 1, 1]))
             .await
             .unwrap();
-        assert!(next_chunk(&mut server).await.is_err());
+        assert!(next_chunk(&mut server, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_quiet_peer_is_pinged_and_a_dead_one_is_dropped() {
+        let every = Some(Duration::from_millis(80));
+        // A peer that answers the ping stays connected and its data still arrives.
+        let (mut client, server) = tokio::io::duplex(1024);
+        let mut server = tokio::io::BufReader::new(server);
+        let reader = tokio::spawn(async move { next_chunk(&mut server, every).await.unwrap() });
+        let mut ping = [0u8; 2];
+        client.read_exact(&mut ping).await.unwrap();
+        assert_eq!(ping, [0x89, 0]);
+        client
+            .write_all(&client_frame(0xA, &[], [1, 2, 3, 4]))
+            .await
+            .unwrap();
+        // The pong counts as life; a second quiet interval pings again, not drops.
+        let mut ping = [0u8; 2];
+        client.read_exact(&mut ping).await.unwrap();
+        assert_eq!(ping, [0x89, 0]);
+        client
+            .write_all(&client_frame(0x2, b"data", [4, 3, 2, 1]))
+            .await
+            .unwrap();
+        assert_eq!(reader.await.unwrap().unwrap(), b"data");
+
+        // A peer that never answers is an error after the second interval.
+        let (_client, server) = tokio::io::duplex(1024);
+        let mut server = tokio::io::BufReader::new(server);
+        let err = next_chunk(&mut server, every).await.unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
     }
 }

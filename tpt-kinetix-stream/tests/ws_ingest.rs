@@ -197,3 +197,46 @@ async fn text_frames_end_the_publish_with_a_close_code() {
     let (code, reason) = read_close(&mut s).await;
     assert_eq!(code, 1007, "{reason}");
 }
+
+/// A silent publisher is pinged after the configured interval; one that never
+/// answers is dropped after a second interval, and one that does answer is kept.
+#[tokio::test]
+async fn silent_websocket_publishers_are_pinged_and_dead_ones_dropped() {
+    let policy = IngestPolicy {
+        ws_ping_interval: Some(std::time::Duration::from_millis(150)),
+        ..Default::default()
+    };
+    let port = start(LiveServer::new(opts()).with_policy(policy)).await;
+    let wait = std::time::Duration::from_secs(5);
+
+    // Answers its ping: still connected, and pinged again an interval later.
+    let (mut alive, head) = ws_open(port, "/ingest/alive").await;
+    assert!(head.starts_with("HTTP/1.1 101"));
+    for _ in 0..3 {
+        let mut ping = [0u8; 2];
+        tokio::time::timeout(wait, alive.read_exact(&mut ping))
+            .await
+            .expect("a ping within the interval")
+            .unwrap();
+        assert_eq!(ping, [0x89, 0]);
+        alive
+            .write_all(&client_frame(0xA, &[], [1, 2, 3, 4]))
+            .await
+            .unwrap();
+    }
+
+    // Never answers: pinged once, then closed by the server.
+    let (mut dead, _) = ws_open(port, "/ingest/dead").await;
+    let mut ping = [0u8; 2];
+    tokio::time::timeout(wait, dead.read_exact(&mut ping))
+        .await
+        .expect("a ping")
+        .unwrap();
+    assert_eq!(ping, [0x89, 0]);
+    let mut rest = Vec::new();
+    tokio::time::timeout(wait, dead.read_to_end(&mut rest))
+        .await
+        .expect("the server should drop a peer that ignores a ping")
+        .unwrap();
+    assert_eq!(rest.first(), Some(&0x88), "a close frame, then EOF");
+}

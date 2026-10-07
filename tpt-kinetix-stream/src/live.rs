@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tpt_kinetix_demux::mkv_stream::{MkvEvent, MkvStream};
 use tpt_kinetix_package::{LiveOptions, LivePackager, PlaylistRequest};
 
@@ -60,6 +60,12 @@ fn playlist_request(query: &str) -> PlaylistRequest {
 
 pub(crate) type Shared = Arc<Mutex<LivePackager>>;
 
+/// What a connection needs to be: plain TCP or TLS over it.
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin> Io for T {}
+/// One accepted connection, TLS or not.
+type Conn = Box<dyn Io>;
+
 /// Live ingest + HLS server state.
 #[derive(Clone)]
 pub struct LiveServer {
@@ -71,6 +77,8 @@ pub struct LiveServer {
     recorder: Option<Arc<Recorder>>,
     whip_cfg: Arc<WhipConfig>,
     whip_sessions: WhipSessions,
+    #[cfg(feature = "rtmps")]
+    tls: Option<Arc<tokio_rustls::TlsAcceptor>>,
 }
 
 impl LiveServer {
@@ -85,7 +93,19 @@ impl LiveServer {
             recorder: None,
             whip_cfg: Arc::new(WhipConfig::default()),
             whip_sessions: WhipSessions::default(),
+            #[cfg(feature = "rtmps")]
+            tls: None,
         }
+    }
+
+    /// Serves HTTPS and `wss://` instead of plain HTTP and `ws://`: connections are
+    /// TLS-terminated with `identity` (PEM chain + key) before any HTTP is read.
+    /// Needed for `wss://` ingest and for a browser publish page served from a
+    /// secure context. Requires the `rtmps` feature (it carries `tokio-rustls`).
+    #[cfg(feature = "rtmps")]
+    pub fn with_tls(mut self, identity: &crate::rtmp::RtmpsIdentity) -> Result<Self> {
+        self.tls = Some(crate::rtmp::server::build_tls_acceptor(identity)?);
+        Ok(self)
     }
 
     /// Where WHIP (WebRTC) publishers send media; see [`crate::whip`]. The default
@@ -178,10 +198,11 @@ impl LiveServer {
     /// within the policy; counts the cut-off in the metrics when not.
     pub(crate) fn check_rtmp_progress(
         &self,
+        key: &str,
         elapsed: std::time::Duration,
         bytes: u64,
     ) -> Result<(), &'static str> {
-        match self.policy.check_progress(elapsed, bytes) {
+        match self.policy.check_progress(key, elapsed, bytes) {
             Ok(()) => Ok(()),
             Err(refusal) => {
                 self.metrics.count_refusal(refusal);
@@ -196,9 +217,9 @@ impl LiveServer {
         self.opts.segment_seconds
     }
 
-    /// The configured idle timeout, if any.
-    pub(crate) fn idle_timeout(&self) -> Option<std::time::Duration> {
-        self.policy.idle_timeout
+    /// The idle timeout that applies to `key`, if any.
+    pub(crate) fn idle_timeout(&self, key: &str) -> Option<std::time::Duration> {
+        self.policy.limits_for(key).idle_timeout
     }
 
     /// Counts an idle cut-off in `/metrics`.
@@ -220,7 +241,20 @@ impl LiveServer {
             let (stream, peer) = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
-                if let Err(e) = this.handle(stream).await {
+                #[cfg(feature = "rtmps")]
+                let conn: Conn = match &this.tls {
+                    Some(tls) => match tls.accept(stream).await {
+                        Ok(t) => Box::new(t),
+                        Err(e) => {
+                            tracing::warn!(%peer, error = %e, "TLS handshake failed");
+                            return;
+                        }
+                    },
+                    None => Box::new(stream),
+                };
+                #[cfg(not(feature = "rtmps"))]
+                let conn: Conn = Box::new(stream);
+                if let Err(e) = this.handle(conn).await {
                     tracing::warn!(%peer, error = %e, "live connection ended with an error");
                 }
             });
@@ -235,7 +269,7 @@ impl LiveServer {
         self.serve(listener).await
     }
 
-    async fn handle(&self, stream: TcpStream) -> Result<()> {
+    async fn handle(&self, stream: Conn) -> Result<()> {
         let mut r = BufReader::new(stream);
         let mut head = String::new();
         let mut total = 0usize;
@@ -483,7 +517,7 @@ impl LiveServer {
     /// `DELETE /whip/<key>/<session>`.
     async fn whip(
         &self,
-        mut r: BufReader<TcpStream>,
+        mut r: BufReader<Conn>,
         method: &str,
         path: &str,
         query: &str,
@@ -532,7 +566,7 @@ impl LiveServer {
     #[cfg(feature = "whip")]
     async fn whip_offer(
         &self,
-        r: &mut BufReader<TcpStream>,
+        r: &mut BufReader<Conn>,
         key: &str,
         query: &str,
         headers: &HashMap<String, String>,
@@ -601,7 +635,7 @@ impl LiveServer {
     #[cfg(not(feature = "whip"))]
     async fn whip_offer(
         &self,
-        _r: &mut BufReader<TcpStream>,
+        _r: &mut BufReader<Conn>,
         _key: &str,
         _query: &str,
         _headers: &HashMap<String, String>,
@@ -618,7 +652,7 @@ impl LiveServer {
     /// part, so the bytes received equal the completed segment exactly.
     async fn stream_segment(
         &self,
-        s: &mut TcpStream,
+        s: &mut Conn,
         live: Shared,
         track: usize,
         number: u64,
@@ -723,7 +757,7 @@ impl LiveServer {
 
     async fn ingest(
         &self,
-        mut r: BufReader<TcpStream>,
+        mut r: BufReader<Conn>,
         key: String,
         headers: &HashMap<String, String>,
         ws: bool,
@@ -778,7 +812,11 @@ impl LiveServer {
         Metrics::inc(&self.metrics.publishes_started);
 
         let mut body = if ws {
-            Body::WebSocket
+            Body::WebSocket(
+                self.policy
+                    .ws_ping_interval
+                    .or(Some(std::time::Duration::from_secs(15))),
+            )
         } else {
             Body::new(headers)
         };
@@ -787,8 +825,9 @@ impl LiveServer {
         let mut cut_off: Option<Refusal> = None;
         let started = std::time::Instant::now();
         let mut received = 0u64;
+        let limits = self.policy.limits_for(&key);
         'read: loop {
-            let next = match self.policy.idle_timeout {
+            let next = match limits.idle_timeout {
                 Some(idle) => match tokio::time::timeout(idle, body.next(&mut r)).await {
                     Ok(n) => n,
                     Err(_) => {
@@ -812,7 +851,10 @@ impl LiveServer {
             self.metrics
                 .publish_bytes
                 .fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
-            if let Err(refusal) = self.policy.check_progress(started.elapsed(), received) {
+            if let Err(refusal) = self
+                .policy
+                .check_progress(&key, started.elapsed(), received)
+            {
                 cut_off = Some(refusal);
                 break 'read;
             }
@@ -927,7 +969,8 @@ fn apply(live: &Shared, events: Vec<MkvEvent>) -> Result<()> {
 /// A request body: chunked, length-delimited, or until the peer closes.
 enum Body {
     Chunked,
-    WebSocket,
+    /// Binary frames; pinged after this much silence.
+    WebSocket(Option<std::time::Duration>),
     Length(u64),
     UntilEof,
     Done,
@@ -948,11 +991,11 @@ impl Body {
     }
 
     /// The next piece of the body, or `None` at its end.
-    async fn next(&mut self, r: &mut BufReader<TcpStream>) -> Result<Option<Vec<u8>>> {
+    async fn next(&mut self, r: &mut BufReader<Conn>) -> Result<Option<Vec<u8>>> {
         match self {
             Body::Done => Ok(None),
-            Body::WebSocket => {
-                let chunk = ws::next_chunk(r).await?;
+            Body::WebSocket(keepalive) => {
+                let chunk = ws::next_chunk(r, *keepalive).await?;
                 if chunk.is_none() {
                     *self = Body::Done;
                 }
@@ -1086,7 +1129,7 @@ impl Reply {
     }
 }
 
-async fn end_publish(r: &mut BufReader<TcpStream>, ws: bool, reply: Reply) -> Result<()> {
+async fn end_publish(r: &mut BufReader<Conn>, ws: bool, reply: Reply) -> Result<()> {
     if !ws {
         return respond(r.get_mut(), reply, false).await;
     }
@@ -1119,7 +1162,7 @@ fn rand_id() -> u64 {
 }
 
 /// One HTTP/1.1 chunk of a chunked response.
-async fn write_http_chunk(s: &mut TcpStream, data: &[u8]) -> Result<()> {
+async fn write_http_chunk(s: &mut Conn, data: &[u8]) -> Result<()> {
     s.write_all(format!("{:X}\r\n", data.len()).as_bytes())
         .await?;
     s.write_all(data).await?;
@@ -1128,7 +1171,7 @@ async fn write_http_chunk(s: &mut TcpStream, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-async fn respond(s: &mut TcpStream, r: Reply, head_only: bool) -> Result<()> {
+async fn respond(s: &mut Conn, r: Reply, head_only: bool) -> Result<()> {
     let reason = match r.status {
         200 => "OK",
         201 => "Created",

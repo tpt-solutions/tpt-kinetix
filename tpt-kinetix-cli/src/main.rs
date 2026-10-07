@@ -112,6 +112,18 @@ enum Commands {
         /// Refuse a second publisher on a key that is already live (default: replace it).
         #[arg(long)]
         reject_concurrent: bool,
+        /// Limits for one stream key, replacing the global ones for it:
+        /// `KEY:idle_timeout=30,max_duration=3600,max_bitrate_kbps=20000,max_bytes=1000000000`
+        /// (any subset; seconds, kbit/s, bytes). Repeatable.
+        #[arg(long = "key-limit", value_parser = parse_key_limit)]
+        key_limits: Vec<(String, tpt_kinetix_stream::KeyLimits)>,
+        /// PEM certificate chain: serve HTTPS / `wss://` (and RTMPS with `--rtmp-port`) instead of plain
+        /// HTTP / `ws://` / RTMP. Needs `--tls-key` and a build with the `tls` feature.
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<std::path::PathBuf>,
+        /// PEM private key for `--tls-cert`.
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<std::path::PathBuf>,
         /// Record every publish under this directory; the recording plays at
         /// `/<key>/dvr/master.m3u8` during and after the publish.
         #[arg(long)]
@@ -216,6 +228,72 @@ enum Commands {
     },
 }
 
+/// Parses `--key-limit KEY:field=value,...` (see the flag's help).
+fn parse_key_limit(arg: &str) -> Result<(String, tpt_kinetix_stream::KeyLimits), String> {
+    let (key, fields) = arg
+        .split_once(':')
+        .ok_or("expected KEY:field=value[,field=value...]")?;
+    if key.is_empty() {
+        return Err("empty stream key".into());
+    }
+    let mut limits = tpt_kinetix_stream::KeyLimits::default();
+    for field in fields.split(',').filter(|f| !f.is_empty()) {
+        let (name, value) = field
+            .split_once('=')
+            .ok_or_else(|| format!("`{field}` is not field=value"))?;
+        let secs = |v: &str| -> Result<std::time::Duration, String> {
+            v.parse::<f64>()
+                .ok()
+                .filter(|s| s.is_finite() && *s >= 0.0)
+                .map(std::time::Duration::from_secs_f64)
+                .ok_or_else(|| format!("`{v}` is not a number of seconds"))
+        };
+        let num = |v: &str| -> Result<u64, String> {
+            v.parse::<u64>()
+                .map_err(|_| format!("`{v}` is not a whole number"))
+        };
+        match name {
+            "idle_timeout" => limits.idle_timeout = Some(secs(value)?),
+            "max_duration" => limits.max_duration = Some(secs(value)?),
+            "max_bitrate_kbps" => limits.max_bitrate_bps = Some(num(value)?.saturating_mul(1000)),
+            "max_bytes" => limits.max_bytes = Some(num(value)?),
+            other => return Err(format!("unknown limit `{other}`")),
+        }
+    }
+    Ok((key.to_string(), limits))
+}
+
+#[cfg(test)]
+mod key_limit_tests {
+    use super::parse_key_limit;
+    use std::time::Duration;
+
+    #[test]
+    fn parses_any_subset_of_limits() {
+        let (key, l) =
+            parse_key_limit("studio:idle_timeout=2.5,max_bitrate_kbps=20000,max_bytes=99").unwrap();
+        assert_eq!(key, "studio");
+        assert_eq!(l.idle_timeout, Some(Duration::from_millis(2500)));
+        assert_eq!(l.max_bitrate_bps, Some(20_000_000));
+        assert_eq!(l.max_bytes, Some(99));
+        assert_eq!(l.max_duration, None);
+    }
+
+    #[test]
+    fn rejects_malformed_input() {
+        for bad in [
+            "nokey",
+            ":max_bytes=1",
+            "k:max_bytes",
+            "k:max_bytes=x",
+            "k:bogus=1",
+            "k:idle_timeout=-1",
+        ] {
+            assert!(parse_key_limit(bad).is_err(), "{bad}");
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -236,6 +314,9 @@ async fn main() -> Result<()> {
             max_streams,
             max_bitrate_kbps,
             reject_concurrent,
+            key_limits,
+            tls_cert,
+            tls_key,
             record_dir,
             record_depth_secs,
             keep_generations,
@@ -244,8 +325,9 @@ async fn main() -> Result<()> {
             whip_udp_port,
         } => {
             let host = if public { "0.0.0.0" } else { "127.0.0.1" };
+            let scheme = if tls_cert.is_some() { "https" } else { "http" };
             println!(
-                "live server on http://{host}:{port}\n  publish: POST a WebM (AV1/VP9 + Opus) to /ingest/<key>\n  play   : http://{host}:{port}/<key>/master.m3u8"
+                "live server on {scheme}://{host}:{port}\n  publish: POST a WebM (AV1/VP9 + Opus) to /ingest/<key>\n  play   : {scheme}://{host}:{port}/<key>/master.m3u8"
             );
             let server = tpt_kinetix_stream::LiveServer::new(tpt_kinetix_package::LiveOptions {
                 segment_seconds,
@@ -258,12 +340,34 @@ async fn main() -> Result<()> {
                 max_streams,
                 max_bitrate_bps: max_bitrate_kbps.map(|k| k * 1000),
                 reject_concurrent,
+                key_limits: key_limits.into_iter().collect(),
                 ..Default::default()
             });
             let server = server.with_whip(tpt_kinetix_stream::WhipConfig {
                 candidate_ips: whip_candidate_ips,
                 udp_port: whip_udp_port,
             });
+            #[cfg(feature = "tls")]
+            let tls = match (&tls_cert, &tls_key) {
+                (Some(c), Some(k)) => Some(tpt_kinetix_stream::rtmp::RtmpsIdentity {
+                    cert_chain_pem: std::fs::read(c)
+                        .with_context(|| format!("read {}", c.display()))?,
+                    key_pem: std::fs::read(k).with_context(|| format!("read {}", k.display()))?,
+                }),
+                _ => None,
+            };
+            #[cfg(feature = "tls")]
+            let server = match &tls {
+                Some(id) => {
+                    println!("  tls    : HTTPS / wss:// (and RTMPS)");
+                    server.with_tls(id)?
+                }
+                None => server,
+            };
+            #[cfg(not(feature = "tls"))]
+            if tls_cert.is_some() || tls_key.is_some() {
+                anyhow::bail!("--tls-cert/--tls-key need a build with `--features tls`");
+            }
             let server = match record_dir {
                 Some(dir) => {
                     println!(
@@ -285,6 +389,9 @@ async fn main() -> Result<()> {
                 println!(
                     "  rtmp   : rtmp://{host}:{rtmp}/live/<key> (Enhanced RTMP: AV1/VP9 + Opus)"
                 );
+                #[cfg(feature = "tls")]
+                let rtmp_server = server.rtmp_server(&format!("{host}:{rtmp}"), tls.clone());
+                #[cfg(not(feature = "tls"))]
                 let rtmp_server = server.rtmp_server(&format!("{host}:{rtmp}"), None);
                 tokio::spawn(async move {
                     if let Err(e) = rtmp_server.run().await {

@@ -106,6 +106,8 @@ pub struct RtmpLiveSession {
     /// Video `trackId` -> packager track index, fixed when the tracks are announced.
     track_index: std::collections::HashMap<u8, usize>,
     warned_track: bool,
+    /// Colour description from an Enhanced RTMP `colorInfo` metadata packet.
+    color: Option<tpt_kinetix_core::stream::VideoColor>,
     announced: bool,
     has_audio_track: bool,
     first_ts: Option<u32>,
@@ -129,6 +131,7 @@ impl RtmpLiveSession {
             expect_multitrack: false,
             track_index: Default::default(),
             warned_track: false,
+            color: None,
             announced: false,
             has_audio_track: false,
             first_ts: None,
@@ -172,8 +175,12 @@ impl RtmpLiveSession {
             // publish so an HDR OBS feed is visible, but do not feed it to
             // the packager as coded frames.
             RtmpMediaEvent::Hdr { hdr, .. } => {
-                if !self.warned_codec {
-                    tracing::info!(bytes = hdr.raw.len(), "RTMP HDR metadata");
+                match hdr.to_video_color() {
+                    // Carried into the video tracks' `colr` / `mdcv` / `clli`
+                    // when the tracks are announced.
+                    Some(color) if !self.announced => self.color = Some(color),
+                    Some(_) => tracing::warn!("RTMP HDR metadata arrived after the init segment"),
+                    None => tracing::info!(bytes = hdr.raw.len(), "unusable RTMP HDR metadata"),
                 }
                 return;
             }
@@ -248,7 +255,7 @@ impl RtmpLiveSession {
     fn spawn_idle_watchdog(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         let (Some(idle), Some(live), Ok(rt)) = (
-            self.server.idle_timeout(),
+            self.server.idle_timeout(&self.key),
             self.live.clone(),
             tokio::runtime::Handle::try_current(),
         ) else {
@@ -409,6 +416,7 @@ impl RtmpLiveSession {
         for (i, (id, v)) in self.videos.iter().enumerate() {
             let mut info = v.info.clone().unwrap();
             info.index = i as u32;
+            info.color = self.color;
             tracks.push(info);
             self.track_index.insert(*id, i);
         }
@@ -437,9 +445,9 @@ impl RtmpLiveSession {
         }
         self.received += q.data.len() as u64;
         self.server.count_publish_bytes(q.data.len() as u64);
-        if let Err(why) = self
-            .server
-            .check_rtmp_progress(self.started.elapsed(), self.received)
+        if let Err(why) =
+            self.server
+                .check_rtmp_progress(&self.key, self.started.elapsed(), self.received)
         {
             tracing::warn!(key = %self.key, "RTMP publish cut off: {why}");
             // What was already published stays playable; the slot is released.

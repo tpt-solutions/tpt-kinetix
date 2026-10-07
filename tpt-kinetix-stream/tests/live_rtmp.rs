@@ -108,6 +108,51 @@ fn opus_head(dops: &[u8]) -> Vec<u8> {
 }
 
 /// Publishes `src` over Enhanced RTMP to `port` under `key`, then disconnects.
+/// An Enhanced RTMP `colorInfo` payload: BT.2020 / PQ, MaxCLL 1000, MaxFALL 400
+/// and a P3-D65 mastering display of 0.0001-1000 cd/m².
+fn color_info() -> Vec<u8> {
+    let obj = |kv: &[(&str, f64)]| {
+        Amf0Value::Object(
+            kv.iter()
+                .map(|(k, v)| (k.to_string(), Amf0Value::Number(*v)))
+                .collect(),
+        )
+    };
+    amf::encode_all(&[
+        Amf0Value::String("colorInfo".into()),
+        Amf0Value::Object(vec![
+            (
+                "colorConfig".into(),
+                obj(&[
+                    ("bitDepth", 10.0),
+                    ("colorPrimaries", 9.0),
+                    ("transferCharacteristics", 16.0),
+                    ("matrixCoefficients", 9.0),
+                ]),
+            ),
+            (
+                "hdrCll".into(),
+                obj(&[("maxFall", 400.0), ("maxCLL", 1000.0)]),
+            ),
+            (
+                "hdrMdcv".into(),
+                obj(&[
+                    ("redX", 0.68),
+                    ("redY", 0.32),
+                    ("greenX", 0.265),
+                    ("greenY", 0.69),
+                    ("blueX", 0.15),
+                    ("blueY", 0.06),
+                    ("whitePointX", 0.3127),
+                    ("whitePointY", 0.329),
+                    ("maxLuminance", 1000.0),
+                    ("minLuminance", 0.0001),
+                ]),
+            ),
+        ]),
+    ])
+}
+
 async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config: bool) {
     publish_inner(port, key, src, with_audio_config, None).await
 }
@@ -213,14 +258,14 @@ async fn publish_inner(
     ))
     .await
     .unwrap();
-    // An HDR metadata packet (Enhanced RTMP): the server must accept it without
-    // disturbing the media flow.
+    // An HDR metadata packet (Enhanced RTMP `colorInfo`): it must reach the init
+    // segment as `colr` / `mdcv` / `clli` without disturbing the media flow.
     wr.write_all(&chunks(
         4,
         0,
         9,
         1,
-        &ex(0x80 | 0x10 | 4, fourcc, &[1, 2, 3, 4]),
+        &ex(0x80 | 0x10 | 4, fourcc, &color_info()),
         CHUNK,
     ))
     .await
@@ -900,5 +945,46 @@ async fn multitrack_rtmp_publish_becomes_a_ladder() {
             "rendition {track} decodes differently from the source"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn rtmp_color_info_reaches_the_init_segment() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livertmp_{}_color", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(&dir, &["-c:v", "libvpx-vp9", "-b:v", "300k"], 3) else {
+        eprintln!("skipping: encoder unavailable");
+        return;
+    };
+    let (http, rtmp) = start().await;
+    publish(rtmp, "hdr", &src, true).await;
+    let playlist = wait_complete(http, "hdr").await;
+    let map = playlist
+        .lines()
+        .find_map(|l| l.strip_prefix("#EXT-X-MAP:URI=\""))
+        .and_then(|l| l.split('"').next())
+        .unwrap_or_else(|| panic!("no EXT-X-MAP in {playlist}"));
+    let (code, init) = http_get(http, &format!("/hdr/{map}")).await;
+    assert_eq!(code, 200);
+    let find = |kind: &[u8; 4]| init.windows(4).position(|w| w == kind);
+    // colr: 'nclx', BT.2020 (9), PQ (16), BT.2020 NCL (9), limited range.
+    let colr = find(b"colr").expect("colr box");
+    assert_eq!(&init[colr + 4..colr + 15], b"nclx 	  	 ");
+    // mdcv: G, B, R, white point, then max / min luminance.
+    let mdcv = find(b"mdcv").expect("mdcv box");
+    let want: Vec<u8> = [13250u16, 34500, 7500, 3000, 34000, 16000, 15635, 16450]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .chain(10_000_000u32.to_be_bytes())
+        .chain(1u32.to_be_bytes())
+        .collect();
+    assert_eq!(&init[mdcv + 4..mdcv + 4 + 24], &want[..]);
+    // clli: MaxCLL then MaxFALL.
+    let clli = find(b"clli").expect("clli box");
+    assert_eq!(&init[clli + 4..clli + 8], &[0x03, 0xE8, 0x01, 0x90]);
     let _ = std::fs::remove_dir_all(&dir);
 }

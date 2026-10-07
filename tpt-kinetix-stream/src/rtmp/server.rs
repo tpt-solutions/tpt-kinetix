@@ -214,24 +214,34 @@ impl RtmpServer {
     /// Build the TLS acceptor for RTMPS from [`RtmpConfig::tls`].
     #[cfg(feature = "rtmps")]
     fn tls_acceptor(&self) -> anyhow::Result<Option<std::sync::Arc<tokio_rustls::TlsAcceptor>>> {
-        let Some(id) = &self.config.tls else {
-            return Ok(None);
-        };
-        use std::io::BufReader;
-        use tokio_rustls::rustls;
-        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut BufReader::new(&id.cert_chain_pem[..]))
-                .collect::<Result<Vec<_>, _>>()?;
-        anyhow::ensure!(!certs.is_empty(), "RTMPS identity has no certificates");
-        let key = rustls_pemfile::private_key(&mut BufReader::new(&id.key_pem[..]))?
-            .ok_or_else(|| anyhow::anyhow!("RTMPS identity has no private key"))?;
-        let cfg = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
-        Ok(Some(std::sync::Arc::new(tokio_rustls::TlsAcceptor::from(
-            std::sync::Arc::new(cfg),
-        ))))
+        self.config.tls.as_ref().map(build_tls_acceptor).transpose()
     }
+}
+
+/// A TLS acceptor for `id` (shared by RTMPS and the live server's HTTPS / `wss://`).
+#[cfg(feature = "rtmps")]
+pub(crate) fn build_tls_acceptor(
+    id: &RtmpsIdentity,
+) -> anyhow::Result<std::sync::Arc<tokio_rustls::TlsAcceptor>> {
+    use std::io::BufReader;
+    use tokio_rustls::rustls;
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut BufReader::new(&id.cert_chain_pem[..]))
+            .collect::<Result<Vec<_>, _>>()?;
+    anyhow::ensure!(!certs.is_empty(), "TLS identity has no certificates");
+    let key = rustls_pemfile::private_key(&mut BufReader::new(&id.key_pem[..]))?
+        .ok_or_else(|| anyhow::anyhow!("TLS identity has no private key"))?;
+    // An explicit provider: when another crate in the build enables a second one,
+    // rustls cannot choose a process default and `builder()` would panic.
+    let cfg = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)?;
+    Ok(std::sync::Arc::new(tokio_rustls::TlsAcceptor::from(
+        std::sync::Arc::new(cfg),
+    )))
 }
 
 /// Chunk stream ids we use when writing responses.

@@ -41,4 +41,7 @@ tpt-kinetix-package = { workspace = true }
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 tokio-test = "0.4"
+# The TLS ingest test (feature `rtmps`) plays the client side.
+tokio-rustls = "0.26"
+rustls-pemfile = "2.2"
 tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }

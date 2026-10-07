@@ -20,7 +20,7 @@ pub use hls::{
     server::{HlsConfig, HlsPackager},
 };
 pub use live::LiveServer;
-pub use policy::IngestPolicy;
+pub use policy::{IngestPolicy, KeyLimits};
 pub use record::{Recorder, RecordingLimits};
 pub use rtmp::server::{RtmpConfig, RtmpServer};
 pub use rtmp_live::RtmpLiveSession;

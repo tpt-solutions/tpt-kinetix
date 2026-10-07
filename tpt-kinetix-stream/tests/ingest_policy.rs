@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tpt_kinetix_package::LiveOptions;
-use tpt_kinetix_stream::{IngestPolicy, LiveServer};
+use tpt_kinetix_stream::{IngestPolicy, KeyLimits, LiveServer};
 
 async fn start(policy: IngestPolicy) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -175,4 +175,49 @@ async fn publisher_slot_is_released_when_it_disconnects() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("slot never released after the publisher dropped");
+}
+
+/// A key's own limits replace the global ones, in both directions: a studio key
+/// may exceed a strict global byte limit, and a guest key may be held tighter
+/// than a generous global idle timeout.
+#[tokio::test]
+async fn per_key_limits_override_the_global_ones() {
+    let port = start(IngestPolicy {
+        max_bytes: Some(100),
+        idle_timeout: Some(Duration::from_secs(60)),
+        key_limits: [
+            (
+                "studio".to_string(),
+                KeyLimits {
+                    max_bytes: Some(1 << 20),
+                    ..Default::default()
+                },
+            ),
+            (
+                "guest".to_string(),
+                KeyLimits {
+                    idle_timeout: Some(Duration::from_millis(300)),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    })
+    .await;
+    // The global byte limit still applies to an unlisted key...
+    let (st, _) = http(port, "POST", "/ingest/cam", "", &[0u8; 4096]).await;
+    assert_eq!(st, 413);
+    // ...but not to the key with its own, larger one. (The bytes are not a WebM,
+    // so the publish ends in a parse error rather than a limit status.)
+    let (st, _) = http(port, "POST", "/ingest/studio", "", &[0u8; 4096]).await;
+    assert_ne!(st, 413, "the studio key's own byte limit applies");
+    // The guest key is cut off by its own short idle timeout, not the 60 s global one.
+    let mut s = hanging_publish(port, "/ingest/guest").await;
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf))
+        .await
+        .expect("the guest key's idle timeout should cut it off")
+        .unwrap();
+    assert_eq!(status_of(&buf), 408);
 }

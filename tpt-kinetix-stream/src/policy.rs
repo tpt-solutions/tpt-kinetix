@@ -17,6 +17,9 @@ pub struct IngestPolicy {
     pub token: Option<String>,
     /// Per-key tokens; a key listed here needs *its* token instead of `token`.
     pub key_tokens: HashMap<String, String>,
+    /// Per-key limits; each field set here replaces the global one for that key
+    /// (a trusted studio feed can be allowed more than an open guest key).
+    pub key_limits: HashMap<String, KeyLimits>,
     /// Abort a publish that sends nothing for this long.
     pub idle_timeout: Option<Duration>,
     /// Abort a publish that has run this long.
@@ -28,9 +31,26 @@ pub struct IngestPolicy {
     pub max_bytes: Option<u64>,
     /// Refuse a publish when this many streams are already live.
     pub max_streams: Option<usize>,
+    /// How long a WebSocket publisher may stay silent before the server pings it
+    /// (and, after a second silent interval, drops it). `None` means 15 s.
+    pub ws_ping_interval: Option<Duration>,
     /// Refuse (409) a second publisher on a key that is live, instead of
     /// replacing the presentation.
     pub reject_concurrent: bool,
+}
+
+/// Limits for one stream key. A `Some` field replaces the matching global limit
+/// of [`IngestPolicy`] for that key; `None` keeps the global one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyLimits {
+    /// Replaces [`IngestPolicy::idle_timeout`].
+    pub idle_timeout: Option<Duration>,
+    /// Replaces [`IngestPolicy::max_duration`].
+    pub max_duration: Option<Duration>,
+    /// Replaces [`IngestPolicy::max_bitrate_bps`].
+    pub max_bitrate_bps: Option<u64>,
+    /// Replaces [`IngestPolicy::max_bytes`].
+    pub max_bytes: Option<u64>,
 }
 
 /// Why a publish was refused or cut off.
@@ -117,15 +137,32 @@ impl IngestPolicy {
         }
     }
 
-    /// Checks a running publish against the limits.
-    pub(crate) fn check_progress(&self, elapsed: Duration, bytes: u64) -> Result<(), Refusal> {
-        if self.max_bytes.is_some_and(|m| bytes > m) {
+    /// The limits that apply to `key`: its overrides over the global ones.
+    pub(crate) fn limits_for(&self, key: &str) -> KeyLimits {
+        let k = self.key_limits.get(key).copied().unwrap_or_default();
+        KeyLimits {
+            idle_timeout: k.idle_timeout.or(self.idle_timeout),
+            max_duration: k.max_duration.or(self.max_duration),
+            max_bitrate_bps: k.max_bitrate_bps.or(self.max_bitrate_bps),
+            max_bytes: k.max_bytes.or(self.max_bytes),
+        }
+    }
+
+    /// Checks a running publish on `key` against its limits.
+    pub(crate) fn check_progress(
+        &self,
+        key: &str,
+        elapsed: Duration,
+        bytes: u64,
+    ) -> Result<(), Refusal> {
+        let limits = self.limits_for(key);
+        if limits.max_bytes.is_some_and(|m| bytes > m) {
             return Err(Refusal::ByteLimit);
         }
-        if self.max_duration.is_some_and(|m| elapsed > m) {
+        if limits.max_duration.is_some_and(|m| elapsed > m) {
             return Err(Refusal::DurationLimit);
         }
-        if let Some(max) = self.max_bitrate_bps {
+        if let Some(max) = limits.max_bitrate_bps {
             let secs = elapsed.as_secs_f64();
             if secs >= 2.0 && (bytes as f64 * 8.0 / secs) > max as f64 {
                 return Err(Refusal::BitrateExceeded);
@@ -311,18 +348,18 @@ mod tests {
             ..Default::default()
         };
         // 1 s in: inside the grace period, bitrate is not judged yet.
-        assert!(p.check_progress(Duration::from_secs(1), 5_000).is_ok());
+        assert!(p.check_progress("k", Duration::from_secs(1), 5_000).is_ok());
         // 4 s, 8000 B = 16 kbit/s > 8 kbit/s.
         assert_eq!(
-            p.check_progress(Duration::from_secs(4), 8_000),
+            p.check_progress("k", Duration::from_secs(4), 8_000),
             Err(Refusal::BitrateExceeded)
         );
         assert_eq!(
-            p.check_progress(Duration::from_secs(4), 20_000),
+            p.check_progress("k", Duration::from_secs(4), 20_000),
             Err(Refusal::ByteLimit)
         );
         assert_eq!(
-            p.check_progress(Duration::from_secs(61), 1),
+            p.check_progress("k", Duration::from_secs(61), 1),
             Err(Refusal::DurationLimit)
         );
     }
