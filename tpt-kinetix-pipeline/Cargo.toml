@@ -1,6 +1,6 @@
 [package]
 name = "tpt-kinetix-pipeline"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -28,7 +28,7 @@ default = ["codec-vp9"]
 codec-vp9 = ["dep:tpt-kinetix-vp9"]
 
 [dev-dependencies]
-tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
 criterion = { workspace = true }
 
 [[bench]]

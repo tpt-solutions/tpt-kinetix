@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-08
+
+### Fixed
+
+- Publishing: added missing `version` requirements on internal dependencies, broke the demux/mux
+  dev-dependency cycle, and bumped all crates to 0.1.1 (0.1.0 of `tpt-kinetix-core` on crates.io predates
+  the current API).
+
 ### Changed
 
 - H.264 is no longer published. The decoder crate was renamed `tpt-kinetix-h264` ->

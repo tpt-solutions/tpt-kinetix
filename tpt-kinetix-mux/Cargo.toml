@@ -1,6 +1,6 @@
 [package]
 name = "tpt-kinetix-mux"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,7 +17,7 @@ thiserror = { workspace = true }
 tpt-kinetix-core = { workspace = true }
 
 [dev-dependencies]
-tpt-kinetix-demux = { workspace = true }
+tpt-kinetix-demux = { path = "../tpt-kinetix-demux" }
 criterion = { workspace = true }
 proptest = "1.5"
 

@@ -1,6 +1,6 @@
 [package]
 name = "tpt-kinetix-volumetric"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,13 +13,13 @@ readme = "README.md"
 documentation = "https://docs.rs/tpt-kinetix-volumetric"
 
 [dependencies]
-tpt-kinetix-core = { path = "../tpt-kinetix-core" }
-tpt-kinetix-bitstream = { path = "../tpt-kinetix-bitstream" }
+tpt-kinetix-core = { workspace = true }
+tpt-kinetix-bitstream = { workspace = true }
 thiserror = "2"
 nom = "8"
 
 [dev-dependencies]
-tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.1.0" }
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils" }
 criterion = { workspace = true }
 
 [[bench]]

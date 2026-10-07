@@ -45,6 +45,7 @@ pub struct WhipConfig {
 #[derive(Clone, Default)]
 pub(crate) struct WhipSessions(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
 
+#[cfg_attr(not(feature = "whip"), allow(dead_code))]
 impl WhipSessions {
     pub(crate) fn insert(&self, id: String, stop: oneshot::Sender<()>) {
         self.0.lock().unwrap().insert(id, stop);
@@ -72,6 +73,7 @@ impl WhipSessions {
 }
 
 /// Whether a VP9 frame is a key frame (uncompressed header: `frame_type == 0`).
+#[cfg_attr(not(feature = "whip"), allow(dead_code))]
 pub(crate) fn vp9_is_key(frame: &[u8]) -> bool {
     let Some(&b0) = frame.first() else {
         return false;
@@ -95,6 +97,7 @@ pub(crate) fn vp9_is_key(frame: &[u8]) -> bool {
 
 /// A minimal `OpusHead` identification header for a WebRTC Opus stream (always
 /// 48 kHz; WebRTC carries no pre-skip, so the usual 312 is used).
+#[cfg_attr(not(feature = "whip"), allow(dead_code))]
 pub(crate) fn opus_head(channels: u8) -> Vec<u8> {
     let mut h = b"OpusHead".to_vec();
     h.push(1); // version

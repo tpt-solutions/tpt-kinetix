@@ -214,12 +214,16 @@ fn parse_color_config(r: &mut Bits, reduced: bool, info: &mut SeqInfo) -> Option
         }
     }
     r.bits(3)?; // enable_superres, enable_cdef, enable_restoration
-    // color_config()
+                // color_config()
     info.high_bitdepth = r.bit()? == 1;
     if info.profile == 2 && info.high_bitdepth {
         info.twelve_bit = r.bit()? == 1;
     }
-    info.mono = if info.profile == 1 { false } else { r.bit()? == 1 };
+    info.mono = if info.profile == 1 {
+        false
+    } else {
+        r.bit()? == 1
+    };
     let (cp, tc, mc) = if r.bit()? == 1 {
         (r.bits(8)?, r.bits(8)?, r.bits(8)?)
     } else {
@@ -570,7 +574,9 @@ mod tests {
     fn av1c_is_synthesised_from_a_sequence_header() {
         // A real libaom 4:2:0 8-bit stream's av1C, and the same stream as bare
         // OBUs (temporal delimiter, then the sequence header).
-        let seq = [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x02, 0xAF, 0xF7, 0x9B, 0x5F, 0x20, 0x08];
+        let seq = [
+            0x0A, 0x0A, 0x00, 0x00, 0x00, 0x02, 0xAF, 0xF7, 0x9B, 0x5F, 0x20, 0x08,
+        ];
         let record = [&[0x81, 0x00, 0x0C, 0x00][..], &seq[..]].concat();
         let stream = [&[0x12, 0x00][..], &seq[..], &[0x32, 0x01, 0x00][..]].concat();
         assert_eq!(av1c_from_sequence_header(&stream), Some(record.clone()));

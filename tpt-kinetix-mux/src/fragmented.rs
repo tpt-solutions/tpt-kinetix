@@ -293,7 +293,10 @@ fn build_sidx(track: &Track, samples: &[Sample], ref_len: u32) -> Vec<u8> {
         .min()
         .unwrap_or(0)
         .max(0) as u64;
-    let duration: u64 = samples.iter().map(|s| u64::from(s.duration.unwrap_or(0))).sum();
+    let duration: u64 = samples
+        .iter()
+        .map(|s| u64::from(s.duration.unwrap_or(0)))
+        .sum();
     let sap = samples[0].key;
     let mut p = Vec::new();
     p.extend_from_slice(&1u32.to_be_bytes()); // reference_ID (track id)

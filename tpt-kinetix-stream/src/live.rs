@@ -1146,6 +1146,7 @@ async fn end_publish(r: &mut BufReader<Conn>, ws: bool, reply: Reply) -> Result<
 }
 
 /// A hard-to-guess session id (the clock plus a process-wide counter, hashed).
+#[cfg_attr(not(feature = "whip"), allow(dead_code))]
 fn rand_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};

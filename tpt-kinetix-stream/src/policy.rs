@@ -116,6 +116,7 @@ fn presented_token<'a>(headers: &'a HashMap<String, String>, query: &'a str) -> 
 
 impl IngestPolicy {
     /// The publish token a request presents (bearer header or `?token=`), if any.
+    #[cfg_attr(not(feature = "whip"), allow(dead_code))]
     pub(crate) fn presented(headers: &HashMap<String, String>, query: &str) -> Option<String> {
         presented_token(headers, query).map(str::to_string)
     }

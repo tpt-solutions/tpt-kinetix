@@ -3,13 +3,16 @@
 Tracks which workspace crates are published to crates.io. Tick a box once the crate is live
 on crates.io, and fill in the version and date.
 
-- Shared version across all crates (currently `0.1.0`); see README "Publish order".
+- Shared version across all crates (currently `0.1.1`); see README "Publish order".
 - Publish list is defined by `publish = ...` in `release-plz.toml` and each crate's `Cargo.toml`.
-- Status below was **not verified against crates.io** when this file was written — everything
-  starts unticked. Check with `cargo search tpt-kinetix` or `https://crates.io/crates/<name>`.
+- Verified against crates.io 2026-10-08: only `tpt-kinetix-core` 0.1.0 is live (stale vs. the workspace).
+  `0.1.1` is the first coherent release. Check with `cargo search tpt-kinetix`.
+- `cargo publish --workspace --dry-run` passes for all 18 crates at 0.1.1 (it publishes in dependency order,
+  so the per-wave tables below are informational). demux<->mux is a dev-dependency cycle, broken with
+  path-only (version-less) dev-deps, which cargo strips on publish.
 - Git tag `v0.1.0` exists (2026-07-19), but a tag alone does not mean the crates were published.
 
-## Will be published (19 workspace members → 17 published)
+## Will be published (20 workspace members → 18 published)
 
 Grouped by dependency wave: publish a wave only after every crate in the earlier waves is live.
 
@@ -41,14 +44,15 @@ Grouped by dependency wave: publish a wave only after every crate in the earlier
 | [ ] | `tpt-kinetix-vision` | core, bitstream | | |
 | [ ] | `tpt-kinetix-face` | core, bitstream | | |
 | [ ] | `tpt-kinetix-volumetric` | core, bitstream | | |
+| [ ] | `tpt-kinetix-package` | core, demux, mux | | |
 | [ ] | `tpt-kinetix-pipeline` | core, demux, vp9, av1 | | |
-| [ ] | `tpt-kinetix-stream` | none at runtime (core/demux are dev-deps) | | |
+| [ ] | `tpt-kinetix-stream` | core, demux, package | | |
 
 ### Wave 4 — final
 
 | Done | Crate | Depends on | Version | Published on |
 |:---:|---|---|---|---|
-| [ ] | `tpt-kinetix-cli` | core, demux, vp9, av1, vision, bitstream, pipeline, stream | | |
+| [ ] | `tpt-kinetix-cli` | core, demux, mux, package, vp9, av1, vision, bitstream, pipeline, stream | | |
 
 ## Will NOT be published
 
@@ -62,7 +66,7 @@ Grouped by dependency wave: publish a wave only after every crate in the earlier
 Reserve names before the first real publish (see README "crates.io name reservation"). Tick when
 the name is claimed on crates.io (a real release also counts).
 
-- [ ] `tpt-kinetix-core`
+- [x] `tpt-kinetix-core`
 - [ ] `tpt-kinetix-kg`
 - [ ] `tpt-kinetix-demux`
 - [ ] `tpt-kinetix-mux`
@@ -76,6 +80,7 @@ the name is claimed on crates.io (a real release also counts).
 - [ ] `tpt-kinetix-vision`
 - [ ] `tpt-kinetix-face`
 - [ ] `tpt-kinetix-volumetric`
+- [ ] `tpt-kinetix-package`
 - [ ] `tpt-kinetix-pipeline`
 - [ ] `tpt-kinetix-stream`
 - [ ] `tpt-kinetix-cli`

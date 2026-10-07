@@ -25,6 +25,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Inspect a media container and print its tracks (demux-only, runnable today).
     Probe {
@@ -261,37 +262,6 @@ fn parse_key_limit(arg: &str) -> Result<(String, tpt_kinetix_stream::KeyLimits),
         }
     }
     Ok((key.to_string(), limits))
-}
-
-#[cfg(test)]
-mod key_limit_tests {
-    use super::parse_key_limit;
-    use std::time::Duration;
-
-    #[test]
-    fn parses_any_subset_of_limits() {
-        let (key, l) =
-            parse_key_limit("studio:idle_timeout=2.5,max_bitrate_kbps=20000,max_bytes=99").unwrap();
-        assert_eq!(key, "studio");
-        assert_eq!(l.idle_timeout, Some(Duration::from_millis(2500)));
-        assert_eq!(l.max_bitrate_bps, Some(20_000_000));
-        assert_eq!(l.max_bytes, Some(99));
-        assert_eq!(l.max_duration, None);
-    }
-
-    #[test]
-    fn rejects_malformed_input() {
-        for bad in [
-            "nokey",
-            ":max_bytes=1",
-            "k:max_bytes",
-            "k:max_bytes=x",
-            "k:bogus=1",
-            "k:idle_timeout=-1",
-        ] {
-            assert!(parse_key_limit(bad).is_err(), "{bad}");
-        }
-    }
 }
 
 #[tokio::main]
@@ -1484,4 +1454,35 @@ fn write_frame_ppm(path: &std::path::Path, vf: &tpt_kinetix_core::frame::VideoFr
     }
     std::fs::write(path, &out).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod key_limit_tests {
+    use super::parse_key_limit;
+    use std::time::Duration;
+
+    #[test]
+    fn parses_any_subset_of_limits() {
+        let (key, l) =
+            parse_key_limit("studio:idle_timeout=2.5,max_bitrate_kbps=20000,max_bytes=99").unwrap();
+        assert_eq!(key, "studio");
+        assert_eq!(l.idle_timeout, Some(Duration::from_millis(2500)));
+        assert_eq!(l.max_bitrate_bps, Some(20_000_000));
+        assert_eq!(l.max_bytes, Some(99));
+        assert_eq!(l.max_duration, None);
+    }
+
+    #[test]
+    fn rejects_malformed_input() {
+        for bad in [
+            "nokey",
+            ":max_bytes=1",
+            "k:max_bytes",
+            "k:max_bytes=x",
+            "k:bogus=1",
+            "k:idle_timeout=-1",
+        ] {
+            assert!(parse_key_limit(bad).is_err(), "{bad}");
+        }
+    }
 }

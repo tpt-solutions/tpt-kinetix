@@ -1,6 +1,6 @@
 [package]
 name = "tpt-kinetix-demux"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -33,7 +33,7 @@ http = ["dep:ureq"]
 [dev-dependencies]
 proptest = "1.5"
 criterion = { workspace = true }
-tpt-kinetix-mux = { workspace = true }
+tpt-kinetix-mux = { path = "../tpt-kinetix-mux" }
 
 [[bench]]
 name = "container_demux"

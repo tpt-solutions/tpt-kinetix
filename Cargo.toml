@@ -57,23 +57,23 @@ criterion = { version = "0.8", features = ["html_reports"] }
 crossbeam-channel = "0.5"
 
 # Internal crates (path for local dev; version required for crates.io publish)
-tpt-kinetix-core = { path = "tpt-kinetix-core", version = "0.1.0" }
-tpt-kinetix-demux = { path = "tpt-kinetix-demux", version = "0.1.0" }
-out-kinetix-h264 = { path = "out-kinetix-h264", version = "0.1.0" }
-tpt-kinetix-av1 = { path = "tpt-kinetix-av1", version = "0.1.0" }
-tpt-kinetix-vp9 = { path = "tpt-kinetix-vp9", version = "0.1.0" }
-tpt-kinetix-lean = { path = "tpt-kinetix-lean", version = "0.1.0" }
-tpt-kinetix-bitstream = { path = "tpt-kinetix-bitstream", version = "0.1.0" }
-tpt-kinetix-realtime = { path = "tpt-kinetix-realtime", version = "0.1.0" }
-tpt-kinetix-screen = { path = "tpt-kinetix-screen", version = "0.1.0" }
-tpt-kinetix-vision = { path = "tpt-kinetix-vision", version = "0.1.0" }
-tpt-kinetix-face = { path = "tpt-kinetix-face", version = "0.1.0" }
-tpt-kinetix-volumetric = { path = "tpt-kinetix-volumetric", version = "0.1.0" }
-tpt-kinetix-lossless = { path = "tpt-kinetix-lossless", version = "0.1.0" }
-tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.1.0" }
-tpt-kinetix-package = { path = "tpt-kinetix-package", version = "0.1.0" }
-tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.0", default-features = false }
-tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.0", default-features = false }
+tpt-kinetix-core = { path = "tpt-kinetix-core", version = "0.1.1" }
+tpt-kinetix-demux = { path = "tpt-kinetix-demux", version = "0.1.1" }
+out-kinetix-h264 = { path = "out-kinetix-h264", version = "0.1.1" }
+tpt-kinetix-av1 = { path = "tpt-kinetix-av1", version = "0.1.1" }
+tpt-kinetix-vp9 = { path = "tpt-kinetix-vp9", version = "0.1.1" }
+tpt-kinetix-lean = { path = "tpt-kinetix-lean", version = "0.1.1" }
+tpt-kinetix-bitstream = { path = "tpt-kinetix-bitstream", version = "0.1.1" }
+tpt-kinetix-realtime = { path = "tpt-kinetix-realtime", version = "0.1.1" }
+tpt-kinetix-screen = { path = "tpt-kinetix-screen", version = "0.1.1" }
+tpt-kinetix-vision = { path = "tpt-kinetix-vision", version = "0.1.1" }
+tpt-kinetix-face = { path = "tpt-kinetix-face", version = "0.1.1" }
+tpt-kinetix-volumetric = { path = "tpt-kinetix-volumetric", version = "0.1.1" }
+tpt-kinetix-lossless = { path = "tpt-kinetix-lossless", version = "0.1.1" }
+tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.1.1" }
+tpt-kinetix-package = { path = "tpt-kinetix-package", version = "0.1.1" }
+tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.1", default-features = false }
+tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.1", default-features = false }
 
 [profile.release]
 # Phase 3b item 1 of todo-perf.md. The workspace shipped with no release profile
