@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
+
+### Other
+
+- bump all crates to 0.1.1 and fix crates.io publishing
+- AV1 SIMD helpers and bitreader speedups; H.264 env-debug hooks; VP9 div128 fixture notes
+- cache Hadamard matrices, remove per-block allocations, bound block size
+- Add ffmpeg comparison harness and fix codec bugs it surfaced
+- Add per-crate Criterion benches, perf baseline/compare tooling, and publishing docs
+- Tidy repo root: move H.264 oracle sources and tools, drop debug artifacts
+- AV1 decoder and coefficient/inter/transform updates; codec crate conformance reporting updates
+- Add conformance reporting, AV1 decoder updates, and per-crate changelogs
+- Fix decoder bitstream-desync and dequant bugs in AV1, H.264, and AAC
+- Merge branch 'master' of https://github.com/tpt-solutions/tpt-kinetix
+- Advance AAC, AV1, and H.264 decode paths, plus realtime and face codec scaffolding
+- Expand AAC decoder modules and advance H.264/AV1/realtime decode paths
+- Advance H.264/AV1 decode paths and AAC codebook integration
+- Advance H.264/AV1 decode paths and add volumetric codec scaffolding
+- Add new codec crates (face, lossless, realtime, screen, volumetric) and bitstream foundation
+
 ### Changed
 
 - **Performance: the Walsh–Hadamard transform matrices are cached instead of
