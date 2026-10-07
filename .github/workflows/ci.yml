@@ -194,7 +194,7 @@ jobs:
           KINETIX_AV1_FATE_DIR: fixtures/av1-fate
         run: cargo run --release -p tpt-kinetix-test-utils --example conformance_report -- --out conformance-out
       - name: Upload conformance report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: conformance-report
           path: conformance-out
