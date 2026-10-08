@@ -195,6 +195,12 @@ bench-compare BASELINE="docs/perf/baseline-2026-10-03.json" THRESHOLD="5":
 bench-ffmpeg *FLAGS:
     cargo run --release -p tpt-kinetix-test-utils --example ffmpeg_compare -- {{FLAGS}}
 
+# I/O-layer evidence vs ffprobe (todo-io.md M6): probe startup + peak RSS, and a
+# mutated-MP4 hostile-input corpus (crash/hang counts). Flags: --startup --hostile
+# --seed <mp4> --variants <n> --runs <n>. Needs ffprobe; seed from `just bench-ffmpeg --e2e`.
+bench-io *FLAGS:
+    cargo run --release -p tpt-kinetix-test-utils --example io_compare -- {{FLAGS}}
+
 # Fetch the FFmpeg FATE AV1 samples (small) into fixtures/av1-fate/.
 fetch-av1-fate:
     bash tools/fetch-av1-fate.sh

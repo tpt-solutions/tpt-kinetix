@@ -274,6 +274,26 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 
 - [ ] **M6 `just bench-io`**: startup, remote-probe round trips, RSS per stream and streams/core vs ffmpeg
       (RTMP/WebM -> HLS density), hostile-input corpus (ffmpeg crash/hang count vs Kinetix).
+      **Started 2026-10-08** (`just bench-io`, `examples/io_compare.rs`): probe startup + peak RSS (Windows only) and a
+      deterministic 300-variant mutated-MP4 corpus. First result, 64 KiB seed: probe 8.4 ms / 6.9 MiB vs ffprobe
+      25.1 ms / 17.5 MiB; hostile: both 240 ok / 60 rejected / 0 crashes / 0 hangs (so no robustness win shown yet;
+      the seed is tiny, mutations mostly land in mdat). Still open: larger seed, MKV/TS seeds, remote-probe round
+      trips.
+      **Density (`--density`, 2026-10-08)**, 320x240 VP9+Opus passthrough, 20 s window, 20-core box: 40 live streams cost
+      the `live` server 3.7 % of a core and 50 MiB peak RSS vs 53.9 % and 690 MiB for 40 `ffmpeg -c copy -f hls`
+      processes (10 streams: 2.1 % / 19 MiB vs 10.5 % / 172 MiB). Caveats: publishers' own cost is excluded on the
+      Kinetix side; ffmpeg RSS is the sum of per-process peaks; ffmpeg's per-process startup is inside its CPU
+      figure; passthrough only (no transcode); one run.
+      **With viewers** (`--viewers 3`: 3 polling HLS clients per stream, same bytes served by both): 40 streams / 120
+      viewers cost the `live` server 26.5 % of a core and 53 MiB vs 48.8 % for the ffmpeg processes (690 MiB) - the gap
+      narrows to ~2x on CPU because serving, not packaging, dominates; the ffmpeg arm is served by the harness static
+      file server whose CPU is not counted (favourable to ffmpeg), and Kinetix answers ~2.6x more requests (separate
+      audio playlist, per-part polling).
+      **Remote probe** (`--remote`, 18 MiB VP9 MP4, moov at end, delay proxy, best of 5; ffprobe moves more because
+      it reads ahead and the server counts bytes written before the client aborts): RTT 0 ms 11 vs 31 ms; 20 ms
+      102 vs 162 ms (0.2 vs 34.8 MiB moved); 50 ms 222 vs 339 ms; 100 ms 429 vs 648 ms. Both use 3 requests;
+      Kinetix wins ~1.5x on time and 5-175x on bytes. Caveats: localhost proxy models latency not bandwidth; ffprobe
+      untuned (-probesize).
 - [ ] Run the fuzz targets (`fuzz_mp4_reader`, add `fuzz_mkv_stream`, `fuzz_moof`) in CI — local nightly sanitizer broken;
       commit crash regressions to `fuzz/corpus/`.
 - [x] CI jobs for the new end-to-end tests: `wasm-package-test`, `edge-worker-test`, `browser-package-test`,
