@@ -1191,15 +1191,18 @@ fn run_encode_av1_section(cfg: &Config, corpus: &Corpus, report: &mut Report) {
         }
         eprintln!("  {w}x{h} x{} ...", frames.len());
 
-        // Kinetix: CQP quantizer 100 (the crate default quality point).
-        let kinetix = || {
+        // Kinetix: CQP quantizer 100, swept over rav1e speed presets with
+        // auto tiling (libaom below runs cpu-used 8 + row-mt, so speed 6 alone
+        // is not an equal-effort comparison).
+        let kinetix = |speed: u8| {
             let cfg = tpt_kinetix_av1::encoder::Av1EncoderConfig {
                 width: w,
                 height: h,
                 bitrate: 0,
                 quantizer: 100,
-                speed: 6,
+                speed,
                 keyframe_interval: 240,
+                ..Default::default()
             };
             let mut enc = match tpt_kinetix_av1::encoder::Av1Encoder::new(&cfg) {
                 Ok(e) => e,
@@ -1223,16 +1226,22 @@ fn run_encode_av1_section(cfg: &Config, corpus: &Corpus, report: &mut Report) {
             }
             (t.elapsed().as_secs_f64(), bytes, packets)
         };
-        let (k_time, k_bytes, k_packets) = {
-            let (t1, b1, p1) = kinetix();
-            let (t2, b2, p2) = kinetix();
-            if t1 <= t2 {
-                (t1, b1, p1)
-            } else {
-                (t2, b2, p2)
-            }
-        };
-        let k_psnr = mean_y_psnr(&frames, &av1_decode_packets(&k_packets));
+        // (speed, time, bytes, psnr)
+        let mut sweep: Vec<(u8, f64, usize, Option<f64>)> = Vec::new();
+        for speed in [6u8, 8, 10] {
+            let (t1, b1, p1) = kinetix(speed);
+            let (t2, b2, p2) = kinetix(speed);
+            let (t, b, p) = if t1 <= t2 { (t1, b1, p1) } else { (t2, b2, p2) };
+            let psnr = mean_y_psnr(&frames, &av1_decode_packets(&p));
+            println!(
+                "    kinetix speed {speed}: {} ({} KiB, PSNR {})",
+                fmt_secs(t),
+                b / 1024,
+                psnr.map(|p| format!("{p:.2} dB"))
+                    .unwrap_or_else(|| "n/a".into())
+            );
+            sweep.push((speed, t, b, psnr));
+        }
 
         // libaom through ffmpeg, constant quality.
         let out = corpus.dir.join(format!("enc_libaom_{w}x{h}.ivf"));
@@ -1273,13 +1282,26 @@ fn run_encode_av1_section(cfg: &Config, corpus: &Corpus, report: &mut Report) {
         };
         let aom_bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0) as usize;
 
+        // Headline row: the sweep entry whose PSNR is closest to libaom's.
+        let (k_speed, k_time, k_bytes, k_psnr) = sweep
+            .iter()
+            .copied()
+            .min_by(|x, y| {
+                let d = |e: &(u8, f64, usize, Option<f64>)| match (e.3, aom_psnr) {
+                    (Some(a), Some(b)) => (a - b).abs(),
+                    _ => e.1,
+                };
+                d(x).total_cmp(&d(y))
+            })
+            .expect("sweep is non-empty");
+
         report.encode_av1.push(json!({
             "clip": format!("testsrc {w}x{h} x{}", frames.len()),
             "kinetix": {
                 "enc_s": round3(k_time),
                 "bytes": k_bytes,
                 "y_psnr": k_psnr.map(round2),
-                "settings": "CQP q=100 speed=6 keyint=240",
+                "settings": format!("CQP q=100 speed={k_speed} auto-tiles keyint=240"),
             },
             "libaom": {
                 "enc_s": aom.as_ref().map(|b| round3(b.rtime_s)),

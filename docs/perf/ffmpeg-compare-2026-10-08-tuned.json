@@ -1,0 +1,71 @@
+{
+  "date": "2026-10-08",
+  "decode": [],
+  "e2e": [],
+  "elapsed_s": 482.546,
+  "encode_av1": [
+    {
+      "clip": "testsrc 320x240 x120",
+      "kinetix": {
+        "bytes": 12776,
+        "enc_s": 9.324,
+        "settings": "CQP q=100 speed=6 auto-tiles keyint=240",
+        "y_psnr": 50.77
+      },
+      "libaom": {
+        "bytes": 31439,
+        "enc_s": 2.776,
+        "maxrss_kb": 97132,
+        "settings": "CRF 30 cpu-used=8 row-mt=1",
+        "y_psnr": 57.83
+      }
+    },
+    {
+      "clip": "testsrc 1280x720 x90",
+      "kinetix": {
+        "bytes": 20487,
+        "enc_s": 57.654,
+        "settings": "CQP q=100 speed=6 auto-tiles keyint=240",
+        "y_psnr": 57.96
+      },
+      "libaom": {
+        "bytes": 48603,
+        "enc_s": 3.995,
+        "maxrss_kb": 308152,
+        "settings": "CRF 30 cpu-used=8 row-mt=1",
+        "y_psnr": 62.04
+      }
+    }
+  ],
+  "env": {
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+    "cpu": "Intel64 Family 6 Model 191 Stepping 2, GenuineIntel",
+    "decoders": {
+      "ffv1": true,
+      "h264": true,
+      "jpegls": true,
+      "libdav1d": true,
+      "png": true,
+      "vp9": true
+    },
+    "encoders": {
+      "ffv1": true,
+      "jpegls": true,
+      "libaom-av1": true,
+      "librav1e": true,
+      "libvpx-vp9": true,
+      "libx264": true,
+      "png": true
+    },
+    "ffmpeg": "ffmpeg version 2023-12-28-git-c1340f3439-full_build-www.gyan.dev Copyright (c) 2000-2023 the FFmpeg developers",
+    "libavcodec": "libavcodec     60. 36.100 / 60. 36.100",
+    "logical_cores": 20,
+    "os": "Microsoft Windows [Version 10.0.26200.9457]",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "label": "2026-10-08-tuned",
+  "originals": [],
+  "phase": "todo-perf.md Phase 1 (Kinetix vs ffmpeg)",
+  "quick": false,
+  "skipped": []
+}

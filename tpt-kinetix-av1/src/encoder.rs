@@ -22,6 +22,12 @@ pub struct Av1EncoderConfig {
     pub speed: u8,
     /// Maximum interval between keyframes.
     pub keyframe_interval: u64,
+    /// Tile columns (0 = auto, chosen from the frame size). Tiles encode in parallel.
+    pub tile_cols: usize,
+    /// Tile rows (0 = auto).
+    pub tile_rows: usize,
+    /// Worker threads (0 = rav1e's default, all cores).
+    pub threads: usize,
 }
 
 impl Default for Av1EncoderConfig {
@@ -33,6 +39,9 @@ impl Default for Av1EncoderConfig {
             quantizer: 100,
             speed: 6,
             keyframe_interval: 240,
+            tile_cols: 0,
+            tile_rows: 0,
+            threads: 0,
         }
     }
 }
@@ -51,6 +60,7 @@ impl From<EncodeConfig> for Av1EncoderConfig {
             quantizer: cfg.quantizer(),
             speed: cfg.speed.to_speed(),
             keyframe_interval: cfg.keyframe_interval,
+            ..Self::default()
         }
     }
 }
@@ -79,8 +89,12 @@ impl Av1Encoder {
         enc.min_key_frame_interval = config.keyframe_interval / 2;
         enc.chroma_sampling = ChromaSampling::Cs420;
         enc.bit_depth = 8;
+        enc.tile_cols = config.tile_cols;
+        enc.tile_rows = config.tile_rows;
 
-        let rav1e_cfg = Config::new().with_encoder_config(enc);
+        let rav1e_cfg = Config::new()
+            .with_encoder_config(enc)
+            .with_threads(config.threads);
         let context: Context<u8> = rav1e_cfg
             .new_context()
             .with_context(|| "rav1e Config::new_context failed")?;
