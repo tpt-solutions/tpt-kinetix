@@ -246,7 +246,7 @@ pub(crate) fn build_tls_acceptor(
     id: &RtmpsIdentity,
 ) -> anyhow::Result<std::sync::Arc<tokio_rustls::TlsAcceptor>> {
     use tokio_rustls::rustls;
-    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    use tokio_rustls::rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
     let certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(&id.cert_chain_pem[..]).collect::<Result<Vec<_>, _>>()?;
     anyhow::ensure!(!certs.is_empty(), "TLS identity has no certificates");
