@@ -3,10 +3,12 @@
 An original, embedded-first video codec for the
 [TPT Kinetix](https://github.com/tpt-solutions/tpt-kinetix) media engine.
 
-> **Status: scaffold.** Header parsing and the core rANS entropy-coding
-> primitives are implemented and tested; block reconstruction (prediction,
-> transform, in-loop filter) is not. `LeanDecoder::capabilities()` reports
-> `pixel_exact = false` accordingly — see [LIMITATIONS](#limitations).
+> **Status: working, original format.** Block reconstruction (intra and
+> unidirectional-P prediction, integer transforms, in-loop deblock) runs
+> end-to-end. Lean has no external reference decoder, so
+> `LeanDecoder::capabilities()` reports `pixel_exact = false` and
+> `deterministic = true`; a golden-vector test pins the bitstream and output.
+> See [Limitations](#limitations).
 
 Unlike `tpt-kinetix-av1`, which is a from-scratch
 *conformant* implementation of an existing standard, Lean is an original
@@ -30,15 +32,18 @@ genuinely parallel at the entropy-decode stage — see the crate-level docs in
 ## Current capabilities
 
 - Sequence/frame header parsing and validation (`src/headers.rs`)
-- rANS encode/decode primitives + multi-stream framing (`src/rans.rs`)
-- `LeanDecoder::capabilities()` reports `pixel_exact = false`
+- rANS entropy coding via the shared `tpt-kinetix-bitstream` crate
+- Reconstruction: 14-mode intra + unidirectional-P inter prediction
+  (`src/prediction.rs`), integer Walsh–Hadamard/DCT transform bank and dequant
+  (`src/transform.rs`), single-stage deblock (`src/deblock.rs`),
+  wired together in `src/reconstruct.rs`
+- `LeanDecoder::capabilities()` reports `pixel_exact = false`, `deterministic = true`
 
 ## Limitations
 
-Block reconstruction (intra/inter prediction, transform, in-loop filter) is
-not implemented. `LeanDecoder::decode()` returns `Ok(None)` once a frame
-header parses successfully (or `KinetixError::NotPixelExact` in strict
-mode) — it never returns placeholder pixel data.
+- No independent reference decoder exists, so output cannot be called
+  pixel-exact against anything; strict mode returns `KinetixError::NotPixelExact`.
+- v1 envelope: up to 1920×1080, 4 reference frames; `no_std`/MCU support is future work.
 
 ## License
 

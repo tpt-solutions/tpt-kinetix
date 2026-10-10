@@ -11,7 +11,7 @@ workspace.
 Every crate in this workspace needs the same handful of testing capabilities:
 diffing decoded frames, generating synthetic inputs, and comparing against an
 external reference decoder. This crate implements them once so they are not
-copy-pasted into 19 different `dev-dependencies` blocks and drift apart.
+copy-pasted into every crate's `dev-dependencies` blocks and drift apart.
 
 ## Modules
 
@@ -24,10 +24,23 @@ copy-pasted into 19 different `dev-dependencies` blocks and drift apart.
 - **`corpus`** — reusable malformed-input corpora for fuzz-regression tests.
 - **`tmc13`** — drive the MPEG-I G-PCC `tmc3` reference decoder as the
   conformance oracle for `tpt-kinetix-volumetric` (DECISION 8).
+- **`bench_parse`** — parsing of Criterion output for the baseline/compare tooling.
 - **`trace` / `trace_dump`** — decoder trace capture and dumping helpers.
 - **`realtime_bench`** — loss-injector + realtime-decoder validation harness
   for the `tpt-kinetix-realtime` DECISION 5 gate (no model weights). Gated
   behind the `realtime-bench` feature.
+
+## Examples (run via `just`)
+
+- `codec_status` / `conformance_report` — print each decoder's `DecoderCapabilities`
+  and regenerate `docs/CONFORMANCE.md` (`just conformance`, `just conformance-report`).
+- `bench_baseline` / `bench_compare` / `bench_report` — record and diff Criterion
+  baselines (`just bench-baseline`, `just bench-compare`, `just bench-report`).
+- `ffmpeg_compare` — Kinetix vs ffmpeg/libaom/libvpx speed, memory and quality
+  (`just bench-ffmpeg`; results in `docs/PERFORMANCE.md`).
+- `io_compare` — I/O-layer evidence vs ffprobe: startup, peak RSS, hostile-input
+  corpus, live density (`just bench-io`).
+- AV1/VP9 debugging tools (`trace_diff`, `av1_interior_diff`, `vp9_dump`, ...).
 
 ## Graceful skipping
 

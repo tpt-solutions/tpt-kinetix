@@ -1,7 +1,7 @@
 # tpt-kinetix-av1
 
-AV1 support for the TPT Kinetix engine: OBU-level bitstream parsing, a decoder
-scaffold, and a `rav1e`-backed encoder.
+AV1 support for the TPT Kinetix engine: OBU-level bitstream parsing, a
+pixel-exact decoder, and a `rav1e`-backed encoder.
 
 See the [workspace README](../README.md) for the full project overview,
 architecture diagram, and quickstart guide.
@@ -15,6 +15,10 @@ architecture diagram, and quickstart guide.
   `Av1Encoder::from_encode_config` (rate control, speed preset, keyframe
   interval), or the crate-local `Av1EncoderConfig`.
 - Consumes YUV420p `VideoFrame`s and produces AV1 `Packet`s.
+- `Av1EncoderConfig` exposes `tile_cols`, `tile_rows` (0 = auto from frame size)
+  and `threads` (0 = rav1e default); tiles encode in parallel.
+- Speed and size versus libaom are tabulated in `docs/PERFORMANCE.md`
+  (`just bench-ffmpeg`); Kinetix is slower than libaom at matched quality.
 
 ### Decoder (intra + inter reconstruction)
 

@@ -1,16 +1,21 @@
 # tpt-kinetix-mux
 
 Container **muxers** for the [TPT Kinetix](https://github.com/tpt-solutions/tpt-kinetix)
-media processing engine.
-
-This is the write-side counterpart to `tpt-kinetix-demux`.
+media processing engine. This is the write-side counterpart to `tpt-kinetix-demux`.
 
 ## Status
 
-- ✅ Progressive (non-fragmented) MP4 / ISO-BMFF output
-- ✅ Single H.264 (`avc1`) video track with a full `stbl` sample table
-- ⛔ Audio tracks / multiple tracks — not yet implemented
-- ⛔ Fragmented MP4 (`moof`/`mfra`) — not yet implemented
+- ✅ `Mp4Writer` — multi-track passthrough MP4 writer. Streams are described by
+  `StreamInfo`, so any codec with a sample-entry writer is carried (AV1, VP9,
+  Opus, AAC, H.264/H.265, FLAC, AC-3, ...), including audio Kinetix cannot
+  decode. Memory is bounded to roughly one chunk per track; output is `moov`-at-end
+  and must be seekable.
+- ✅ `faststart` — move `moov` to the front for progressive HTTP playback.
+- ✅ `FragmentWriter` — fragmented MP4 / CMAF (init segment plus `moof`/`mdat`
+  fragments) for HLS-fMP4, DASH and live. Writes to any `std::io::Write`; no seeking.
+- ✅ `WebmWriter` — WebM/Matroska for AV1, VP9 and Opus, in a live mode (unknown
+  sizes, no seeking) or a finite mode (patched sizes plus a `Cues` index).
+- ✅ `Mp4Muxer` — the older single-track H.264 (`avc1`) writer, kept for compatibility.
 
 ## Example
 
@@ -31,6 +36,9 @@ for au in access_units {
 
 std::fs::write("out.mp4", muxer.finish())?;
 ```
+
+For multi-track or non-H.264 output use `Mp4Writer` / `FragmentWriter` / `WebmWriter`
+(see their rustdoc), or `tpt-kinetix remux` from the CLI.
 
 ## License
 

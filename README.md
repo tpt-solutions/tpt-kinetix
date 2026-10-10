@@ -15,7 +15,7 @@ successor to FFmpeg for production transcoding and streaming pipelines.
 
 TPT Kinetix is **early-stage and pre-1.0**. This table summarizes what works
 end-to-end today versus what is scaffolded or in progress. Each crate's README
-has a more detailed LIMITATIONS section, and decoders expose their state
+has more detail on its limitations, and decoders expose their state
 programmatically via `DecoderCapabilities` (`capabilities()`).
 
 | Area | Status | Notes |
@@ -34,7 +34,8 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization; **Enhanced RTMP** AV1/VP9 + Opus straight into live HLS (`live --rtmp-port`) |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| CLI `probe` / `transcode` | ✅ Works / 🟡 Partial | `probe` reports per-track decoder capabilities (MP4, MPEG-TS and Matroska/WebM input, format-sniffed) and `--json` emits ffprobe-shaped output. `transcode --vcodec av1` runs the full demux → decode → encode pipeline: VP9 input takes the royalty-free `codec-vp9` decode path (VP9 is the only supported transcode input). `stream` is still a stub. |
+| Original codecs | 🟡 Experimental | `lean`, `screen`, `realtime`, `vision`, `face`, `volumetric` and `lossless`: Kinetix-designed formats with no external reference decoder, pinned by golden vectors instead (see the note below). `lossless` is bit-exact and round-trips; `face` is synthesized by design; `volumetric` is not yet validated against the TMC13 oracle |
+| CLI | ✅ Works / 🟡 Partial | `probe` (MP4, MPEG-TS, Matroska/WebM, IVF; `--json` is ffprobe-shaped), `remux`, `package`, `serve`, `live`, and `stream` (older RTMP → TS HLS server) all work. `transcode --vcodec av1` runs the full demux → decode → encode pipeline, but VP9 is the only supported input (royalty-free `codec-vp9` path). `vision` decodes Vision bitstreams. See [tpt-kinetix-cli](tpt-kinetix-cli/README.md) |
 
 > ⚠️ **Decode correctness:** The H.264, VP9 and AV1 decoders report
 > `pixel_exact: true` for their supported subsets (H.264: CAVLC/CABAC
@@ -104,47 +105,50 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-core        — shared types: Frame, Packet, Timestamp, PixelFormat, Error
 │
-├── tpt-kinetix-demux       — container demuxers (MP4, MKV/WebM, MPEG-TS)
+├── tpt-kinetix-demux       — container demuxers (MP4, MKV/WebM incl. live, MPEG-TS, IVF)
 │
-├── tpt-kinetix-mux         — container muxers (progressive MP4 for H.264)
+├── tpt-kinetix-mux         — container muxers (multi-track MP4, faststart, fMP4/CMAF, WebM)
 │
-├── out-kinetix-h264        — H.264 / AVC decoder (NAL-unit parser + slice decoder)
+├── tpt-kinetix-package     — just-in-time HLS/DASH packaging + live packager (wasm-capable)
 │
-├── tpt-kinetix-av1         — AV1 decoder + encoder (OBU parser, tile threading)
+├── tpt-kinetix-stream      — live server (WebM/WebSocket/WHIP/Enhanced RTMP ingest → LL-HLS/DASH)
 │
-├── tpt-kinetix-vp9         — VP9 decoder (bool coder, tiles, intra/inter, loop filter)
+├── tpt-kinetix-av1         — AV1 decoder (pixel-exact) + rav1e-backed encoder
 │
-├── tpt-kinetix-kg          — knowledge-graph ingestion, analysis, and codegen tooling
+├── tpt-kinetix-vp9         — VP9 decoder (pixel-exact, profile 0)
+│
+├── out-kinetix-h264        — H.264 / AVC decoder (unpublished, patent-encumbered)
 │
 ├── tpt-kinetix-pipeline    — lock-free multi-stage processing pipeline
 │
-├── tpt-kinetix-stream      — async streaming output: RTMP push, HLS packaging
+├── tpt-kinetix-cli         — `tpt-kinetix` binary: probe / remux / package / serve / live / transcode / stream
 │
-└── tpt-kinetix-cli         — `tpt-kinetix` binary: probe / transcode / stream subcommands
+├── Original codecs         — tpt-kinetix-lean, -screen, -realtime, -vision, -face, -volumetric, -lossless,
+│                             sharing tpt-kinetix-bitstream (BitReader, rANS)
+│
+└── Tooling                 — tpt-kinetix-kg (knowledge-graph codegen), tpt-kinetix-test-utils (unpublished)
 ```
 
 ### Architecture Diagram (ASCII)
 
 ```
  ┌──────────────────────────────────────────────────────────────┐
- │                        tpt-kinetix-cli                           │
- │          transcode subcommand │ stream subcommand            │
- └───────────────────┬──────────────────────┬───────────────────┘
-                     │                      │
-          ┌──────────▼──────────┐  ┌────────▼────────┐
-          │  tpt-kinetix-pipeline   │  │ tpt-kinetix-stream  │
-          │  Stage graph /      │  │  RTMP / HLS     │
-          │  crossbeam channels │  └────────┬────────┘
-          └──────┬──────────────┘           │
-                 │                          │
-    ┌────────────┼────────────┐             │
-    │            │            │             │
-┌───▼───┐  ┌────▼────┐  ┌────▼────┐        │
-│demux  │  │ h264    │  │  av1    │        │
-│(MP4…) │  │ decoder │  │dec/enc  │        │
-└───┬───┘  └────┬────┘  └────┬────┘        │
-    │            │            │             │
-    └────────────┴────────────┴─────────────┘
+ │                       tpt-kinetix-cli                        │
+ │  probe │ remux │ package │ serve │ live │ transcode │ stream │
+ └──────┬──────────────────┬──────────────────────┬─────────────┘
+        │                  │                      │
+┌───────▼─────────┐ ┌──────▼──────────┐  ┌────────▼────────────┐
+│ tpt-kinetix-    │ │ tpt-kinetix-    │  │ tpt-kinetix-stream  │
+│ pipeline        │ │ package         │◀─│ live ingest, RTMP,  │
+│ (transcode)     │ │ HLS / DASH      │  │ LL-HLS / DASH       │
+└──┬────────┬─────┘ └──────┬──────────┘  └────────┬────────────┘
+   │        │              │                      │
+┌──▼───┐ ┌──▼───┐   ┌──────▼──────┐        ┌──────▼──────┐
+│ vp9  │ │ av1  │   │ demux / mux │        │ demux / mux │
+│ dec  │ │ enc  │   │ MP4 WebM TS │        │             │
+└──┬───┘ └──┬───┘   └──────┬──────┘        └──────┬──────┘
+   │        │              │                      │
+   └────────┴──────────────┴──────────────────────┘
                          │
                  ┌───────▼──────┐
                  │ tpt-kinetix-core │
@@ -173,8 +177,13 @@ cargo build --workspace
 ### Test
 
 ```bash
-cargo test --workspace
+just test        # or: cargo test --workspace
+just check       # fmt-check + clippy + build + test: run before opening a PR
 ```
+
+See [docs/CONFORMANCE.md](docs/CONFORMANCE.md) for decoder conformance results and
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md) for benchmarks against ffmpeg/libaom/libvpx
+(`just bench-ffmpeg`, `just bench-io`).
 
 ### Lint
 
@@ -188,8 +197,9 @@ cargo deny check
 
 ```bash
 cargo run -p tpt-kinetix-cli -- --help
-cargo run -p tpt-kinetix-cli -- transcode --help
-cargo run -p tpt-kinetix-cli -- stream --help
+cargo run -p tpt-kinetix-cli -- remux in.mp4 out.mp4 --faststart
+cargo run -p tpt-kinetix-cli -- serve in.mp4          # HLS + DASH on http://127.0.0.1:8080
+cargo run -p tpt-kinetix-cli -- live --help           # live ingest -> HLS/DASH
 ```
 
 ### See it work: a 30-second demo
@@ -218,9 +228,10 @@ Every functional crate ships at least one runnable, self-contained example under
 | Example | What it shows |
 | --- | --- |
 | `cargo run -p tpt-kinetix-demux --example probe_mp4 -- path/to/video.mp4` | Probe an MP4 file and print its tracks |
-| `cargo run -p tpt-kinetix-mux --example write_mp4 -- out.mp4` | Write a minimal single-track H.264 MP4 |
+| `cargo run -p tpt-kinetix-mux --example write_mp4 -- out.mp4` | Write a minimal single-track H.264 MP4 with the legacy `Mp4Muxer` (multi-track output: `Mp4Writer`, or `tpt-kinetix remux`) |
 | `cargo run -p tpt-kinetix-pipeline --example basic_transcode` | Synthetic frames → filter → AV1 encode |
 | `cargo run -p tpt-kinetix-stream --example hls_segment` | Generate an HLS TS segment + `.m3u8` playlist |
+| `cargo run -p tpt-kinetix-stream --example live_server` | Run a live server: publish AV1/VP9 + Opus WebM, play as live HLS |
 | `cargo run -p tpt-kinetix-kg --example ingest_ffmpeg_h264 -- path/to/h264dec.c` | Ingest C source into a knowledge graph |
 
 ### Try it in your browser
@@ -243,17 +254,22 @@ All crates in this workspace share the same version number (monorepo style). Whe
 is made to any public API, **all** crates are bumped together. This keeps the dependency graph
 coherent and avoids mixed-version combinations.
 
-`v0.1.0` is the initial development release. API stability is **not guaranteed** until `v1.0.0`.
+The current release is `v0.1.1` (see [CHANGELOG.md](CHANGELOG.md)). API stability is **not guaranteed** until `v1.0.0`.
 
 ### Publish order
 
 Crates must be published to crates.io in dependency order to satisfy the registry resolver:
 
+Publishing is automated by release-plz (`release-plz.toml`), which derives this order from the
+dependency graph. In outline:
+
 1. `tpt-kinetix-core`
-2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-av1`, `tpt-kinetix-vp9`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
-3. `tpt-kinetix-pipeline` *(depends on the codec/demux crates above)*
-4. `tpt-kinetix-stream` *(independent of pipeline, but published after for consistency)*
-5. `tpt-kinetix-cli` *(depends on `tpt-kinetix-pipeline` and `tpt-kinetix-stream`)*
+2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-av1`, `tpt-kinetix-vp9`, `tpt-kinetix-bitstream`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
+3. `tpt-kinetix-package`, `tpt-kinetix-pipeline`, `tpt-kinetix-lean`, `-screen`, `-realtime`, `-vision`, `-face`, `-volumetric`, `-lossless` *(depend on the crates above)*
+4. `tpt-kinetix-stream` *(depends on `tpt-kinetix-package`)*
+5. `tpt-kinetix-cli` *(depends on pipeline, stream, package and the rest)*
+
+`out-kinetix-h264` and `tpt-kinetix-test-utils` are never published.
 
 ### crates.io name reservation
 
@@ -261,14 +277,17 @@ Before running `cargo publish` for the first time, **manually reserve each crate
 crates.io by publishing a minimal `0.0.1` placeholder, or by logging in and creating the crate
 entry. This prevents name squatting. The names to reserve are:
 
-`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-av1`, `tpt-kinetix-vp9`, `tpt-kinetix-kg`,
-`tpt-kinetix-pipeline`, `tpt-kinetix-stream`, `tpt-kinetix-cli`
+`tpt-kinetix-core`, `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-package`, `tpt-kinetix-av1`,
+`tpt-kinetix-vp9`, `tpt-kinetix-bitstream`, `tpt-kinetix-kg`, `tpt-kinetix-pipeline`, `tpt-kinetix-stream`,
+`tpt-kinetix-cli`, and the original-codec crates (`-lean`, `-screen`, `-realtime`, `-vision`, `-face`,
+`-volumetric`, `-lossless`)
 
 ---
 
 ## Roadmap
 
-- **Phase 9 (stretch)**: See [`docs/adding-a-codec.md`](docs/adding-a-codec.md) for the process of adding new codecs via the KG pipeline.
+- **Open I/O tasks**: [`todo-io.md`](todo-io.md) is the task list. The product is the memory-safe I/O layer (demux, mux, packaging, live ingest, edge/WASM), prioritising royalty-free AV1, VP9 and Opus; Kinetix does not try to out-run ffmpeg/dav1d at codec decode speed (see [docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
+- **Adding codecs**: See [`docs/adding-a-codec.md`](docs/adding-a-codec.md) for the process of adding new codecs via the KG pipeline.
 - **Future codecs**: See [`docs/codec-backlog.md`](docs/codec-backlog.md) for the prioritised list.
 - **Codec evaluations**: [`docs/codec-evaluations/hevc.md`](docs/codec-evaluations/hevc.md) (HEVC is out of scope: patent-encumbered, like H.264). Audio codecs are handled by [tpt-cadence](https://github.com/tpt-solutions/tpt-cadence), not here.
 

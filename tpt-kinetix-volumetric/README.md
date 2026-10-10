@@ -4,7 +4,7 @@ Point-cloud / volumetric codec for AR-VR content, designed from scratch for the 
 
 ## Status
 
-**Scaffold.** The decoder reports `pixel_exact: false`, returns `NotPixelExact` in strict mode, and `Unsupported` for any stream declaring the reserved `dynamic` flag. Geometry (octree) and attribute (lift/RAHT) decode are not yet wired.
+Geometry (octree) and attribute (lift/RAHT) decode are implemented and round-trip against the in-crate encoder. The decoder is **not yet validated bit-exact against the TMC13 oracle**, so it reports `pixel_exact: false` and returns `NotPixelExact` in strict mode. Malformed streams fail with `Parse`, and any stream declaring the reserved `dynamic` flag fails with `Unsupported`.
 
 ## Design
 
@@ -28,9 +28,9 @@ let mut dec = VolumetricDecoderImpl::new();
 let caps = dec.capabilities();
 assert!(!caps.pixel_exact);
 
-// In non-strict mode, decode returns None until geometry/attribute decode is implemented.
+// Non-strict mode decodes; strict mode returns `NotPixelExact` (no TMC13 validation yet).
 let pkt = /* a compressed Packet */;
-let cloud = dec.decode(&pkt)?; // Ok(None) today
+let cloud = dec.decode(&pkt)?;
 ```
 
 ## Adding a codec

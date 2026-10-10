@@ -16,8 +16,10 @@ and the shared-primitive relationship to `tpt-kinetix-lean`).
 
 ## Status
 
-Scaffold: the profile-aware sequence/frame headers (`src/headers.rs`) and the
-shared `BitReader`/rANS primitives (`tpt-kinetix-bitstream`) exist and
-round-trip, but block reconstruction, slice framing, intra-refresh masking,
-FEC, and concealment are not implemented yet. `RealtimeDecoder::capabilities`
-reports `pixel_exact: false` accordingly.
+Working, original format: the profile-aware headers, slice-grid framing,
+intra-refresh masking, FEC, decoder concealment and block reconstruction
+(14-mode intra, unidirectional-P inter, transform bank, deblock) run
+end-to-end (`src/reconstruct.rs`, `src/decoder.rs`). Realtime has no external
+reference decoder, so `RealtimeDecoder::capabilities` reports
+`pixel_exact: false` and `deterministic: true`; a golden-vector test pins the
+bitstream and output.

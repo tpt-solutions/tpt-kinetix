@@ -42,6 +42,9 @@ A `PipelineMessage::Error` produced by any stage is forwarded downstream; the
 terminal sink surfaces it as a failed `Result`, so `run_to_completion` reports
 the failure to the caller.
 
+The `codec-vp9` feature (on by default) provides `Vp9DecodeStage`; `tpt-kinetix transcode`
+uses it for VP9 → AV1. `DemuxStage` reads from a `ReadAt` source, so inputs are not slurped whole.
+
 ## Benchmark
 
 `cargo bench -p tpt-kinetix-pipeline` runs an end-to-end decode/scale/encode

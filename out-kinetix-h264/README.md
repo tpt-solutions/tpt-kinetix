@@ -79,6 +79,6 @@ mode when the input feature set is not known.
 ### Roadmap
 
 The capability flip is complete. The remaining conformance work is to close the
-three explicit official-fixture gaps without regressing the 33 byte-exact
+explicit official-fixture gaps without regressing the 34 byte-exact
 manifest entries. Strict-mode feature rejection for unsupported pixel formats
 and bit depths remains intentional.

@@ -4,8 +4,10 @@ A talking-head / video-conferencing codec for the
 [TPT Kinetix](https://github.com/tpt-solutions/tpt-kinetix) media engine that
 uses **landmark-driven parametric synthesis** instead of pixel coding.
 
-> **Status: scaffold.** The decoder reports its capabilities honestly and
-> returns `Ok(None)` until the synthesis pipeline is implemented. Full design
+> **Status: end-to-end, synthesized output.** Header parsing, rANS parameter
+> decoding and a deterministic 3DMM rasterizer run end-to-end, but the built-in
+> basis is a placeholder and output is synthesized, never pixel-exact
+> (`pixel_exact = false`, by design). Full design
 > (all 8 resolved decisions): [`docs/face-codec-design.md`](../../docs/face-codec-design.md).
 
 ## Why not just use AV1/H.264?
@@ -49,7 +51,7 @@ prior the face model carries is exactly the signal general codecs discard.
   `FaceRepresentation` (3DMM primary, sparse-landmark companion, learned latent
   deferred to v2) + nominal `V1_3DMM_DIMS`.
 - `FaceParams` type (the 3DMM-style parameter vector: identity / expression / pose / illumination / appearance)
-- `FaceSynthesizer` trait seam (deterministic rasterizer planned for v1)
+- `FaceSynthesizer` trait seam (implemented by `DeterministicRasterizer`)
 - `FaceDecoder::capabilities()` reports `pixel_exact = false` — output is **synthesized, not pixel-exact**, by design
 
 ## License

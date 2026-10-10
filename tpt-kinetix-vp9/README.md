@@ -29,6 +29,11 @@ persistent loop-filter delta header state) is documented in `todo-vp9.md`.
   `KinetixError::Unsupported`.
 - Superframe packets are split internally.
 - Frame-parallel and context-adaptation probability semantics are implemented.
+- Multi-tile frames decode tile columns in parallel (`rayon`) using pooled
+  per-column frame states, followed by a wavefront loop filter.
+- Throughput and the ffmpeg comparison (speed and peak memory) are in
+  `docs/PERFORMANCE.md`; reproduce with `just bench-ffmpeg`. VP9 decode is
+  slower than libvpx/ffmpeg; the goal here is memory safety, not speed.
 
 ## Layout
 
@@ -53,6 +58,7 @@ persistent loop-filter delta header state) is documented in `todo-vp9.md`.
 - `cargo test -p tpt-kinetix-vp9` — unit tests (bool decoder round-trip,
   bit reader), conformance (ffmpeg-gated, skips when absent), and a
   `*_never_panics` proptest.
+- `cargo run --release -p tpt-kinetix-vp9 --example prof_sample` profiles decode phases.
 - `cargo +nightly fuzz run fuzz_vp9_frame` from `fuzz/` (compile-only on CI;
   the CI `fuzz-check` job builds it on Ubuntu).
 

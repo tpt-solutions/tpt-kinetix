@@ -16,11 +16,11 @@ waste bits on. This codec classifies every block into one of three modes:
 The classifier and dictionary are screen-specific; the entropy backend and the
 `NATURAL` fallback reuse the shared `tpt-kinetix-bitstream` primitives.
 
-> **Status: scaffold.** The byte-aligned sequence/frame headers and the shared
-> `BitReader`/rANS primitives exist and round-trip, but block reconstruction
-> (mode classifier, flat-fill run-length, glyph dictionary + palette, and the
-> `NATURAL` transform path) is not implemented yet. `ScreenDecoder::capabilities`
-> reports `pixel_exact = false`.
+> **Status: working, original format.** The mode classifier, flat-fill
+> run-length, glyph dictionary + palette and the `NATURAL` transform path all
+> run end-to-end. Screen has no external reference decoder, so
+> `ScreenDecoder::capabilities` reports `pixel_exact = false` and
+> `deterministic = true`; a golden-vector test pins the bitstream and output.
 
 ## Design
 
