@@ -210,7 +210,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Install wasm-pack
@@ -232,7 +232,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Install wasm-pack
@@ -251,7 +251,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Cache the Chrome-for-Testing binary
@@ -278,7 +278,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Cache the Chrome-for-Testing binary
