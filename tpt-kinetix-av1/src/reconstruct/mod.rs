@@ -2280,6 +2280,15 @@ pub fn reconstruct_av1_frame(
         ref_to_slot[name as usize] = frame_header.ref_frame_idx[(name - LAST_FRAME) as usize];
     }
 
+    // Refuse oversized pictures before any plane is allocated; the output is
+    // at the upscaled width, which bounds the coded (downscaled) width too.
+    if !crate::decoder::picture_within_limit(frame_header.upscaled_width, frame_header.height) {
+        return Err(KinetixError::Unsupported(format!(
+            "AV1: {}x{} exceeds the level 6.3 picture size limit",
+            frame_header.upscaled_width, frame_header.height
+        )));
+    }
+
     let width = frame_header.width as usize;
     let height = frame_header.height as usize;
     // §5.9.15: the mode-info grid rounds the frame up to 8-pixel multiples
