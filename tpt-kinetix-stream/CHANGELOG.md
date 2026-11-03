@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
+
+### Fixed
+
+- `LiveServer` reads up to 64 KiB of the request body before refusing a publish (404 or an auth
+  refusal). Closing the socket with unread bytes made the kernel send a reset, so clients saw a
+  connection error instead of the status line.
+
 ### Changed
 
 - RTMPS certificate and key loading uses PEM parsing from `rustls::pki_types`. The unmaintained
