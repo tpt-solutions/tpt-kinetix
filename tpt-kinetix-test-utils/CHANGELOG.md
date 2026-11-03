@@ -26,3 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `realtime_bench` validation harness (loss injector + realtime decoder, no
   model weights) behind the `realtime-bench` feature, for the
   `tpt-kinetix-realtime` DECISION 5 gate.
+- `io_compare` example: I/O-layer evidence against ffprobe (startup time, peak
+  RSS, hostile-input corpus, live density with viewers, remote probe over a
+  delayed link), run with `just bench-io`.
+- `ffmpeg_compare` example records Kinetix peak live heap per decode row and
+  sweeps rav1e speeds in the libaom comparison.
