@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Av1EncoderConfig` exposes `tile_cols`, `tile_rows` and `threads`; tiles encode in parallel.
+
+### Changed
+
+- README documents the encoder tile/thread settings and the picture-size limit.
+
+### Fixed
+
+- Pictures above the AV1 level 6.3 `MaxPicSize` (35,651,584 luma samples) are refused before any
+  plane is allocated, in reconstruction and in the grey placeholder fallback. A 10-byte input
+  naming a 32768x32768 frame used to allocate about 1.6 GB. Found by `fuzz_av1_frame`; the
+  reproducer is kept as a corpus seed.
+
 ## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
 
 ### Added

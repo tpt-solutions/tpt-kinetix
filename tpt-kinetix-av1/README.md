@@ -32,7 +32,11 @@ architecture diagram, and quickstart guide.
   `KINETIX_AV1_FATE_DIR=<dir> cargo run --release -p tpt-kinetix-av1 --example av1_fate_score`.
 - `capabilities().pixel_exact` is `true`. See `docs/CONFORMANCE.md` at the
   workspace root for the generated results table.
+- Pictures above the AV1 level 6.3 `MaxPicSize` (35,651,584 luma samples) are
+  refused before any plane is allocated.
 
 ### Fuzzing
 
 - `cargo fuzz run fuzz_obu_parse` exercises the OBU parser against arbitrary input.
+- `cargo fuzz run fuzz_av1_frame` exercises frame decode end to end; its corpus
+  includes the oversized-picture reproducer.

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- AV1 decoder refuses frames above the level 6.3 picture-size limit before allocating planes. A few
+  header bytes could name a 32768x32768 or larger picture, which was a multi-gigabyte allocation.
+  Found by `fuzz_av1_frame`.
+
 ## [0.1.1] - 2026-10-08
 
 ### Fixed
