@@ -37,6 +37,9 @@ const PUBLISH_PAGE: &str = include_str!("../web/publish.html");
 
 /// Largest header block accepted from a client.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
+/// Most body bytes a rejected request is read through before the reply, so a
+/// refusal never has to pull a large upload off the wire.
+const MAX_DRAIN_BYTES: u64 = 64 * 1024;
 /// How long a blocking playlist reload holds a connection open before giving up.
 const MAX_BLOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
 /// How often a blocked playlist request re-checks the packager.
@@ -357,20 +360,20 @@ impl LiveServer {
             }
             "POST" | "PUT" => {
                 let Some(key) = path.strip_prefix("/ingest/").filter(|k| valid_key(k)) else {
-                    return respond(
-                        r.get_mut(),
+                    return respond_drained(
+                        &mut r,
+                        &headers,
                         Reply::text(404, "publish to /ingest/<key>"),
-                        false,
                     )
                     .await;
                 };
                 if let Err(refusal) = self.policy.authorize(key, &headers, &query) {
                     self.metrics.count_refusal(refusal);
                     tracing::warn!(key, "publish refused: {}", refusal.message());
-                    return respond(
-                        r.get_mut(),
+                    return respond_drained(
+                        &mut r,
+                        &headers,
                         Reply::text(refusal.status(), refusal.message()),
-                        false,
                     )
                     .await;
                 }
@@ -1170,6 +1173,28 @@ async fn write_http_chunk(s: &mut Conn, data: &[u8]) -> Result<()> {
     s.write_all(b"\r\n").await?;
     s.flush().await?;
     Ok(())
+}
+
+/// Replies to a request whose body was not consumed. The body is read first
+/// (up to [`MAX_DRAIN_BYTES`]): closing a socket with unread bytes makes the
+/// kernel send a reset, so the client would see a connection error rather than
+/// the status line.
+async fn respond_drained(
+    r: &mut BufReader<Conn>,
+    headers: &HashMap<String, String>,
+    reply: Reply,
+) -> Result<()> {
+    if let Some(n) = headers
+        .get("content-length")
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        let _ = tokio::io::copy(
+            &mut (&mut *r).take(n.min(MAX_DRAIN_BYTES)),
+            &mut tokio::io::sink(),
+        )
+        .await;
+    }
+    respond(r.get_mut(), reply, false).await
 }
 
 async fn respond(s: &mut Conn, r: Reply, head_only: bool) -> Result<()> {
