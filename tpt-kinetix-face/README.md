@@ -8,7 +8,7 @@ uses **landmark-driven parametric synthesis** instead of pixel coding.
 > decoding and a deterministic 3DMM rasterizer run end-to-end, but the built-in
 > basis is a placeholder and output is synthesized, never pixel-exact
 > (`pixel_exact = false`, by design). Full design
-> (all 8 resolved decisions): [`docs/face-codec-design.md`](../../docs/face-codec-design.md).
+> (all 8 resolved decisions): [`docs/face-codec-design.md`](../docs/face-codec-design.md).
 
 ## Why not just use AV1/H.264?
 

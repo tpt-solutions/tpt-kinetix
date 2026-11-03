@@ -24,7 +24,7 @@ The classifier and dictionary are screen-specific; the entropy backend and the
 
 ## Design
 
-Full design notes (all resolved decision points): [`docs/screen-codec-design.md`](../../docs/screen-codec-design.md).
+Full design notes (all resolved decision points): [`docs/screen-codec-design.md`](../docs/screen-codec-design.md).
 
 ## License
 

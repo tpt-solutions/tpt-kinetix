@@ -7,7 +7,7 @@ and archival preservation of high-bit-depth masters. Unlike perceptual codecs
 embedded *lossy* video), this codec has **no quality axis**: every preserved bit
 is verified.
 
-See [`docs/lossless-codec-design.md`](../../docs/lossless-codec-design.md) for the
+See [`docs/lossless-codec-design.md`](../docs/lossless-codec-design.md) for the
 full design (DECISION 1–6).
 
 ## v1 format
