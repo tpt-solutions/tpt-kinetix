@@ -215,6 +215,9 @@ jobs:
           node-version: 22
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pinned: the scripts pass --no-opt, which older wasm-pack rejects.
+          version: 'v0.13.1'
       - name: Build the WASM packager and compare its output to native
         # The WASM packager must produce byte-identical HLS/DASH to the native
         # one over async range reads; a divergence here is a packaging bug that
@@ -237,6 +240,9 @@ jobs:
           node-version: 22
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pinned: the script passes --no-opt, which older wasm-pack rejects.
+          version: 'v0.13.1'
       - name: Run the Worker request handler test
         # The Worker handler must serve the same segment bytes as the native
         # server, over a fetch-like callback.
