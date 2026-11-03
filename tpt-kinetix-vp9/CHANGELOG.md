@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `prof_sample` example: an in-process sampling profiler for decode phases (Windows x86_64).
+- `tile_mutation` test: mutates real multi-tile frames and checks that no mutant panics, including inside the rayon workers.
+
+### Changed
+
+- Tile-column threads reuse pooled per-column frame state (`reset()` instead of reallocating) and
+  run serially when single-threaded. `FrameData::empty()` replaces a wasted per-frame allocation.
+- The loop filter runs as a row wavefront across superblocks. It is bit-exact with the serial path.
+- Reference frames are shared with `Arc` instead of `Rc`.
+- Motion-compensation scratch buffers are fixed-size stack arrays instead of per-block heap `Vec`s.
+- Decoder and frame-handling rework; the `conformance_vp9` test is extended.
+- README documents the threading and profiling changes.
+
 ## [0.1.1](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.1) - 2026-10-07
 
 ### Fixed

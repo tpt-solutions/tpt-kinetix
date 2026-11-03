@@ -58,7 +58,11 @@ persistent loop-filter delta header state) is documented in `todo-vp9.md`.
 - `cargo test -p tpt-kinetix-vp9` — unit tests (bool decoder round-trip,
   bit reader), conformance (ffmpeg-gated, skips when absent), and a
   `*_never_panics` proptest.
-- `cargo run --release -p tpt-kinetix-vp9 --example prof_sample` profiles decode phases.
+- `cargo run --release -p tpt-kinetix-vp9 --example prof_sample` profiles decode phases
+  (Windows x86_64).
+- `tests/tile_mutation.rs` corrupts real multi-tile frames and checks that the
+  parallel tile-column path never panics; `tests/oversized_frame.rs` checks that
+  a huge declared frame size is rejected rather than allocated.
 - `cargo +nightly fuzz run fuzz_vp9_frame` from `fuzz/` (compile-only on CI;
   the CI `fuzz-check` job builds it on Ubuntu).
 
