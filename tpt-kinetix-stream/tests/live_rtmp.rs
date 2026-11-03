@@ -42,9 +42,25 @@ async fn http_get(port: u16, path: &str) -> (u16, Vec<u8>) {
     (status, buf[(split + 4).min(buf.len())..].to_vec())
 }
 
+/// The first line of `ffmpeg -version`, so a fixture failure names the build that made it.
+fn ffmpeg_version() -> String {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
 fn make_webm(dir: &std::path::Path, vcodec: &[&str], seconds: u32) -> Option<std::path::PathBuf> {
     let path = dir.join("src.webm");
     let secs = seconds.to_string();
+    eprintln!("fixture encoder: {}", ffmpeg_version());
     let ok = Command::new("ffmpeg")
         .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
         .arg("testsrc2=size=320x240:rate=25")
