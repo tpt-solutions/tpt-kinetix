@@ -69,7 +69,7 @@ fn framemd5(input: &str, map: &str) -> Vec<String> {
         .unwrap();
     assert!(
         o.stderr.is_empty(),
-        "ffmpeg: {}",
+        "ffmpeg reading {input} ({map}): {}",
         String::from_utf8_lossy(&o.stderr)
     );
     String::from_utf8_lossy(&o.stdout)
