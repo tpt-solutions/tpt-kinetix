@@ -83,10 +83,16 @@ fn framemd5(input: &str, map: &str) -> Vec<String> {
         ])
         .output()
         .unwrap();
+    // ffmpeg 8 logs this for the trailing padding-only Opus packet of its own
+    // WebM output; the callers already exclude that final packet.
+    let stderr: String = String::from_utf8_lossy(&o.stderr)
+        .lines()
+        .filter(|l| !l.contains("Error parsing Opus packet header"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        o.stderr.is_empty(),
-        "ffmpeg reading {input} ({map}): {}",
-        String::from_utf8_lossy(&o.stderr)
+        stderr.is_empty(),
+        "ffmpeg reading {input} ({map}): {stderr}"
     );
     String::from_utf8_lossy(&o.stdout)
         .lines()
