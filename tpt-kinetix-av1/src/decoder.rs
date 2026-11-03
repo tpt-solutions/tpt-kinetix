@@ -22,6 +22,17 @@ use crate::{
     reconstruct::{reconstruct_av1_frame, FrameCdfContext},
 };
 
+/// AV1 level 6.3 `MaxPicSize`, in luma samples. Pictures larger than this are
+/// refused before any plane is allocated: a few header bytes can name a
+/// 32768×32768 or 65536×65536 frame, which would otherwise be a multi-gigabyte
+/// allocation (found by `fuzz_av1_frame`).
+pub(crate) const MAX_PICTURE_SAMPLES: u64 = 35_651_584;
+
+/// Whether a `width`×`height` picture is within [`MAX_PICTURE_SAMPLES`].
+pub(crate) fn picture_within_limit(width: u32, height: u32) -> bool {
+    u64::from(width) * u64::from(height) <= MAX_PICTURE_SAMPLES
+}
+
 /// Parsed tile group data: tile index and raw payload bytes.
 #[derive(Debug, Clone)]
 pub struct TileData {
@@ -474,6 +485,11 @@ impl Av1Decoder {
         if width == 0 || height == 0 {
             return Ok(None);
         }
+        if !picture_within_limit(width, height) {
+            return Err(KinetixError::Unsupported(format!(
+                "AV1: {width}x{height} exceeds the level 6.3 picture size limit"
+            )));
+        }
 
         let y_size = (width as usize) * (height as usize);
         let uv_size = y_size / 4;
@@ -848,4 +864,17 @@ fn apply_grain_to_frame(
         }
     }
     frame.data = out;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::picture_within_limit;
+
+    #[test]
+    fn picture_limit_admits_level_6_3_sizes_and_refuses_oversized() {
+        assert!(picture_within_limit(7680, 4320));
+        assert!(picture_within_limit(16384, 2176));
+        assert!(!picture_within_limit(32768, 32768));
+        assert!(!picture_within_limit(65536, 65536));
+    }
 }
