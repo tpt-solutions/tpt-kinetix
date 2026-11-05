@@ -1,6 +1,6 @@
 # TPT Kinetix — Native AAC-LC Decoder Todo
 
-> Active work. See [todo.md](todo.md) for the project index.
+> **HISTORICAL — not active work in this repo.** AAC moved to the separate `tpt-cadence` audio-codec repo (2026-09-16) and `tpt-kinetix-aac` was deleted. This file is kept only as a record of the earlier conformance work. Do not resume it here. See [todo.md](todo.md) for the project index.
 
 
 ## Phase 18 — Native AAC-LC Decoder (remove symphonia MPL-2.0 dependency) (2026-08-13)

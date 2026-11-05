@@ -137,9 +137,17 @@ jobs:
       - name: Check fuzz targets compile (demux)
         run: cargo fuzz build fuzz_mp4_box
         working-directory: tpt-kinetix-demux
-      - name: Check fuzz targets compile (demux mkv)
-        run: cargo fuzz build fuzz_mkv_ebml
+      - name: Check fuzz targets compile (demux)
+        run: |
+          cargo fuzz build fuzz_mp4_reader
+          cargo fuzz build fuzz_ts
+          cargo fuzz build fuzz_mkv_ebml
+          cargo fuzz build fuzz_mkv_stream
+          cargo fuzz build fuzz_moof
         working-directory: tpt-kinetix-demux
+      - name: Check fuzz targets compile (mux)
+        run: cargo fuzz build fuzz_faststart
+        working-directory: tpt-kinetix-mux
       - name: Check fuzz targets compile (av1)
         run: |
           cargo fuzz build fuzz_obu_parse
@@ -158,6 +166,50 @@ jobs:
           cargo fuzz build fuzz_rtmp_flv
           cargo fuzz build fuzz_hls_playlist
         working-directory: tpt-kinetix-stream
+
+  fuzz-smoke:
+    name: Fuzz smoke (${{ matrix.target }})
+    # Pull requests only: a 30-second run of each parser target, so a crash
+    # on a parser-touching change shows up before merge. The nightly workflow
+    # (fuzz.yml) runs the same targets for longer.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: tpt-kinetix-demux
+            target: fuzz_mp4_reader
+          - crate: tpt-kinetix-demux
+            target: fuzz_mkv_stream
+          - crate: tpt-kinetix-demux
+            target: fuzz_moof
+          - crate: tpt-kinetix-demux
+            target: fuzz_ts
+          - crate: tpt-kinetix-mux
+            target: fuzz_faststart
+          - crate: tpt-kinetix-stream
+            target: fuzz_rtmp_chunk
+          - crate: tpt-kinetix-stream
+            target: fuzz_rtmp_flv
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run ${{ matrix.target }} for 30 seconds
+        working-directory: ${{ matrix.crate }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=30
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: ${{ matrix.crate }}/fuzz/artifacts/**
+          if-no-files-found: ignore
 
   conformance:
     name: Conformance (ffmpeg-gated)

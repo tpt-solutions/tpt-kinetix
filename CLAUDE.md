@@ -91,7 +91,7 @@ breaking change in any public API bumps all of them together):
   `crossbeam-channel`).
 - `tpt-kinetix-stream` — live server (`LiveServer`: WebM AV1/VP9+Opus POST ingest -> live HLS) and the older RTMP ingest + TS HLS output: RTMP ingest (handshake/chunk/AMF/FLV) and HLS output
   (MPEG-TS segmenting + sliding-window `.m3u8` + HTTP serving).
-- `tpt-kinetix-cli` — the `tpt-kinetix` binary (`probe` works today; `transcode`/`stream` are stubs).
+- `tpt-kinetix-cli` — the `tpt-kinetix` binary. All subcommands are implemented: `probe`, `remux`, `package`, `live`, `serve`, `transcode`, `stream` and `vision`.
 - `tpt-kinetix-test-utils` — shared conformance/corpus/bench-report helpers used across crates' test
   suites, notably `codec_status` (prints `DecoderCapabilities` for every decoder).
 - `tpt-kinetix-lean`, `tpt-kinetix-vision` — newer/experimental crates; check their own README before

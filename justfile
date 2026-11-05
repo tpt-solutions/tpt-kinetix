@@ -54,11 +54,17 @@ coverage:
 
 # Compile all fuzz targets (requires nightly + cargo-fuzz).
 fuzz-build:
-    cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mkv_ebml
+    cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mp4_reader && cargo fuzz build fuzz_mkv_ebml && cargo fuzz build fuzz_mkv_stream && cargo fuzz build fuzz_moof && cargo fuzz build fuzz_ts
+    cd tpt-kinetix-mux && cargo fuzz build fuzz_faststart
     cd tpt-kinetix-av1 && cargo fuzz build fuzz_obu_parse && cargo fuzz build fuzz_av1_frame
     cd out-kinetix-h264 && cargo fuzz build fuzz_h264_nal
     cd tpt-kinetix-vp9 && cargo fuzz build fuzz_vp9_frame
     cd tpt-kinetix-stream && cargo fuzz build fuzz_rtmp_chunk && cargo fuzz build fuzz_rtmp_amf && cargo fuzz build fuzz_rtmp_flv && cargo fuzz build fuzz_hls_playlist
+    cd tpt-kinetix-face && cargo fuzz build fuzz_face_decode
+    cd tpt-kinetix-lean && cargo fuzz build fuzz_lean_parser
+    cd tpt-kinetix-lossless && cargo fuzz build fuzz_decode_frame
+    cd tpt-kinetix-vision && cargo fuzz build fuzz_vision_parser
+    cd tpt-kinetix-volumetric && cargo fuzz build fuzz_volumetric_parser
 
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
 fuzz crate target seconds="60":
