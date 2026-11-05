@@ -2609,6 +2609,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "tokio",
  "tpt-kinetix-av1",
  "tpt-kinetix-bitstream",
