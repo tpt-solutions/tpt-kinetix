@@ -1,8 +1,10 @@
 //! `tpt-kinetix` — command-line interface for the TPT Kinetix media engine.
 
 mod package;
+mod png;
 mod probe_json;
 mod remux;
+mod thumbnails;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,6 +69,22 @@ enum Commands {
         /// Target fragment length in milliseconds (cut at the next video key frame).
         #[arg(long, default_value_t = 2000, requires = "fragmented")]
         fragment_ms: u32,
+    },
+    /// Write stills from the keyframes of an AV1 or VP9 video, as PNG files.
+    ///
+    /// Only keyframes are decoded, so the cost is one read of the file and a
+    /// decode per still. Video must be 8-bit 4:2:0.
+    #[command(after_help = "Examples:
+  tpt-kinetix thumbnails in.webm thumbs/            # 10 stills, evenly spread
+  tpt-kinetix thumbnails in.mp4 thumbs/ --count 3")]
+    Thumbnails {
+        /// Input file: WebM, IVF or MP4 with an AV1 or VP9 video track.
+        input: PathBuf,
+        /// Output directory (created if missing).
+        output: PathBuf,
+        /// Number of stills, spread evenly over the keyframes.
+        #[arg(long, default_value_t = 10)]
+        count: usize,
     },
     /// Package an MP4 into HLS (fMP4) and DASH: playlists, init and media segments.
     ///
@@ -286,6 +304,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Probe { input, json } => probe(&input, json),
+        Commands::Thumbnails {
+            input,
+            output,
+            count,
+        } => thumbnails::run(&input, &output, count),
         Commands::Live {
             port,
             segment_seconds,
