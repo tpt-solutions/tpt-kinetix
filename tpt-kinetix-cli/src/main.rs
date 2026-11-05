@@ -42,9 +42,9 @@ enum Commands {
     /// Video and audio are passed through bit-for-bit, including audio codecs
     /// Kinetix cannot decode. The input may be a file or an `http(s)://` URL.
     Remux {
-        /// Input MP4 (path or http(s) URL).
+        /// Input MP4 or WebM (path or http(s) URL).
         input: String,
-        /// Output MP4 path.
+        /// Output path. A `.webm` or `.mkv` name writes WebM; anything else writes MP4.
         output: PathBuf,
         /// Move the index (`moov`) to the front so the file plays while downloading.
         #[arg(long)]

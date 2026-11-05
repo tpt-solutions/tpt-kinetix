@@ -2,10 +2,11 @@
 //! without decoding anything (the equivalent of `ffmpeg -c copy`), including
 //! audio codecs Kinetix has no decoder for.
 //!
-//! The output container follows the input and the output extension: MP4 in,
-//! MP4 out (progressive, `--faststart`, or `--fragmented`); WebM/Matroska in,
-//! WebM out (a `WebmWriter`, seekable with a `Cues` index, or a live stream with
-//! unknown sizes to `-`).
+//! The output container follows the output path: `.webm`/`.mkv` writes WebM
+//! (a seekable file with a `Cues` index, or a live stream with unknown sizes to
+//! `-`), anything else writes MP4 (progressive, `--faststart`, or
+//! `--fragmented`). The input can be either container, so MP4 to WebM and WebM
+//! to MP4 are copies too.
 
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -13,10 +14,53 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use tpt_kinetix_core::codec::{CodecId, MediaType};
-use tpt_kinetix_demux::{Demuxer, Mp4Reader, ReadAt};
+use tpt_kinetix_core::packet::Packet;
+use tpt_kinetix_core::stream::StreamInfo;
+use tpt_kinetix_demux::{Demuxer, MkvReader, Mp4Reader, ReadAt};
 use tpt_kinetix_mux::{
     faststart, FragmentWriter, Mp4Writer, WebmOptions, WebmWriter, WriterOptions,
 };
+
+/// One packet, its duration as `(ticks, timescale)`, and its trailing discard
+/// padding in 48 kHz samples (WebM `DiscardPadding`; zero for MP4 input). WebM
+/// durations are milliseconds, so their timescale is 1000; MP4 durations are in
+/// their track's timescale.
+type Frame = (Packet, u32, u32, u64);
+
+/// `value` ticks of a `from` timescale, expressed in a `to` timescale.
+fn rescale_ticks(value: u32, from: u32, to: u32) -> u32 {
+    let scaled = u64::from(value) * u64::from(to.max(1)) / u64::from(from.max(1));
+    u32::try_from(scaled).unwrap_or(u32::MAX)
+}
+
+/// The duration an MP4 track gets for a frame: `ticks` of `scale`, in the output
+/// timescale `out_scale`, less the frame's `DiscardPadding`. This is the trim the
+/// Matroska reader applies for packagers, so the track ends where the source does.
+fn mp4_duration(ticks: u32, scale: u32, out_scale: u32, discard: u64) -> u32 {
+    let full = rescale_ticks(ticks, scale, out_scale);
+    if discard == 0 {
+        return full;
+    }
+    let trim = discard * u64::from(out_scale) / 48_000;
+    u32::try_from(u64::from(full).saturating_sub(trim).max(1)).unwrap_or(u32::MAX)
+}
+
+/// The next frame of the input in file order, `None` at the end.
+type NextFrame<'a> = dyn FnMut() -> Result<Option<Frame>> + 'a;
+
+/// The container the output is written in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Mp4,
+    Webm,
+}
+
+/// Output options that only MP4 can honour.
+#[derive(Clone, Copy)]
+struct Layout {
+    faststart: bool,
+    fragment_ms: Option<u32>,
+}
 
 /// Whether `output` names a Matroska/WebM file.
 fn wants_webm(output: &Path) -> bool {
@@ -40,9 +84,8 @@ pub fn remux(
     fragment_ms: Option<u32>,
 ) -> Result<()> {
     let remote = input.starts_with("http://") || input.starts_with("https://");
-    // The input's magic decides; a `.webm`/`.mkv` output must not be written as
-    // MP4 even if the input sniffs as something else.
-    let is_webm = if remote {
+    // The input's magic decides the reader; the output path decides the writer.
+    let input_is_webm = if remote {
         // Remote inputs are indexed by their first bytes; a WebM starts with the
         // EBML magic, an MP4 with a box type such as `ftyp`.
         let head = fetch_head(input)?;
@@ -59,30 +102,50 @@ pub fn remux(
         }
         head == [0x1A, 0x45, 0xDF, 0xA3]
     };
-
-    if is_webm {
-        if want_faststart || fragment_ms.is_some() {
-            bail!("--faststart and --fragmented are MP4-only; WebM output is always seekable");
-        }
-        return remux_webm(input, output, remote);
-    }
-    if wants_webm(output) {
-        bail!(
-            "the input is not Matroska/WebM, so it cannot be written as {}",
-            output.display()
-        );
-    }
-
-    if remote {
-        let reader = Mp4Reader::open(tpt_kinetix_demux::http::open_url(input))
-            .with_context(|| format!("failed to open remote MP4: {input}"))?;
-        copy(reader, output, want_faststart, fragment_ms)
+    // `-` (stdout) can only carry a live WebM or a fragmented MP4.
+    let target = if wants_webm(output) || (output.as_os_str() == "-" && input_is_webm) {
+        Target::Webm
     } else {
-        let file = std::fs::File::open(input)
-            .with_context(|| format!("failed to open input file: {input}"))?;
-        let reader = Mp4Reader::open(file)
-            .with_context(|| format!("failed to parse MP4 container: {input}"))?;
-        copy(reader, output, want_faststart, fragment_ms)
+        Target::Mp4
+    };
+    let layout = Layout {
+        faststart: want_faststart,
+        fragment_ms,
+    };
+    if target == Target::Webm && (layout.faststart || layout.fragment_ms.is_some()) {
+        bail!("--faststart and --fragmented are MP4-only; WebM output is always seekable");
+    }
+    if target == Target::Mp4 && output.as_os_str() == "-" && fragment_ms.is_none() {
+        bail!("writing MP4 to stdout needs --fragmented (a progressive MP4 must seek back)");
+    }
+
+    match (input_is_webm, remote) {
+        (true, true) => {
+            let reader = MkvReader::open(tpt_kinetix_demux::http::open_url(input))
+                .with_context(|| format!("failed to open remote WebM: {input}"))?;
+            remux_from_mkv(reader, output, target, layout)
+        }
+        (true, false) => {
+            let file = std::fs::File::open(input)
+                .with_context(|| format!("failed to open input file: {input}"))?;
+            // A file (not `fs::read`) so the WebM index pass never loads the media
+            // into memory.
+            let reader = MkvReader::open(file)
+                .with_context(|| format!("failed to parse WebM container: {input}"))?;
+            remux_from_mkv(reader, output, target, layout)
+        }
+        (false, true) => {
+            let reader = Mp4Reader::open(tpt_kinetix_demux::http::open_url(input))
+                .with_context(|| format!("failed to open remote MP4: {input}"))?;
+            remux_from_mp4(reader, output, target, layout)
+        }
+        (false, false) => {
+            let file = std::fs::File::open(input)
+                .with_context(|| format!("failed to open input file: {input}"))?;
+            let reader = Mp4Reader::open(file)
+                .with_context(|| format!("failed to parse MP4 container: {input}"))?;
+            remux_from_mp4(reader, output, target, layout)
+        }
     }
 }
 
@@ -97,32 +160,52 @@ fn fetch_head(input: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// WebM/Matroska passthrough: read every frame with [`tpt_kinetix_demux::MkvReader`] and write it
-/// with [`tpt_kinetix_mux::WebmWriter`], keeping the codec configuration intact.
-fn remux_webm(input: &str, output: &Path, remote: bool) -> Result<()> {
-    if remote {
-        let src = tpt_kinetix_demux::http::open_url(input);
-        let reader = tpt_kinetix_demux::MkvReader::open(src)
-            .with_context(|| format!("failed to open remote WebM: {input}"))?;
-        write_webm(reader, output)
-    } else {
-        // A file (not `fs::read`) so the WebM index pass never loads the media
-        // into memory.
-        let f = std::fs::File::open(input)
-            .with_context(|| format!("failed to open input file: {input}"))?;
-        let reader = tpt_kinetix_demux::MkvReader::open(f)
-            .with_context(|| format!("failed to parse WebM container: {input}"))?;
-        write_webm(reader, output)
-    }
+/// Copies an MP4 input, whose durations come from the sample table.
+fn remux_from_mp4<S: ReadAt>(
+    mut reader: Mp4Reader<S>,
+    output: &Path,
+    target: Target,
+    layout: Layout,
+) -> Result<()> {
+    let streams = reader.streams();
+    let scales: Vec<u32> = streams.iter().map(|s| s.timescale).collect();
+    let mut next = move || -> Result<Option<Frame>> {
+        let Some((p, ticks)) = reader.read_packet_timed()? else {
+            return Ok(None);
+        };
+        let scale = scales.get(p.stream_index as usize).copied().unwrap_or(1000);
+        Ok(Some((p, ticks, scale, 0)))
+    };
+    write_output(streams, &mut next, output, target, layout)
+}
+
+/// Copies a WebM input. Durations are distances to the next frame of the same
+/// track, and `DiscardPadding` travels with its frame.
+fn remux_from_mkv<S: ReadAt>(
+    mut reader: MkvReader<S>,
+    output: &Path,
+    target: Target,
+    layout: Layout,
+) -> Result<()> {
+    let streams: Vec<StreamInfo> = reader.streams().to_vec();
+    let timings = frame_timings(&reader);
+    let mut i = 0usize;
+    let mut next = move || -> Result<Option<Frame>> {
+        let Some(p) = reader.read_packet()? else {
+            return Ok(None);
+        };
+        let (dur_ms, discard) = timings.get(i).copied().unwrap_or((0, 0));
+        i += 1;
+        Ok(Some((p, dur_ms, 1000, discard)))
+    };
+    write_output(streams, &mut next, output, target, layout)
 }
 
 /// The full duration of every frame in milliseconds, plus its `DiscardPadding`.
 ///
 /// A frame's duration is its distance to the next frame *of the same track*;
 /// the last one has no successor, so it uses the Opus nominal 20 ms.
-fn frame_timings(
-    reader: &tpt_kinetix_demux::MkvReader<impl tpt_kinetix_demux::ReadAt>,
-) -> Vec<(u32, u64)> {
+fn frame_timings(reader: &MkvReader<impl ReadAt>) -> Vec<(u32, u64)> {
     let samples = reader.samples();
     let mut out = vec![(0u32, 0u64); samples.len()];
     // Last index seen per track, so each frame can look forward in its own track.
@@ -137,31 +220,93 @@ fn frame_timings(
     out
 }
 
-/// Writes an already-indexed WebM file to `output` (or to stdout as a live
-/// stream when `output` is `-`).
-fn write_webm<S: tpt_kinetix_demux::ReadAt>(
-    mut reader: tpt_kinetix_demux::MkvReader<S>,
+/// Keeps the streams `accept` takes and gives each its index in the output.
+/// The second value maps an input stream index to its output index.
+fn select_streams(
+    streams: Vec<StreamInfo>,
+    accept: impl Fn(&StreamInfo) -> bool,
+) -> (Vec<StreamInfo>, Vec<Option<u32>>) {
+    let mut map = Vec::with_capacity(streams.len());
+    let mut kept = Vec::new();
+    for s in streams {
+        if accept(&s) {
+            map.push(Some(kept.len() as u32));
+            kept.push(s);
+        } else {
+            eprintln!(
+                "skipping stream {} ({:?}, {}): not supported by the output container",
+                s.index,
+                s.media_type,
+                s.codec.name()
+            );
+            map.push(None);
+        }
+    }
+    (kept, map)
+}
+
+/// Streams MP4 can carry: video or audio with a codec the writer knows.
+fn mp4_can_carry(s: &StreamInfo) -> bool {
+    matches!(s.media_type, MediaType::Video | MediaType::Audio)
+        && !matches!(s.codec, CodecId::Unknown(_))
+}
+
+/// Streams WebM can carry.
+fn webm_can_carry(s: &StreamInfo) -> bool {
+    matches!(s.codec, CodecId::Av1 | CodecId::Vp9 | CodecId::Opus)
+}
+
+/// Writes the frames of any input to the chosen container.
+fn write_output(
+    streams: Vec<StreamInfo>,
+    next: &mut NextFrame,
+    output: &Path,
+    target: Target,
+    layout: Layout,
+) -> Result<()> {
+    match target {
+        Target::Webm => {
+            let (kept, map) = select_streams(streams, webm_can_carry);
+            if kept.is_empty() {
+                bail!("no AV1, VP9 or Opus track in the input");
+            }
+            write_webm(&kept, &map, next, output)
+        }
+        Target::Mp4 => {
+            let (kept, map) = select_streams(streams, mp4_can_carry);
+            if kept.is_empty() {
+                bail!("no copyable video or audio streams in the input");
+            }
+            match layout.fragment_ms {
+                Some(ms) => copy_fragmented(next, &kept, &map, output, ms),
+                None => copy_progressive(next, &kept, &map, output, layout.faststart),
+            }
+        }
+    }
+}
+
+/// Writes frames to a WebM file (or a live stream to stdout when `output` is `-`).
+fn write_webm(
+    kept: &[StreamInfo],
+    map: &[Option<u32>],
+    next: &mut NextFrame,
     output: &Path,
 ) -> Result<()> {
     let started = Instant::now();
-    let tracks: Vec<tpt_kinetix_core::stream::StreamInfo> = reader.streams().to_vec();
-    if tracks.is_empty() {
-        bail!("no AV1, VP9 or Opus track in the input");
-    }
-    let timings = frame_timings(&reader);
-
+    let (mut packets, mut bytes) = (0u64, 0u64);
     if output.as_os_str() == "-" {
         // stdout cannot seek, so only a live (unknown-size) stream is possible.
         let mut writer = WebmWriter::with_options(std::io::stdout().lock(), WebmOptions::default());
-        writer.set_tracks(&tracks)?;
-        let (mut packets, mut bytes) = (0u64, 0u64);
-        let mut i = 0usize;
-        while let Some(p) = reader.read_packet()? {
-            let (dur, discard) = timings.get(i).copied().unwrap_or((0, 0));
-            i += 1;
+        writer.set_tracks(kept)?;
+        while let Some((mut p, ticks, scale, discard)) = next()? {
+            let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
+                continue;
+            };
+            p.stream_index = *new_index;
+            let dur_ms = rescale_ticks(ticks, scale, 1000);
             bytes += p.data.len() as u64;
             packets += 1;
-            writer.write_packet_ms_discarding(&p, Some(dur), discard)?;
+            writer.write_packet_ms_discarding(&p, Some(dur_ms), discard)?;
         }
         writer.finish()?;
         eprintln!(
@@ -171,19 +316,19 @@ fn write_webm<S: tpt_kinetix_demux::ReadAt>(
         );
         return Ok(());
     }
-
     let file = std::fs::File::create(output)
         .with_context(|| format!("failed to create {}", output.display()))?;
     let mut writer = WebmWriter::new_seekable(BufWriter::new(file));
-    writer.set_tracks(&tracks)?;
-    let (mut packets, mut bytes) = (0u64, 0u64);
-    let mut i = 0usize;
-    while let Some(p) = reader.read_packet()? {
-        let (dur, discard) = timings.get(i).copied().unwrap_or((0, 0));
-        i += 1;
+    writer.set_tracks(kept)?;
+    while let Some((mut p, ticks, scale, discard)) = next()? {
+        let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
+            continue;
+        };
+        p.stream_index = *new_index;
+        let dur_ms = rescale_ticks(ticks, scale, 1000);
         bytes += p.data.len() as u64;
         packets += 1;
-        writer.write_packet_ms_discarding(&p, Some(dur), discard)?;
+        writer.write_packet_ms_discarding(&p, Some(dur_ms), discard)?;
     }
     writer.finish()?;
     let mut out = writer.into_inner();
@@ -192,10 +337,9 @@ fn write_webm<S: tpt_kinetix_demux::ReadAt>(
         .map_err(|e| anyhow::anyhow!("failed to flush {}: {e}", output.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync {}", output.display()))?;
-
     println!(
         "remuxed {} track(s), {packets} packets, {:.1} MiB of media in {:.2}s (seekable WebM with Cues) -> {}",
-        tracks.len(),
+        kept.len(),
         bytes as f64 / (1 << 20) as f64,
         started.elapsed().as_secs_f64(),
         output.display()
@@ -203,55 +347,30 @@ fn write_webm<S: tpt_kinetix_demux::ReadAt>(
     Ok(())
 }
 
-fn copy<S: ReadAt>(
-    mut reader: Mp4Reader<S>,
+/// Writes a progressive MP4; with `faststart`, `moov` is moved to the front.
+fn copy_progressive(
+    next: &mut NextFrame,
+    kept: &[StreamInfo],
+    map: &[Option<u32>],
     output: &Path,
     want_faststart: bool,
-    fragment_ms: Option<u32>,
 ) -> Result<()> {
     let started = Instant::now();
-    let all = reader.streams();
-
-    // Only video and audio streams with a known codec can be written.
-    let mut map: Vec<Option<u32>> = Vec::new();
-    let mut kept = Vec::new();
-    for s in &all {
-        let writable = matches!(s.media_type, MediaType::Video | MediaType::Audio)
-            && !matches!(s.codec, CodecId::Unknown(_));
-        if writable {
-            map.push(Some(kept.len() as u32));
-            kept.push(s.clone());
-        } else {
-            map.push(None);
-            eprintln!(
-                "skipping stream {} ({:?}, {}): not a supported video/audio codec",
-                s.index,
-                s.media_type,
-                s.codec.name()
-            );
-        }
-    }
-    if kept.is_empty() {
-        bail!("no copyable video or audio streams in the input");
-    }
-
-    if let Some(ms) = fragment_ms {
-        return copy_fragmented(reader, &kept, &map, output, ms, started);
-    }
-
     // With --faststart, write to a sibling temp file first, then relocate moov.
     let tmp = output.with_extension("kinetix-tmp");
     let target: &Path = if want_faststart { &tmp } else { output };
     let file = std::fs::File::create(target)
         .with_context(|| format!("failed to create {}", target.display()))?;
-    let mut writer = Mp4Writer::new(BufWriter::new(file), &kept, WriterOptions::default())?;
-
+    let mut writer = Mp4Writer::new(BufWriter::new(file), kept, WriterOptions::default())?;
     let (mut packets, mut bytes) = (0u64, 0u64);
-    while let Some((mut p, duration)) = reader.read_packet_timed()? {
+    while let Some((mut p, ticks, scale, discard)) = next()? {
         let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
             continue;
         };
         p.stream_index = *new_index;
+        // The writer takes ticks of the output track's timescale.
+        let out_scale = kept[*new_index as usize].timescale;
+        let duration = mp4_duration(ticks, scale, out_scale, discard);
         bytes += p.data.len() as u64;
         packets += 1;
         writer.write_packet_with_duration(&p, Some(duration))?;
@@ -259,7 +378,6 @@ fn copy<S: ReadAt>(
     let mut out = writer.finish()?;
     out.flush()?;
     drop(out);
-
     let mut moov_note = String::new();
     if want_faststart {
         let mut src = std::fs::File::open(&tmp)?;
@@ -270,7 +388,6 @@ fn copy<S: ReadAt>(
         std::fs::remove_file(&tmp).ok();
         moov_note = format!(", moov moved to front ({} bytes)", report.moov_bytes);
     }
-
     let secs = started.elapsed().as_secs_f64();
     println!(
         "remuxed {} stream(s), {packets} packets, {:.1} MiB of media in {secs:.2}s{moov_note} -> {}",
@@ -284,14 +401,14 @@ fn copy<S: ReadAt>(
 /// Writes fragmented MP4: an init segment, then one `moof`/`mdat` fragment per
 /// `fragment_ms` of the first video stream (cut at its next key frame), or per
 /// `fragment_ms` of the first stream when there is no video.
-fn copy_fragmented<S: ReadAt>(
-    mut reader: Mp4Reader<S>,
-    kept: &[tpt_kinetix_core::stream::StreamInfo],
+fn copy_fragmented(
+    next: &mut NextFrame,
+    kept: &[StreamInfo],
     map: &[Option<u32>],
     output: &Path,
     fragment_ms: u32,
-    started: Instant,
 ) -> Result<()> {
+    let started = Instant::now();
     let mut out: Box<dyn Write> = if output.as_os_str() == "-" {
         Box::new(BufWriter::new(std::io::stdout().lock()))
     } else {
@@ -306,13 +423,14 @@ fn copy_fragmented<S: ReadAt>(
         .iter()
         .position(|s| s.media_type == MediaType::Video)
         .unwrap_or(0);
-
     let (mut packets, mut bytes, mut fragments) = (0u64, 0u64, 0u64);
-    while let Some((mut p, duration)) = reader.read_packet_timed()? {
+    while let Some((mut p, ticks, scale, discard)) = next()? {
         let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
             continue;
         };
         p.stream_index = *new_index;
+        let out_scale = kept[*new_index as usize].timescale;
+        let duration = mp4_duration(ticks, scale, out_scale, discard);
         // Cut before a lead-stream key frame once the fragment is long enough.
         if p.stream_index as usize == lead
             && p.is_key_frame
