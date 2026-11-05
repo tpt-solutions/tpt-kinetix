@@ -44,7 +44,8 @@ enum Commands {
     Remux {
         /// Input MP4 or WebM (path or http(s) URL).
         input: String,
-        /// Output path. A `.webm` or `.mkv` name writes WebM; anything else writes MP4.
+        /// Output path. `.webm`/`.mkv` writes WebM, `.ivf` writes one AV1 or VP9 track
+        /// as IVF, and anything else writes MP4.
         output: PathBuf,
         /// Move the index (`moov`) to the front so the file plays while downloading.
         #[arg(long)]

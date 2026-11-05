@@ -18,7 +18,7 @@ use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
 use tpt_kinetix_demux::{Demuxer, MkvReader, Mp4Reader, ReadAt};
 use tpt_kinetix_mux::{
-    faststart, FragmentWriter, Mp4Writer, WebmOptions, WebmWriter, WriterOptions,
+    faststart, FragmentWriter, IvfWriter, Mp4Writer, WebmOptions, WebmWriter, WriterOptions,
 };
 
 /// One packet, its duration as `(ticks, timescale)`, and its trailing discard
@@ -53,6 +53,8 @@ type NextFrame<'a> = dyn FnMut() -> Result<Option<Frame>> + 'a;
 enum Target {
     Mp4,
     Webm,
+    /// A bare AV1 or VP9 stream (one video track).
+    Ivf,
 }
 
 /// Output options that only MP4 can honour.
@@ -60,6 +62,14 @@ enum Target {
 struct Layout {
     faststart: bool,
     fragment_ms: Option<u32>,
+}
+
+/// Whether `output` names an IVF file.
+fn wants_ivf(output: &Path) -> bool {
+    output
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ivf"))
 }
 
 /// Whether `output` names a Matroska/WebM file.
@@ -103,7 +113,9 @@ pub fn remux(
         head == [0x1A, 0x45, 0xDF, 0xA3]
     };
     // `-` (stdout) can only carry a live WebM or a fragmented MP4.
-    let target = if wants_webm(output) || (output.as_os_str() == "-" && input_is_webm) {
+    let target = if wants_ivf(output) {
+        Target::Ivf
+    } else if wants_webm(output) || (output.as_os_str() == "-" && input_is_webm) {
         Target::Webm
     } else {
         Target::Mp4
@@ -112,8 +124,14 @@ pub fn remux(
         faststart: want_faststart,
         fragment_ms,
     };
-    if target == Target::Webm && (layout.faststart || layout.fragment_ms.is_some()) {
-        bail!("--faststart and --fragmented are MP4-only; WebM output is always seekable");
+    if target != Target::Mp4 && (layout.faststart || layout.fragment_ms.is_some()) {
+        if target == Target::Webm {
+            bail!("--faststart and --fragmented are MP4-only; WebM output is always seekable");
+        }
+        bail!("--faststart and --fragmented are MP4-only");
+    }
+    if target == Target::Ivf && output.as_os_str() == "-" {
+        bail!("IVF output needs a file name, not stdout");
     }
     if target == Target::Mp4 && output.as_os_str() == "-" && fragment_ms.is_none() {
         bail!("writing MP4 to stdout needs --fragmented (a progressive MP4 must seek back)");
@@ -272,6 +290,7 @@ fn write_output(
             }
             write_webm(&kept, &map, next, output)
         }
+        Target::Ivf => write_ivf(streams, next, output),
         Target::Mp4 => {
             let (kept, map) = select_streams(streams, mp4_can_carry);
             if kept.is_empty() {
@@ -283,6 +302,48 @@ fn write_output(
             }
         }
     }
+}
+
+/// Writes the first AV1 or VP9 video track of the input as IVF; other streams are dropped.
+fn write_ivf(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> Result<()> {
+    let started = Instant::now();
+    let chosen = streams
+        .iter()
+        .find(|s| {
+            s.media_type == MediaType::Video && matches!(s.codec, CodecId::Av1 | CodecId::Vp9)
+        })
+        .map(|s| s.index);
+    let Some(chosen) = chosen else {
+        bail!("IVF needs an AV1 or VP9 video track in the input");
+    };
+    let (kept, map) = select_streams(streams, |s| s.index == chosen);
+    let track = &kept[0];
+    let file = std::fs::File::create(output)
+        .with_context(|| format!("failed to create {}", output.display()))?;
+    let mut writer = IvfWriter::new(BufWriter::new(file), track)?;
+    let (mut frames, mut bytes) = (0u64, 0u64);
+    while let Some((mut p, ticks, scale, discard)) = next()? {
+        let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
+            continue;
+        };
+        p.stream_index = *new_index;
+        let duration = mp4_duration(ticks, scale, track.timescale, discard);
+        bytes += p.data.len() as u64;
+        frames += 1;
+        writer.write_packet(&p, Some(duration))?;
+    }
+    let out = writer.finish()?;
+    out.into_inner()
+        .map_err(|e| anyhow::anyhow!("failed to flush {}: {e}", output.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", output.display()))?;
+    println!(
+        "remuxed 1 video track, {frames} frames, {:.1} MiB of media in {:.2}s (IVF) -> {}",
+        bytes as f64 / (1 << 20) as f64,
+        started.elapsed().as_secs_f64(),
+        output.display()
+    );
+    Ok(())
 }
 
 /// Writes frames to a WebM file (or a live stream to stdout when `output` is `-`).

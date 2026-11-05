@@ -1,5 +1,6 @@
 //! `tpt-kinetix remux` picks the output container from the output name: WebM
-//! in and `.mp4` out is an MP4 with the same frames and duration, and back again.
+//! in and `.mp4` out is an MP4 with the same frames and duration, and back again;
+//! `.ivf` out keeps the video frames.
 //! Needs ffmpeg with libvpx-vp9 and libopus (skipped otherwise).
 
 use std::path::Path;
@@ -121,6 +122,11 @@ fn webm_to_mp4_and_back_keeps_frames_and_duration() {
     assert_eq!(video.len(), 50, "2 s at 25 fps");
     assert_eq!(frame_hashes(&mp4, "0:v:0"), video, "MP4 video frames");
     assert_eq!(frame_hashes(&back, "0:v:0"), video, "WebM video frames");
+
+    let ivf = dir.join("out.ivf");
+    remux(&src, &ivf);
+    assert_eq!(&file_head(&ivf)[..4], b"DKIF", "a .ivf output must be IVF");
+    assert_eq!(frame_hashes(&ivf, "0:v:0"), video, "IVF video frames");
 
     let d = duration_secs(&src);
     assert!((duration_secs(&mp4) - d).abs() < 0.05, "MP4 duration");

@@ -40,12 +40,14 @@
 pub mod entries;
 pub mod faststart;
 pub mod fragmented;
+pub mod ivf;
 pub mod mp4;
 pub mod webm;
 pub mod writer;
 
 pub use faststart::{faststart, FaststartReport};
 pub use fragmented::FragmentWriter;
+pub use ivf::IvfWriter;
 pub use mp4::{Mp4Muxer, Mp4MuxerConfig, MuxError};
 pub use webm::{WebmOptions, WebmWriter};
 pub use writer::{Mp4Writer, WriterOptions};
