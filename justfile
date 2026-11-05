@@ -66,6 +66,10 @@ fuzz-build:
     cd tpt-kinetix-vision && cargo fuzz build fuzz_vision_parser
     cd tpt-kinetix-volumetric && cargo fuzz build fuzz_volumetric_parser
 
+# Render docs/perf/*.json into docs/perf/dashboard.html (stdlib Python only).
+perf-dashboard:
+    python tools/perf_dashboard.py
+
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
 fuzz crate target seconds="60":
     cd {{crate}} && cargo fuzz run {{target}} -- -max_total_time={{seconds}}

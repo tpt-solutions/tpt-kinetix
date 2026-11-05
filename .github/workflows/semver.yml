@@ -1,0 +1,40 @@
+name: Semver (scheduled)
+
+# Compares the public API of the published crates with the last release on
+# crates.io, weekly and on manual dispatch. Best effort: a crate that is new to
+# crates.io has no baseline and is reported, not failed, so the job is not
+# required. Unpublished crates (publish = false) are excluded.
+
+on:
+  schedule:
+    # 05:11 UTC every Monday
+    - cron: "11 5 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  semver:
+    name: cargo-semver-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+      - name: Check the published crates
+        continue-on-error: true
+        run: |
+          cargo semver-checks --workspace \
+            --exclude out-kinetix-h264 \
+            --exclude tpt-kinetix-test-utils \
+            2>&1 | tee semver-report.txt
+      - name: Upload report
+        uses: actions/upload-artifact@v7
+        with:
+          name: semver-report
+          path: semver-report.txt
+          if-no-files-found: warn
