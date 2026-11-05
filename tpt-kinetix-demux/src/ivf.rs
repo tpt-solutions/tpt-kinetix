@@ -85,6 +85,71 @@ impl IvfDemuxer {
     }
 }
 
+/// Whether an IVF frame is a keyframe, from its bitstream.
+///
+/// VP9 states it in the frame header: `frame_type` is 0 for a key frame, and a
+/// frame that only shows an existing picture is never one. AV1 keeps the frame
+/// type deeper in the header, so a temporal unit that starts with a sequence
+/// header OBU is taken as a key frame; libaom and rav1e write one at each
+/// keyframe.
+fn is_keyframe(codec: CodecId, payload: &[u8]) -> bool {
+    match codec {
+        CodecId::Vp9 => {
+            let Some(&b) = payload.first() else {
+                return false;
+            };
+            if b >> 6 != 0b10 {
+                return false; // frame_marker
+            }
+            let profile = ((b >> 5) & 1) | (((b >> 4) & 1) << 1);
+            // Profile 3 has a reserved bit before show_existing_frame.
+            let (show_existing, frame_type) = if profile == 3 {
+                ((b >> 2) & 1, (b >> 1) & 1)
+            } else {
+                ((b >> 3) & 1, (b >> 2) & 1)
+            };
+            show_existing == 0 && frame_type == 0
+        }
+        CodecId::Av1 => has_sequence_header(payload),
+        _ => false,
+    }
+}
+
+/// Whether a low-overhead AV1 temporal unit contains a sequence header OBU.
+fn has_sequence_header(payload: &[u8]) -> bool {
+    const OBU_SEQUENCE_HEADER: u8 = 1;
+    let mut i = 0;
+    while i < payload.len() {
+        let header = payload[i];
+        if (header >> 3) & 0x0f == OBU_SEQUENCE_HEADER {
+            return true;
+        }
+        if header & 0x02 == 0 {
+            return false; // no size field: the OBU runs to the end
+        }
+        let mut j = i + 1 + usize::from((header >> 2) & 1);
+        let mut size = 0u64;
+        for k in 0..4 {
+            let Some(&b) = payload.get(j) else {
+                return false;
+            };
+            j += 1;
+            size |= u64::from(b & 0x7f) << (7 * k);
+            if b & 0x80 == 0 {
+                break;
+            }
+            if k == 3 {
+                return false;
+            }
+        }
+        match usize::try_from(size).ok().and_then(|n| j.checked_add(n)) {
+            Some(next) => i = next,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// The parsed header plus the per-frame payload ranges and the inter-frame tick
 /// step.
 type ParsedIvf = (StreamInfo, Vec<(usize, usize)>, u64);
@@ -172,16 +237,15 @@ impl Demuxer for IvfDemuxer {
         // `time_base` is seconds-per-tick as (num, den), so a 30 ticks-per-second
         // clock is (1, 30).
         let ts = Timestamp::new(self.timestamp(index) as i64, (1, self.info.timescale));
-        // IVF has no per-frame key-frame flag — the format simply does not carry
-        // one. Every frame is reported as a key frame: the first must be one to be
-        // decodable, and marking the rest keeps a caller that seeks on key frames
-        // able to make progress. The decoder is what rejects mid-sequence frames.
+        // IVF has no key-frame flag of its own, so it is read from the bitstream.
+        let data = self.data[start..end].to_vec();
+        let is_key_frame = is_keyframe(self.info.codec, &data);
         Ok(Some(Packet {
-            data: self.data[start..end].to_vec(),
+            data,
             stream_index: 0,
             pts: ts,
             dts: ts,
-            is_key_frame: true,
+            is_key_frame,
         }))
     }
 
@@ -199,5 +263,35 @@ impl Demuxer for IvfDemuxer {
         }
         self.cursor = chosen;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod keyframe_tests {
+    use super::*;
+
+    #[test]
+    fn vp9_key_and_inter_frames_are_told_apart() {
+        // frame_marker 0b10, profile 0, show_existing 0, frame_type 0 (key) / 1 (inter).
+        assert!(is_keyframe(CodecId::Vp9, &[0x80, 0x00]));
+        assert!(!is_keyframe(CodecId::Vp9, &[0x84, 0x00]));
+        // A show-existing frame is not a key frame.
+        assert!(!is_keyframe(CodecId::Vp9, &[0x88]));
+        // Profile 3 shifts the bits by one (reserved bit first).
+        assert!(is_keyframe(CodecId::Vp9, &[0xB0]));
+        assert!(!is_keyframe(CodecId::Vp9, &[0xB2]));
+        assert!(!is_keyframe(CodecId::Vp9, &[]));
+    }
+
+    #[test]
+    fn av1_sequence_header_marks_a_key_frame() {
+        // Sequence header (type 1, size field) then a frame OBU (type 6).
+        assert!(is_keyframe(CodecId::Av1, &[0x0a, 0x00, 0x32, 0x00]));
+        assert!(!is_keyframe(CodecId::Av1, &[0x32, 0x00]));
+        // A size that runs past the end is not walked off the buffer.
+        assert!(!is_keyframe(
+            CodecId::Av1,
+            &[0x32, 0xff, 0xff, 0xff, 0xff, 0x0a]
+        ));
     }
 }
