@@ -105,15 +105,18 @@ fn patch_offsets(moov: &mut [u8], lo: u64, hi: u64, delta: u64) -> Result<(), Mu
                     let big = data
                         .get(pos + 8..pos + 16)
                         .ok_or_else(|| MuxError::InvalidConfig("truncated box".into()))?;
-                    (
-                        16usize,
-                        u64::from_be_bytes(big.try_into().unwrap()) as usize,
-                    )
+                    // `as usize` would truncate on 32-bit targets and let a wrapped
+                    // size slip past the bounds check below.
+                    let size = usize::try_from(u64::from_be_bytes(big.try_into().unwrap()))
+                        .map_err(|_| MuxError::InvalidConfig("box size too large".into()))?;
+                    (16usize, size)
                 }
                 0 => (8, data.len() - pos),
                 n => (8, n),
             };
-            if size < hlen || pos + size > data.len() {
+            // `pos <= data.len()` holds here, so the subtraction cannot underflow;
+            // `pos + size` could overflow `usize` on a 32-bit target.
+            if size < hlen || size > data.len() - pos {
                 return Err(MuxError::InvalidConfig("malformed box inside moov".into()));
             }
             let body = &mut data[pos + hlen..pos + size];
@@ -130,7 +133,13 @@ fn patch_offsets(moov: &mut [u8], lo: u64, hi: u64, delta: u64) -> Result<(), Mu
                             .try_into()
                             .unwrap(),
                     ) as usize;
-                    if body.len() < 8 + count * width {
+                    let needed = count
+                        .checked_mul(width)
+                        .and_then(|n| n.checked_add(8))
+                        .ok_or_else(|| {
+                            MuxError::InvalidConfig("chunk offset table too large".into())
+                        })?;
+                    if body.len() < needed {
                         return Err(MuxError::InvalidConfig(
                             "truncated chunk offset table".into(),
                         ));
@@ -143,7 +152,11 @@ fn patch_offsets(moov: &mut [u8], lo: u64, hi: u64, delta: u64) -> Result<(), Mu
                             u64::from(u32::from_be_bytes(body[at..at + 4].try_into().unwrap()))
                         };
                         if off >= lo && off < hi {
-                            let new = off + delta;
+                            let new = off.checked_add(delta).ok_or_else(|| {
+                                MuxError::Unsupported(
+                                    "chunk offset overflows after moving moov".into(),
+                                )
+                            })?;
                             if wide {
                                 body[at..at + 8].copy_from_slice(&new.to_be_bytes());
                             } else {

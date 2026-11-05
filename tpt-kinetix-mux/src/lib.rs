@@ -1,16 +1,17 @@
 //! `tpt-kinetix-mux` — container muxers for the TPT Kinetix media engine.
 //!
-//! This crate writes encoded media back out into a container. The initial
-//! implementation targets progressive (non-fragmented) MP4 / ISO-BMFF with a
-//! single H.264 (`avc1`) video track, which is enough to round-trip
-//! demux → (transcode) → mux and produce a file most players accept.
+//! This crate writes encoded media back out into a container:
 //!
-//! # Scope
+//! - [`Mp4Writer`] — multi-track MP4 / ISO-BMFF writer for passthrough and
+//!   remux, with [`faststart`] to move `moov` ahead of `mdat` for progressive
+//!   HTTP playback.
+//! - [`FragmentWriter`] — fragmented MP4 (`moof`/`mdat`, CMAF-style) output.
+//! - [`WebmWriter`] — WebM output.
+//! - [`Mp4Muxer`] — the original single-track H.264 (`avc1`) writer, kept for
+//!   existing callers. New code should use [`Mp4Writer`].
 //!
-//! - [`Mp4Muxer`] — write `ftyp` + `mdat` + `moov` for one H.264 video track.
-//!
-//! Audio tracks, multiple tracks, and fragmented MP4 (`moof`) output are not
-//! yet implemented; see `todo.md`.
+//! [`faststart`] works on any MP4 it is given, not only files written here.
+//! Muxers take already-encoded samples; they do not decode or encode media.
 //!
 //! # Examples
 //!

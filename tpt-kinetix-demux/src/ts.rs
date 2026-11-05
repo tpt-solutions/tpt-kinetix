@@ -453,7 +453,7 @@ impl TsDemuxer {
             // A discontinuity flag on the starting packet is fine; the fresh
             // start below replaces any (possibly garbage) prior state anyway.
             if payload.len() >= 3 && payload[..3] == [0x00, 0x00, 0x01] {
-                let assembler = self.pes.get_mut(&pid).expect("entry created above");
+                let assembler = self.pes.entry(pid).or_default();
                 assembler.buf = payload.to_vec();
                 assembler.key_frame = rai;
             }
