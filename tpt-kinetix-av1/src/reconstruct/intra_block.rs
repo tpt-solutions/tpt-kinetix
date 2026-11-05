@@ -2293,8 +2293,13 @@ impl<'a> TileDecodeState<'a> {
             // `src_top = by*4 + (mv.y >> 3)` — so the displacement is *added*.
             // Source is clamped to the tile buffer; out-of-bounds reads (from
             // an invalid/not-yet-decoded region) return neutral grey.
-            let src_x = (px_x as i32 + mv_dx) as usize;
-            let src_y = (px_y as i32 + mv_dy) as usize;
+            // The origin stays signed: a displacement can point left of or
+            // above the tile, and casting a negative value to `usize` wraps it
+            // to a huge index whose `row * stride` product overflows (a panic
+            // under overflow checks, found by `fuzz_av1_frame`). The sample
+            // fetch below rejects negative or overflowing coordinates instead.
+            let src_x = px_x as i64 + mv_dx as i64;
+            let src_y = px_y as i64 + mv_dy as i64;
 
             // IBC has `IsInter = 1`: `transform_type()` takes the real
             // inter branch (`read_inter_transform_type`, `coeff.rs`) — a
@@ -2384,9 +2389,8 @@ impl<'a> TileDecodeState<'a> {
                     if wx >= tile_w {
                         break;
                     }
-                    let src_val = y_plane
-                        .get((src_y + dy) * y_stride + (src_x + dx))
-                        .copied()
+                    let src_val = plane_index(src_x + dx as i64, src_y + dy as i64, y_stride)
+                        .and_then(|i| y_plane.get(i).copied())
                         .unwrap_or(mid_sample(self.bit_depth) as Px)
                         as i32;
                     if let Some(slot) = y_plane.get_mut(wy * y_stride + wx) {
@@ -2803,4 +2807,13 @@ impl<'a> TileDecodeState<'a> {
 
         Ok(())
     }
+}
+
+/// Index of the sample at `(x, y)` in a plane with row stride `stride`, or
+/// `None` when either coordinate is negative or the index overflows. IBC source
+/// origins can fall outside the tile, so the caller must not assume `x, y >= 0`.
+fn plane_index(x: i64, y: i64, stride: usize) -> Option<usize> {
+    let x = usize::try_from(x).ok()?;
+    let y = usize::try_from(y).ok()?;
+    y.checked_mul(stride)?.checked_add(x)
 }

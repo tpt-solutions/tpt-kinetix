@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Intra block copy with a source origin left of or above the tile no longer overflows
+  `row * stride` (a panic under overflow checks). The origin stays signed and out-of-range
+  samples read as neutral grey, as the code already documented. Found by `fuzz_av1_frame`;
+  regression cases pinned in `tests/fuzz_regressions.rs`.
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Added
