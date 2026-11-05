@@ -772,10 +772,12 @@ impl LiveServer {
             Err(refusal) => {
                 self.metrics.count_refusal(refusal);
                 tracing::warn!(%key, "publish refused: {}", refusal.message());
-                return respond(
-                    r.get_mut(),
+                // Drain the body before replying: closing with unread bytes resets
+                // the connection, and the client can lose the status line (409/503).
+                return respond_drained(
+                    &mut r,
+                    headers,
                     Reply::text(refusal.status(), refusal.message()),
-                    false,
                 )
                 .await;
             }

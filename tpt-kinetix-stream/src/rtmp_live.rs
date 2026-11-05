@@ -377,7 +377,11 @@ impl RtmpLiveSession {
                 }
             }
         }
-        self.enqueue(false, track_id, ts, key, data.to_vec());
+        let data = match codec {
+            CodecId::Av1 => strip_av1_temporal_delimiters(data),
+            _ => data.to_vec(),
+        };
+        self.enqueue(false, track_id, ts, key, data);
     }
 
     fn enqueue(&mut self, audio: bool, track: u8, ts: u32, key: bool, data: Vec<u8>) {
@@ -512,5 +516,89 @@ impl LiveServer {
             tls,
         })
         .with_session_factory(move || RtmpLiveSession::new(server.clone()).into_sink())
+    }
+}
+
+/// Drops the temporal delimiter OBUs from one AV1 frame (Enhanced RTMP carries
+/// them, as ffmpeg's FLV muxer writes them). An AV1 sample in an ISO-BMFF track
+/// must not contain them (the WebM path already strips them), and strict
+/// readers reject the fragment. Any other OBU is copied byte for byte. A frame
+/// whose OBU framing does not parse is returned unchanged.
+fn strip_av1_temporal_delimiters(data: &[u8]) -> Vec<u8> {
+    const OBU_TEMPORAL_DELIMITER: u8 = 2;
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        let header = data[i];
+        let obu_type = (header >> 3) & 0x0f;
+        let has_extension = header & 0x04 != 0;
+        let has_size = header & 0x02 != 0;
+        let mut j = i + 1 + usize::from(has_extension);
+        if j > data.len() {
+            return data.to_vec();
+        }
+        let end = if has_size {
+            let mut size = 0u64;
+            let mut k = 0;
+            loop {
+                let Some(&b) = data.get(j) else {
+                    return data.to_vec();
+                };
+                j += 1;
+                size |= u64::from(b & 0x7f) << (7 * k);
+                k += 1;
+                if b & 0x80 == 0 {
+                    break;
+                }
+                if k == 8 {
+                    return data.to_vec();
+                }
+            }
+            match usize::try_from(size).ok().and_then(|s| j.checked_add(s)) {
+                Some(end) if end <= data.len() => end,
+                _ => return data.to_vec(),
+            }
+        } else {
+            // Without a size field the OBU runs to the end of the frame.
+            data.len()
+        };
+        if obu_type != OBU_TEMPORAL_DELIMITER {
+            out.extend_from_slice(&data[i..end]);
+        }
+        i = end;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_av1_temporal_delimiters as strip;
+
+    #[test]
+    fn strips_temporal_delimiters_and_keeps_other_obus_verbatim() {
+        // TD (type 2, size 0) | sequence header (type 1, size 2) | frame (type 6, size 3)
+        let frame = [0x12, 0x00, 0x0a, 0x02, 0xaa, 0xbb, 0x32, 0x03, 1, 2, 3];
+        assert_eq!(strip(&frame), [0x0a, 0x02, 0xaa, 0xbb, 0x32, 0x03, 1, 2, 3]);
+    }
+
+    #[test]
+    fn keeps_a_frame_without_delimiters_unchanged() {
+        let frame = [0x0a, 0x01, 0x55, 0x32, 0x00];
+        assert_eq!(strip(&frame), frame);
+    }
+
+    #[test]
+    fn unparseable_framing_is_returned_unchanged() {
+        // Declares 9 payload bytes but only 2 follow.
+        let frame = [0x32, 0x09, 0x01, 0x02];
+        assert_eq!(strip(&frame), frame);
+        assert_eq!(strip(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn obu_without_size_field_runs_to_the_end() {
+        // TD with size field, then a type-6 OBU with no size field.
+        let frame = [0x12, 0x00, 0x30, 7, 8];
+        assert_eq!(strip(&frame), [0x30, 7, 8]);
     }
 }

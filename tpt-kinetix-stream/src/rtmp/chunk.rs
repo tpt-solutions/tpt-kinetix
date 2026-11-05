@@ -69,8 +69,8 @@ impl ChunkParser {
             0 => ChunkHeaderFormat::Type0,
             1 => ChunkHeaderFormat::Type1,
             2 => ChunkHeaderFormat::Type2,
-            3 => ChunkHeaderFormat::Type3,
-            _ => unreachable!(),
+            // `first_byte >> 6` is two bits, so this arm is exactly the value 3.
+            _ => ChunkHeaderFormat::Type3,
         };
 
         let (chunk_stream_id, basic_header_len) = {
@@ -360,15 +360,21 @@ impl ChunkAssembler {
             // Remove consumed bytes from the front of the buffer.
             self.buf.drain(..after_header_len + this_chunk);
 
+            // The declared length is attacker-controlled (up to 16 MiB per chunk
+            // stream), so never pre-reserve more than a modest amount; the buffer
+            // then grows only with bytes the peer has actually sent.
+            const MAX_PREALLOC: usize = 64 * 1024;
             let entry = self.partial.entry(cs_id).or_insert_with(|| PartialMessage {
                 header: header.clone(),
-                data: Vec::with_capacity(header.message_length as usize),
+                data: Vec::with_capacity((header.message_length as usize).min(MAX_PREALLOC)),
             });
             entry.header = header.clone();
             entry.data.extend_from_slice(&payload);
 
             if entry.data.len() >= header.message_length as usize {
-                let complete = self.partial.remove(&cs_id).expect("just inserted");
+                let Some(complete) = self.partial.remove(&cs_id) else {
+                    continue;
+                };
                 // A chunk-size change applies to the very next chunk, which may
                 // already be in this buffer.
                 if complete.header.message_type_id == MessageTypeId::SetChunkSize as u8
