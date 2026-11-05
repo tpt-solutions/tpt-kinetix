@@ -18,7 +18,8 @@ use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
 use tpt_kinetix_demux::{Demuxer, MkvReader, Mp4Reader, ReadAt};
 use tpt_kinetix_mux::{
-    faststart, FragmentWriter, IvfWriter, Mp4Writer, WebmOptions, WebmWriter, WriterOptions,
+    faststart, FragmentWriter, IvfWriter, Mp4Writer, OggWriter, WebmOptions, WebmWriter,
+    WriterOptions,
 };
 
 /// One packet, its duration as `(ticks, timescale)`, and its trailing discard
@@ -26,6 +27,9 @@ use tpt_kinetix_mux::{
 /// durations are milliseconds, so their timescale is 1000; MP4 durations are in
 /// their track's timescale.
 type Frame = (Packet, u32, u32, u64);
+
+/// Opus always runs on a 48 kHz clock.
+const OPUS_RATE: u32 = 48_000;
 
 /// `value` ticks of a `from` timescale, expressed in a `to` timescale.
 fn rescale_ticks(value: u32, from: u32, to: u32) -> u32 {
@@ -55,6 +59,8 @@ enum Target {
     Webm,
     /// A bare AV1 or VP9 stream (one video track).
     Ivf,
+    /// An Ogg stream of one Opus track.
+    Ogg,
 }
 
 /// Output options that only MP4 can honour.
@@ -62,6 +68,14 @@ enum Target {
 struct Layout {
     faststart: bool,
     fragment_ms: Option<u32>,
+}
+
+/// Whether `output` names an Ogg file (Opus audio).
+fn wants_ogg(output: &Path) -> bool {
+    output
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ogg") || e.eq_ignore_ascii_case("opus"))
 }
 
 /// Whether `output` names an IVF file.
@@ -115,6 +129,8 @@ pub fn remux(
     // `-` (stdout) can only carry a live WebM or a fragmented MP4.
     let target = if wants_ivf(output) {
         Target::Ivf
+    } else if wants_ogg(output) {
+        Target::Ogg
     } else if wants_webm(output) || (output.as_os_str() == "-" && input_is_webm) {
         Target::Webm
     } else {
@@ -130,8 +146,8 @@ pub fn remux(
         }
         bail!("--faststart and --fragmented are MP4-only");
     }
-    if target == Target::Ivf && output.as_os_str() == "-" {
-        bail!("IVF output needs a file name, not stdout");
+    if matches!(target, Target::Ivf | Target::Ogg) && output.as_os_str() == "-" {
+        bail!("this output needs a file name, not stdout");
     }
     if target == Target::Mp4 && output.as_os_str() == "-" && fragment_ms.is_none() {
         bail!("writing MP4 to stdout needs --fragmented (a progressive MP4 must seek back)");
@@ -291,6 +307,7 @@ fn write_output(
             write_webm(&kept, &map, next, output)
         }
         Target::Ivf => write_ivf(streams, next, output),
+        Target::Ogg => write_ogg(streams, next, output),
         Target::Mp4 => {
             let (kept, map) = select_streams(streams, mp4_can_carry);
             if kept.is_empty() {
@@ -339,6 +356,48 @@ fn write_ivf(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> R
         .with_context(|| format!("failed to sync {}", output.display()))?;
     println!(
         "remuxed 1 video track, {frames} frames, {:.1} MiB of media in {:.2}s (IVF) -> {}",
+        bytes as f64 / (1 << 20) as f64,
+        started.elapsed().as_secs_f64(),
+        output.display()
+    );
+    Ok(())
+}
+
+/// Writes the first Opus track of the input as Ogg; other streams are dropped.
+fn write_ogg(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> Result<()> {
+    let started = Instant::now();
+    let chosen = streams
+        .iter()
+        .find(|s| s.media_type == MediaType::Audio && s.codec == CodecId::Opus)
+        .map(|s| s.index);
+    let Some(chosen) = chosen else {
+        bail!("Ogg output needs an Opus audio track in the input");
+    };
+    let (kept, map) = select_streams(streams, |s| s.index == chosen);
+    let track = &kept[0];
+    let file = std::fs::File::create(output)
+        .with_context(|| format!("failed to create {}", output.display()))?;
+    // Opus granules count 48 kHz samples; the serial only has to be unique in the file.
+    let mut writer = OggWriter::new(BufWriter::new(file), track, 1)?;
+    let (mut packets, mut bytes) = (0u64, 0u64);
+    while let Some((mut p, ticks, scale, discard)) = next()? {
+        let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
+            continue;
+        };
+        p.stream_index = *new_index;
+        // Opus granules count 48 kHz samples, and a DiscardPadding trims the end.
+        let duration = mp4_duration(ticks, scale, OPUS_RATE, discard);
+        bytes += p.data.len() as u64;
+        packets += 1;
+        writer.write_packet(&p.data, duration)?;
+    }
+    let out = writer.finish()?;
+    out.into_inner()
+        .map_err(|e| anyhow::anyhow!("failed to flush {}: {e}", output.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", output.display()))?;
+    println!(
+        "remuxed 1 audio track, {packets} packets, {:.1} MiB of media in {:.2}s (Ogg) -> {}",
         bytes as f64 / (1 << 20) as f64,
         started.elapsed().as_secs_f64(),
         output.display()

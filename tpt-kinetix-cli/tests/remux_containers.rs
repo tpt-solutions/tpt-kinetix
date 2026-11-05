@@ -133,3 +133,75 @@ fn webm_to_mp4_and_back_keeps_frames_and_duration() {
     assert!((duration_secs(&back) - d).abs() < 0.05, "WebM duration");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Per-frame MD5s of one audio stream.
+fn audio_hashes(path: &Path) -> Vec<String> {
+    frame_hashes(path, "0:a:0")
+}
+
+#[test]
+fn opus_to_ogg_keeps_the_audio_frames() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_remux_ogg_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src.webm");
+    let made = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "2",
+            "-c:a",
+            "libopus",
+        ])
+        .arg(&src)
+        .status()
+        .unwrap();
+    if !made.success() {
+        eprintln!("skipping: could not encode Opus with ffmpeg");
+        return;
+    }
+    let ogg = dir.join("out.ogg");
+    remux(&src, &ogg);
+    assert_eq!(&file_head(&ogg)[..4], b"OggS", "a .ogg output must be Ogg");
+
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&ogg)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "opus");
+
+    // The last frame may differ: the Ogg granule carries the end trim of the
+    // source's DiscardPadding, and the decoder then emits a shorter final frame.
+    let (want, got) = (audio_hashes(&src), audio_hashes(&ogg));
+    assert!(
+        got.len() >= want.len() - 1,
+        "{} vs {} frames",
+        got.len(),
+        want.len()
+    );
+    assert_eq!(
+        got[..want.len() - 1],
+        want[..want.len() - 1],
+        "audio frames"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
