@@ -1,5 +1,6 @@
 //! `tpt-kinetix` — command-line interface for the TPT Kinetix media engine.
 
+mod doctor;
 mod package;
 mod png;
 mod probe_json;
@@ -69,6 +70,14 @@ enum Commands {
         /// Target fragment length in milliseconds (cut at the next video key frame).
         #[arg(long, default_value_t = 2000, requires = "fragmented")]
         fragment_ms: u32,
+    },
+    /// Say whether a file will play in a browser, and why not (no decoding).
+    #[command(after_help = "Examples:
+  tpt-kinetix doctor in.webm
+  tpt-kinetix doctor in.ivf      # exits non-zero: IVF has no browser path")]
+    Doctor {
+        /// File to check: WebM, MP4, IVF or MPEG-TS.
+        input: PathBuf,
     },
     /// Write stills from the keyframes of an AV1 or VP9 video, as PNG files.
     ///
@@ -304,6 +313,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Probe { input, json } => probe(&input, json),
+        Commands::Doctor { input } => doctor::run(&input),
         Commands::Thumbnails {
             input,
             output,
