@@ -115,7 +115,7 @@ wasm / msrv / deny / fuzz-check (compile only) / conformance.
 
 ## Other
 
-- `todo.md` (repo root) and `history/`, `scratch_cabac/`, `memory/`, `out.yuv`,
+- `todo.md` (repo root) and `history/`, `scratch_cabac/`, `out.yuv`,
   are scratch/work artifacts — not documentation or build inputs.
 - Repo-local Kilo config: `.kilo/kilo.jsonc` (`snapshot: false`). Project instructions also
   live in `README.md`, `CONTRIBUTING.md`, and `docs/`.
