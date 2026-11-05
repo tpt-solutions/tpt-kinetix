@@ -26,6 +26,15 @@ pub struct ChunkHeader {
     pub message_stream_id: u32,
 }
 
+/// Most distinct chunk-stream ids a peer may use on one connection. A publisher
+/// uses a handful; past this the peer is abusing the parser's per-stream state.
+const MAX_CHUNK_STREAMS: usize = 256;
+
+/// Most bytes buffered per connection: unparsed input plus partly assembled
+/// messages. A single message is at most 16 MiB, so this admits a few large
+/// keyframes in flight but stops many streams from holding memory at once.
+const MAX_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
+
 /// Stateful parser that tracks per-chunk-stream context so that abbreviated
 /// header formats (type 1/2/3) can be decoded against the previous header.
 pub struct ChunkParser {
@@ -285,6 +294,8 @@ pub struct ChunkAssembler {
     buf: Vec<u8>,
     /// In-progress payload accumulation per chunk-stream id.
     partial: HashMap<u32, PartialMessage>,
+    /// Set once a limit was exceeded; see [`ChunkAssembler::overflowed`].
+    overflowed: bool,
 }
 
 struct PartialMessage {
@@ -299,7 +310,22 @@ impl ChunkAssembler {
             parser: ChunkParser::new(),
             buf: Vec::new(),
             partial: HashMap::new(),
+            overflowed: false,
         }
+    }
+
+    /// True once the peer exceeded the chunk-stream or buffer limits. The
+    /// assembler then drops its state, [`push`](Self::push) returns nothing, and
+    /// the caller should close the connection.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// Enters the sticky overflow state and releases everything buffered.
+    fn fail(&mut self) {
+        self.overflowed = true;
+        self.buf = Vec::new();
+        self.partial.clear();
     }
 
     /// Update the negotiated chunk size (e.g. after a `SetChunkSize` message).
@@ -317,6 +343,16 @@ impl ChunkAssembler {
     /// Append `bytes` to the internal buffer and return any messages that became
     /// complete as a result.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<RtmpMessage> {
+        if self.overflowed {
+            return Vec::new();
+        }
+        // Parsing only moves bytes from `buf` into `partial`, so checking the
+        // total once per push bounds the buffered bytes throughout.
+        let partial_bytes: usize = self.partial.values().map(|p| p.data.len()).sum();
+        if self.buf.len() + bytes.len() + partial_bytes > MAX_BUFFERED_BYTES {
+            self.fail();
+            return Vec::new();
+        }
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
 
@@ -335,6 +371,10 @@ impl ChunkAssembler {
             };
 
             let cs_id = header.chunk_stream_id;
+            if self.parser.prev_headers.len() > MAX_CHUNK_STREAMS {
+                self.fail();
+                break;
+            }
 
             // Determine how many payload bytes this chunk carries.
             let already = self.partial.get(&cs_id).map(|p| p.data.len()).unwrap_or(0);
@@ -463,6 +503,84 @@ mod tests {
         v.extend_from_slice(&stream_id.to_le_bytes()); // message_stream_id (LE)
         v.extend_from_slice(payload);
         v
+    }
+
+    /// The first chunk of a message on chunk stream `csid` (type 0 header) that
+    /// declares `message_length` bytes and carries `chunk_len` of them.
+    fn first_chunk_on(csid: u32, message_length: u32, chunk_len: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        // Basic header: 1 byte below 64, 2 bytes below 320, else 3 bytes.
+        match csid {
+            2..=63 => v.push(csid as u8),
+            64..=319 => v.extend_from_slice(&[0, (csid - 64) as u8]),
+            _ => {
+                let rest = csid - 64;
+                v.extend_from_slice(&[1, (rest & 0xff) as u8, (rest >> 8) as u8]);
+            }
+        }
+        v.extend_from_slice(&[0, 0, 0]); // timestamp
+        v.extend_from_slice(&message_length.to_be_bytes()[1..]);
+        v.push(9); // video
+        v.extend_from_slice(&1u32.to_le_bytes());
+        v.extend(std::iter::repeat_n(0xAB, chunk_len));
+        v
+    }
+
+    #[test]
+    fn too_many_chunk_streams_overflows_and_stops_parsing() {
+        // Each stream opens a 200-byte message and sends only its first 128-byte
+        // chunk, so it stays partial. The 257th distinct stream trips the cap.
+        let mut asm = ChunkAssembler::new();
+        for csid in 3..(3 + 256) {
+            assert!(asm.push(&first_chunk_on(csid, 200, 128)).is_empty());
+            assert!(!asm.overflowed(), "stream {csid} tripped the cap early");
+        }
+        assert!(asm.push(&first_chunk_on(3 + 256, 200, 128)).is_empty());
+        assert!(asm.overflowed());
+        // Sticky: nothing more is parsed, even a message that would complete.
+        assert!(asm.push(&type0_chunk(9, 1, b"late")).is_empty());
+        assert!(asm.overflowed());
+    }
+
+    #[test]
+    fn buffered_message_bytes_overflow_the_cap() {
+        // 1 MiB chunks, each opening a 2 MiB message. The check counts the incoming
+        // chunk too, so 63 partial MiB plus one more chunk is refused: partial
+        // bytes can never exceed the 64 MiB cap.
+        let mut asm = ChunkAssembler::new();
+        asm.set_chunk_size(1024 * 1024);
+        let mb = 1024 * 1024;
+        for csid in 3..(3 + 63) {
+            assert!(asm
+                .push(&first_chunk_on(csid, 2 * mb as u32, mb))
+                .is_empty());
+            assert!(
+                !asm.overflowed(),
+                "stream {csid} tripped the byte cap early"
+            );
+        }
+        assert!(asm
+            .push(&first_chunk_on(3 + 63, 2 * mb as u32, mb))
+            .is_empty());
+        assert!(asm.overflowed());
+    }
+
+    #[test]
+    fn ordinary_multi_chunk_message_is_not_limited() {
+        // A 1000-byte message at the default 128-byte chunk size: a type 0 first
+        // chunk followed by type 3 continuations.
+        let mut asm = ChunkAssembler::new();
+        let payload: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+        let mut wire = first_chunk_on(3, 1000, 0); // header only
+        wire.extend_from_slice(&payload[..128]);
+        for piece in payload[128..].chunks(128) {
+            wire.push(0xC3);
+            wire.extend_from_slice(piece);
+        }
+        let msgs = asm.push(&wire);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload, payload);
+        assert!(!asm.overflowed());
     }
 
     #[test]

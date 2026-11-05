@@ -18,6 +18,7 @@
 //! HTTP and bookkeeping. One publisher per key; a new publish replaces the old
 //! presentation.
 
+use crate::sync::LockRecover;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -148,7 +149,7 @@ impl LiveServer {
     /// Persists what `live` has finished since the last call.
     pub(crate) fn record(&self, key: &str, live: &Shared, ended: bool) {
         if let Some(rec) = &self.recorder {
-            if let Err(e) = rec.record(key, &mut live.lock().unwrap(), ended) {
+            if let Err(e) = rec.record(key, &mut live.lock_recover(), ended) {
                 tracing::warn!(key, error = %e, "recording failed");
             }
         }
@@ -191,8 +192,7 @@ impl LiveServer {
         }
         let live = self.new_packager();
         self.streams
-            .lock()
-            .unwrap()
+            .lock_recover()
             .insert(key.to_string(), live.clone());
         tracing::info!(key, "publish started");
         Metrics::inc(&self.metrics.publishes_started);
@@ -395,10 +395,10 @@ impl LiveServer {
         // the configured part/segment targets, so a measured player latency
         // can be compared against the packaging floor.
         if name == "_stats" {
-            let Some(live) = self.streams.lock().unwrap().get(key).cloned() else {
+            let Some(live) = self.streams.lock_recover().get(key).cloned() else {
                 return Reply::text(404, "no such stream");
             };
-            let live = live.lock().unwrap();
+            let live = live.lock_recover();
             let body = format!(
                 "{{\"ready\":{},\"live_latency_secs\":{},\"part_seconds\":{},\"segment_seconds\":{},\"latest_segment\":{},\"latest_part\":{}}}",
                 live.is_ready(),
@@ -420,15 +420,14 @@ impl LiveServer {
                 None => Reply::text(404, "no such recording"),
             };
         }
-        let Some(live) = self.streams.lock().unwrap().get(key).cloned() else {
+        let Some(live) = self.streams.lock_recover().get(key).cloned() else {
             return Reply::text(404, "no such stream");
         };
         let num = |s: &str| s.parse::<usize>().ok();
         let not_ready = || Reply::text(404, "the stream is not ready yet; retry shortly");
         if name == "master.m3u8" {
             return live
-                .lock()
-                .unwrap()
+                .lock_recover()
                 .master_playlist()
                 .map_or_else(not_ready, |p| Reply::playlist(p.into_bytes()));
         }
@@ -436,8 +435,7 @@ impl LiveServer {
         // init URLs are identical to HLS', so a player can switch between them.
         if name == "manifest.mpd" {
             return live
-                .lock()
-                .unwrap()
+                .lock_recover()
                 .dash_mpd()
                 .map_or_else(not_ready, |m| Reply::xml(m.into_bytes()));
         }
@@ -451,8 +449,7 @@ impl LiveServer {
                 return Reply::text(404, "no such segment yet; retry shortly");
             }
             return live
-                .lock()
-                .unwrap()
+                .lock_recover()
                 .media_playlist_for(t, &req)
                 .map_or_else(not_ready, |p| Reply::playlist(p.into_bytes()));
         }
@@ -462,8 +459,7 @@ impl LiveServer {
             .and_then(num)
         {
             return live
-                .lock()
-                .unwrap()
+                .lock_recover()
                 .init_segment(t)
                 .map_or_else(not_ready, |b| Reply::media("video/mp4", b));
         }
@@ -474,7 +470,7 @@ impl LiveServer {
             if let Some((t, n)) = rest.split_once('-') {
                 if let (Some(t), Ok(n)) = (num(t), n.parse::<u64>()) {
                     let shared = live.clone();
-                    let live = live.lock().unwrap();
+                    let live = live.lock_recover();
                     if let Some(b) = live.segment(t, n) {
                         return Reply::media("video/iso.segment", b.to_vec());
                     }
@@ -667,12 +663,12 @@ impl LiveServer {
         )
         .await?;
         let budget =
-            std::time::Duration::from_secs_f64(live.lock().unwrap().segment_seconds() * 3.0 + 5.0);
+            std::time::Duration::from_secs_f64(live.lock_recover().segment_seconds() * 3.0 + 5.0);
         let deadline = tokio::time::Instant::now() + budget;
         let (mut next_part, mut sent) = (0u64, 0usize);
         loop {
             let (parts, whole, gone) = {
-                let l = live.lock().unwrap();
+                let l = live.lock_recover();
                 let mut parts = Vec::new();
                 while let Some(p) = l.part(track, number, next_part + parts.len() as u64) {
                     parts.push(p);
@@ -721,7 +717,7 @@ impl LiveServer {
         let deadline = tokio::time::Instant::now() + MAX_BLOCK_WAIT;
         loop {
             {
-                let live = live.lock().unwrap();
+                let live = live.lock_recover();
                 if let Some(p) = live.part(track, number, index) {
                     return Some(p.to_vec());
                 }
@@ -750,7 +746,7 @@ impl LiveServer {
     async fn await_request(&self, live: &Shared, track: usize, req: &PlaylistRequest) -> bool {
         let deadline = tokio::time::Instant::now() + MAX_BLOCK_WAIT;
         loop {
-            if live.lock().unwrap().satisfies(track, req) {
+            if live.lock_recover().satisfies(track, req) {
                 return true;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -802,9 +798,9 @@ impl LiveServer {
         // discontinuity) instead of starting over. It is replaced below if the new
         // publisher's codec configuration differs.
         let mut live: Shared = {
-            let mut map = self.streams.lock().unwrap();
+            let mut map = self.streams.lock_recover();
             match map.get(&key) {
-                Some(old) if old.lock().unwrap().is_finished() => old.clone(),
+                Some(old) if old.lock_recover().is_finished() => old.clone(),
                 _ => {
                     if let Some(rec) = &self.recorder {
                         rec.next_generation(&key);
@@ -881,7 +877,7 @@ impl LiveServer {
             self.metrics.count_refusal(refusal);
             tracing::warn!(%key, "publish cut off: {}", refusal.message());
             // Keep what was already published playable, then say why it stopped.
-            let _ = live.lock().unwrap().finish();
+            let _ = live.lock_recover().finish();
             self.record(&key, &live, true);
             return end_publish(&mut r, ws, Reply::text(refusal.status(), refusal.message())).await;
         }
@@ -892,7 +888,7 @@ impl LiveServer {
                 .and_then(|events| self.apply(&key, &mut live, events));
         }
         // End of the publish (cleanly or not): complete the playlists.
-        let _ = live.lock().unwrap().finish();
+        let _ = live.lock_recover().finish();
         self.record(&key, &live, true);
         match result {
             Ok(()) => {
@@ -931,21 +927,20 @@ impl LiveServer {
     fn apply(&self, key: &str, live: &mut Shared, events: Vec<MkvEvent>) -> Result<()> {
         for e in &events {
             if let MkvEvent::Tracks(t) = e {
-                if !live.lock().unwrap().accepts_tracks(t) {
+                if !live.lock_recover().accepts_tracks(t) {
                     tracing::info!(
                         key,
                         "track configuration changed; starting a new presentation"
                     );
                     let fresh = self.new_packager();
                     // The old presentation ends cleanly for anyone still watching it.
-                    let _ = live.lock().unwrap().finish();
+                    let _ = live.lock_recover().finish();
                     self.record(key, live, true);
                     if let Some(rec) = &self.recorder {
                         rec.next_generation(key);
                     }
                     self.streams
-                        .lock()
-                        .unwrap()
+                        .lock_recover()
                         .insert(key.to_string(), fresh.clone());
                     *live = fresh;
                 }
@@ -959,7 +954,7 @@ impl LiveServer {
 
 /// Applies parsed events to the packager.
 fn apply(live: &Shared, events: Vec<MkvEvent>) -> Result<()> {
-    let mut live = live.lock().unwrap();
+    let mut live = live.lock_recover();
     for e in events {
         match e {
             MkvEvent::Tracks(t) => live.set_tracks(t).map_err(|e| anyhow::anyhow!("{e}"))?,

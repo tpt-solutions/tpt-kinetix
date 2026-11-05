@@ -8,6 +8,7 @@
 //! publisher reconnects with a different codec configuration; a reconnect with
 //! the same configuration continues the same generation.
 
+use crate::sync::LockRecover;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -107,7 +108,7 @@ impl Recorder {
     /// playlists, and (when `ended`) closes them with `EXT-X-ENDLIST`.
     pub fn record(&self, key: &str, live: &mut LivePackager, ended: bool) -> Result<()> {
         let done = live.drain_completed();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_recover();
         let rec = state
             .entry(key.to_string())
             .or_insert_with(|| KeyRecording {
@@ -212,7 +213,7 @@ impl Recorder {
     /// Starts a new generation for `key` (the codec configuration changed): the
     /// current one stays on disk, and later segments go to a fresh directory.
     pub fn next_generation(&self, key: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_recover();
         if let Some(rec) = state.get_mut(key) {
             let generation = rec.generation + 1;
             *rec = KeyRecording {
@@ -233,7 +234,7 @@ impl Recorder {
         if !ok {
             return None;
         }
-        let known = self.state.lock().unwrap().get(key).map(|r| r.generation);
+        let known = self.state.lock_recover().get(key).map(|r| r.generation);
         // After a restart nothing is in memory: serve the newest generation on disk.
         let generation = match known {
             Some(g) => g,

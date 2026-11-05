@@ -18,6 +18,7 @@
 //! / DASH Representation per track) with no transcoding. The renditions must share
 //! key frame timestamps, as adaptive bitrate switching requires anyway.
 
+use crate::sync::LockRecover;
 use tpt_kinetix_core::codec::CodecId;
 use tpt_kinetix_core::stream::StreamInfo;
 use tpt_kinetix_demux::rfconfig::{
@@ -284,10 +285,10 @@ impl RtmpLiveSession {
                 if watch.idle_for() >= idle {
                     watch.cut.store(true, Relaxed);
                     tracing::warn!(%key, "RTMP publisher idle for too long; ending the publish");
-                    let _ = live.lock().unwrap().finish();
+                    let _ = live.lock_recover().finish();
                     server.record(&key, &live, true);
                     server.count_idle_cut();
-                    *guard.lock().unwrap() = None;
+                    *guard.lock_recover() = None;
                     return;
                 }
             }
@@ -300,14 +301,14 @@ impl RtmpLiveSession {
             self.maybe_announce(u32::MAX);
         }
         if let Some(live) = self.live.take() {
-            let _ = live.lock().unwrap().finish();
+            let _ = live.lock_recover().finish();
             self.server.record(&self.key, &live, true);
             tracing::info!("RTMP publish finished");
         }
         self.watch
             .done
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        *self.guard.lock().unwrap() = None;
+        *self.guard.lock_recover() = None;
     }
 
     fn unsupported(&mut self, what: &str) {
@@ -436,7 +437,7 @@ impl RtmpLiveSession {
             self.has_audio_track = true;
         }
         let live = self.live.clone().unwrap();
-        if let Err(e) = live.lock().unwrap().set_tracks(tracks) {
+        if let Err(e) = live.lock_recover().set_tracks(tracks) {
             tracing::warn!(error = %e, "RTMP publish rejected");
             self.live = None;
             return;
@@ -488,8 +489,7 @@ impl RtmpLiveSession {
             }
         };
         let result = live
-            .lock()
-            .unwrap()
+            .lock_recover()
             .push(track, q.pts_ms, q.key, q.data, None);
         self.server.record(&self.key, live, false);
         if let Err(e) = result {
@@ -593,6 +593,33 @@ mod tests {
         let frame = [0x32, 0x09, 0x01, 0x02];
         assert_eq!(strip(&frame), frame);
         assert_eq!(strip(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn never_panics_and_never_grows_on_arbitrary_bytes() {
+        // Seeded xorshift input, biased toward OBU headers with the size and
+        // extension bits set, so the size walk is exercised.
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..20_000 {
+            let len = (next() % 40) as usize;
+            let mut frame: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            if let Some(first) = frame.first_mut() {
+                *first |= 0x06;
+            }
+            let out = strip(&frame);
+            assert!(out.len() <= frame.len(), "output grew: {frame:02x?}");
+        }
+        // Every prefix of a valid frame is handled too.
+        let frame = [0x12, 0x00, 0x0a, 0x02, 0xaa, 0xbb, 0x32, 0x03, 1, 2, 3];
+        for cut in 0..frame.len() {
+            let _ = strip(&frame[..cut]);
+        }
     }
 
     #[test]

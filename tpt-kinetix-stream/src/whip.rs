@@ -24,6 +24,7 @@
 //! track's first packet rather than RTCP sender reports, so A/V sync can be off by
 //! the start-up jitter (tens of milliseconds).
 
+use crate::sync::LockRecover;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -48,12 +49,12 @@ pub(crate) struct WhipSessions(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>)
 #[cfg_attr(not(feature = "whip"), allow(dead_code))]
 impl WhipSessions {
     pub(crate) fn insert(&self, id: String, stop: oneshot::Sender<()>) {
-        self.0.lock().unwrap().insert(id, stop);
+        self.0.lock_recover().insert(id, stop);
     }
 
     /// Ends the session; `false` when there is no such session.
     pub(crate) fn stop(&self, id: &str) -> bool {
-        match self.0.lock().unwrap().remove(id) {
+        match self.0.lock_recover().remove(id) {
             Some(tx) => {
                 let _ = tx.send(());
                 true
@@ -63,12 +64,12 @@ impl WhipSessions {
     }
 
     pub(crate) fn forget(&self, id: &str) {
-        self.0.lock().unwrap().remove(id);
+        self.0.lock_recover().remove(id);
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.0.lock().unwrap().len()
+        self.0.lock_recover().len()
     }
 }
 

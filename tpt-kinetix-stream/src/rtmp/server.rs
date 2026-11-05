@@ -515,6 +515,11 @@ where
                 }
             }
         }
+        if assembler.overflowed() {
+            tracing::warn!("RTMP client exceeded the chunk-stream limits; closing");
+            emit(RtmpMediaEvent::PublishStop);
+            break;
+        }
     }
 
     Ok(())

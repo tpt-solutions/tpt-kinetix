@@ -12,6 +12,7 @@ pub mod policy;
 pub mod record;
 pub mod rtmp;
 pub mod rtmp_live;
+mod sync;
 pub mod whip;
 pub mod ws;
 

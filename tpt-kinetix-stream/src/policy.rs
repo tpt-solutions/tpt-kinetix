@@ -4,6 +4,7 @@
 //! The default [`IngestPolicy`] is open (no token, no limits) so existing
 //! deployments behave as before; every field tightens one thing.
 
+use crate::sync::LockRecover;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -264,12 +265,12 @@ pub(crate) struct ActiveGuard {
 
 impl ActiveSet {
     pub(crate) fn len(&self) -> usize {
-        self.0.lock().unwrap().len()
+        self.0.lock_recover().len()
     }
 
     /// Marks `key` live, applying the stream-count and concurrency limits.
     pub(crate) fn enter(&self, key: &str, policy: &IngestPolicy) -> Result<ActiveGuard, Refusal> {
-        let mut set = self.0.lock().unwrap();
+        let mut set = self.0.lock_recover();
         if policy.reject_concurrent && set.contains(key) {
             return Err(Refusal::Conflict);
         }
@@ -286,7 +287,7 @@ impl ActiveSet {
 
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        self.set.0.lock().unwrap().remove(&self.key);
+        self.set.0.lock_recover().remove(&self.key);
     }
 }
 

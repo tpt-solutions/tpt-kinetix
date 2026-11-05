@@ -176,20 +176,26 @@ fn color_info() -> Vec<u8> {
 }
 
 async fn publish(port: u16, key: &str, src: &std::path::Path, with_audio_config: bool) {
-    publish_inner(port, key, src, with_audio_config, None, 1).await
+    publish_inner(port, key, src, with_audio_config, None, 1, false).await
 }
 
 /// Like [`publish`], but the Opus audio travels as an Enhanced RTMP audio
 /// `Multitrack` message carrying `audio_tracks` copies of the same track
 /// (`trackId` 0, 1, ...), as a publisher with several audio sources would send.
 async fn publish_audio_tracks(port: u16, key: &str, src: &std::path::Path, audio_tracks: u8) {
-    publish_inner(port, key, src, true, None, audio_tracks).await
+    publish_inner(port, key, src, true, None, audio_tracks, false).await
 }
 
 /// Like [`publish`], but after the last frame the connection stays open and
 /// silent for `stall` instead of closing cleanly (a dead encoder).
 async fn publish_then_stall(port: u16, key: &str, src: &std::path::Path, stall: Duration) {
-    publish_inner(port, key, src, true, Some(stall), 1).await
+    publish_inner(port, key, src, true, Some(stall), 1, false).await
+}
+
+/// Like [`publish`] for an AV1 source, but every video frame starts with a
+/// temporal delimiter OBU, as ffmpeg's FLV muxer writes it.
+async fn publish_av1_with_delimiters(port: u16, key: &str, src: &std::path::Path) {
+    publish_inner(port, key, src, true, None, 1, true).await
 }
 
 async fn publish_inner(
@@ -199,6 +205,7 @@ async fn publish_inner(
     with_audio_config: bool,
     stall: Option<Duration>,
     audio_tracks: u8,
+    temporal_delimiters: bool,
 ) {
     const CHUNK: usize = 4096;
     // Demux the WebM into tracks and frames.
@@ -331,7 +338,13 @@ async fn publish_inner(
         let ts = f.pts_ms.max(0) as u32;
         let msg = if f.stream == 0 {
             let first = 0x80 | (if f.key { 0x10 } else { 0x20 }) | 3; // CodedFramesX
-            chunks(4, ts, 9, 1, &ex(first, fourcc, &f.data), CHUNK)
+            let mut video = Vec::with_capacity(f.data.len() + 2);
+            if temporal_delimiters {
+                // OBU header (type 2, size field present) + zero size.
+                video.extend_from_slice(&[0x12, 0x00]);
+            }
+            video.extend_from_slice(&f.data);
+            chunks(4, ts, 9, 1, &ex(first, fourcc, &video), CHUNK)
         } else {
             chunks(5, ts, 8, 1, &audio_msg(1, &f.data), CHUNK)
         };
@@ -455,6 +468,203 @@ async fn enhanced_rtmp_vp9_opus_decodes_identically() {
 #[tokio::test]
 async fn enhanced_rtmp_av1_opus_decodes_identically() {
     rtmp_matches("av1", &["-c:v", "libaom-av1", "-cpu-used", "8", "-g", "25"]).await;
+}
+
+/// Sample payloads of every `trun` in one fMP4 segment (`moof` then `mdat`, with
+/// `data_offset` relative to the start of its `moof`). Just enough of ISO-BMFF
+/// for the test to read the samples the server actually wrote.
+fn fmp4_samples(seg: &[u8]) -> Vec<Vec<u8>> {
+    let u32_at = |b: &[u8], at: usize| u32::from_be_bytes(b[at..at + 4].try_into().unwrap());
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos + 8 <= seg.len() {
+        let size = u32_at(seg, pos) as usize;
+        if size < 8 || pos + size > seg.len() {
+            break;
+        }
+        if &seg[pos + 4..pos + 8] == b"moof" {
+            let moof = &seg[pos..pos + size];
+            let trun = moof
+                .windows(4)
+                .position(|w| w == b"trun")
+                .expect("moof without trun")
+                - 4;
+            let t = &moof[trun..];
+            let flags = u32_at(t, 8) & 0x00ff_ffff;
+            let count = u32_at(t, 12) as usize;
+            let mut at = 16;
+            let data_offset = if flags & 0x1 != 0 {
+                let v = u32_at(t, at) as i32;
+                at += 4;
+                v
+            } else {
+                0
+            };
+            if flags & 0x4 != 0 {
+                at += 4;
+            }
+            let mut sample_at = (pos as i64 + i64::from(data_offset)) as usize;
+            for _ in 0..count {
+                if flags & 0x100 != 0 {
+                    at += 4;
+                }
+                let len = if flags & 0x200 != 0 {
+                    let v = u32_at(t, at) as usize;
+                    at += 4;
+                    v
+                } else {
+                    panic!("trun without per-sample sizes")
+                };
+                if flags & 0x400 != 0 {
+                    at += 4;
+                }
+                if flags & 0x800 != 0 {
+                    at += 4;
+                }
+                out.push(seg[sample_at..sample_at + len].to_vec());
+                sample_at += len;
+            }
+        }
+        pos += size;
+    }
+    out
+}
+
+/// The OBU types in one AV1 low-overhead sample (every OBU carries a size field
+/// except possibly the last, which runs to the end).
+fn av1_obu_types(sample: &[u8]) -> Vec<u8> {
+    let mut types = Vec::new();
+    let mut i = 0;
+    while i < sample.len() {
+        let header = sample[i];
+        types.push((header >> 3) & 0x0f);
+        let mut j = i + 1 + usize::from(header & 0x04 != 0);
+        if header & 0x02 == 0 {
+            break;
+        }
+        let mut size = 0usize;
+        for k in 0..8 {
+            let b = sample[j];
+            j += 1;
+            size |= usize::from(b & 0x7f) << (7 * k);
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        i = j + size;
+    }
+    types
+}
+
+/// An AV1 publish whose frames carry temporal delimiters is stored without them:
+/// no sample in any segment holds a TD OBU, every frame is still there, and the
+/// stream decodes identically to the source.
+#[tokio::test]
+async fn enhanced_rtmp_av1_temporal_delimiters_are_not_stored() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livertmp_td_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(
+        &dir,
+        &["-c:v", "libaom-av1", "-cpu-used", "8", "-g", "25"],
+        10,
+    ) else {
+        eprintln!("skipping: libaom-av1 unavailable");
+        return;
+    };
+    let (http, rtmp) = start().await;
+    publish_av1_with_delimiters(rtmp, "td", &src).await;
+    let pl = wait_complete(http, "td").await;
+
+    let mut samples = Vec::new();
+    for line in pl.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let path = if line.starts_with('/') {
+            line.to_string()
+        } else {
+            format!("/td/{line}")
+        };
+        let (code, seg) = http_get(http, &path).await;
+        assert_eq!(code, 200, "{path}");
+        samples.extend(fmp4_samples(&seg));
+    }
+    assert_eq!(samples.len(), 250, "every source frame is stored");
+    for (n, sample) in samples.iter().enumerate() {
+        let types = av1_obu_types(sample);
+        assert!(
+            !types.contains(&2),
+            "sample {n} still holds a temporal delimiter: {types:?}"
+        );
+        assert!(!types.is_empty(), "sample {n} is empty");
+    }
+
+    let url = format!("http://127.0.0.1:{http}/td/master.m3u8");
+    let src_s = src.to_str().unwrap().to_string();
+    let (v_src, v_live) =
+        tokio::task::spawn_blocking(move || (framemd5(&src_s, "0:v:0"), framemd5(&url, "0:v:0")))
+            .await
+            .unwrap();
+    assert_eq!(v_src, v_live, "stripped AV1 decodes differently");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A publish refused for a busy key gets its status line even when the refused
+/// client sends the whole body: the server drains the body before it replies,
+/// so the close does not reset the connection before the client reads the reply.
+#[tokio::test]
+async fn refused_publish_status_arrives_after_a_large_body() {
+    if !have("ffmpeg") {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_livertmp_busy_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let Some(src) = make_webm(
+        &dir,
+        &["-c:v", "libvpx-vp9", "-g", "25", "-b:v", "300k"],
+        10,
+    ) else {
+        eprintln!("skipping: libvpx-vp9 unavailable");
+        return;
+    };
+    let bytes = std::fs::read(&src).unwrap();
+    let (http, _) = start_with(tpt_kinetix_stream::IngestPolicy {
+        reject_concurrent: true,
+        ..Default::default()
+    })
+    .await;
+    let head = |len: usize| {
+        format!("POST /ingest/busy HTTP/1.1\r\nHost: x\r\nContent-Length: {len}\r\n\r\n")
+    };
+
+    // A live publisher holds the key, half of its body sent.
+    let mut holder = TcpStream::connect(("127.0.0.1", http)).await.unwrap();
+    holder
+        .write_all(head(bytes.len()).as_bytes())
+        .await
+        .unwrap();
+    holder.write_all(&bytes[..bytes.len() / 2]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // A second publisher to the same key sends everything. The server may reset
+    // the write once it has replied, so a write error is not a failure here.
+    let mut refused = TcpStream::connect(("127.0.0.1", http)).await.unwrap();
+    refused
+        .write_all(head(bytes.len()).as_bytes())
+        .await
+        .unwrap();
+    let _ = refused.write_all(&bytes).await;
+    let mut reply = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), refused.read_to_end(&mut reply))
+        .await
+        .expect("the refused publisher got no reply")
+        .unwrap();
+    let text = String::from_utf8_lossy(&reply);
+    assert!(text.starts_with("HTTP/1.1 409"), "{text}");
+    drop(holder);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A publisher that never sends an audio configuration is treated as video only.
