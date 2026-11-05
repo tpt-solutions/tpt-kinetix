@@ -1,5 +1,53 @@
 # TPT Kinetix — Task Index
 
+## Open tasks — platform review (2026-11-06)
+
+Source: read-only review of bugs, gaps, innovation and adoption. Direction stays the I/O layer with royalty-free codecs first (no new codecs, no audio codecs here). Full plan: `~/.claude/plans/pasted-content-id-fcd9-review-platform-crispy-stonebraker.md`.
+
+### 1. Bugs and robustness
+- [x] Finish and commit the uncommitted stream work: `tpt-kinetix-stream/src/live.rs` (drain body before refused-publish reply) and `rtmp_live.rs` (`strip_av1_temporal_delimiters`) — committed as abcdb40 and 46df21a (2026-11-06).
+- [x] Integration test in `tpt-kinetix-stream/tests/live_rtmp.rs`: `enhanced_rtmp_av1_temporal_delimiters_are_not_stored` (checks the fMP4 samples, not just the decode) and `refused_publish_status_arrives_after_a_large_body` (46df21a). Mutation-checked: the TD test fails with the strip disabled.
+- [~] Proptest/fuzz target for `strip_av1_temporal_delimiters`: in-crate randomized never-panic test added (46df21a). No cargo-fuzz target: the function is private, and exposing it would widen the public API for a fuzz harness alone.
+- [x] Commit `tpt-kinetix-vp9/tests/fuzz_regression_ae1c6505.rs` together with its fix (fix was already committed; test committed in abcdb40, rustfmt in 5aea2e0).
+- [x] RTMP chunk memory amplification, `rtmp/chunk.rs`: pre-allocation capped at 64 KiB; `unreachable!()`/`expect` removed; sticky overflow after 256 chunk streams or 64 MiB buffered, and the server closes such a connection (46df21a). Regression tests in `chunk.rs`.
+- [x] Mutex poisoning: every `lock().unwrap()` in the stream crate now uses `lock_recover()` (`src/sync.rs`), which recovers a poisoned guard; unit test included (46df21a). Note: the state is recovered as it was left, not rolled back.
+- [x] Parser hardening: `ts.rs` expect removed; `faststart` uses checked box and offset arithmetic and `usize::try_from` (0cdb5e4). Not built or run on a 32-bit target here; proptest added (`tests/proptest_faststart.rs`).
+- [~] Fuzz targets for mux (`faststart`, webm, fragmented) and package (HLS/DASH); add `fuzz_mkv_stream` and `fuzz_moof`: added `fuzz_mkv_stream`, `fuzz_moof` (demux) and `fuzz_faststart` (new mux fuzz crate). Not done: webm and fragmented are writers, so they take no untrusted input; package has no parser of its own (its input is the MP4 the demuxer already fuzzes). Ran both new bodies over ~300k seeded inputs without a panic; no libFuzzer run (nightly sanitizer not available here).
+- [x] CI `fuzz-check` (`.github/workflows/ci.yml`): compile check extended; a 30-second `fuzz-smoke` job runs on pull requests; `fuzz.yml` nightly matrix includes the new targets (6dcf508). Not yet exercised in CI: first run will show whether the smoke job passes.
+- [x] `justfile` `fuzz-build` lists every fuzz target (6dcf508).
+- [x] Stale docs: `tpt-kinetix-mux/src/lib.rs` rewritten (4 writers, IVF added since); CLAUDE.md's CLI stub claim fixed; `todo-aac.md` marked historical (6dcf508 and 8472958).
+
+### 2. Missing features
+- [~] Cross-container remux CLI (MKV/TS in, MP4/WebM out; `-c copy` equivalent): MKV/WebM to MP4, MP4 to WebM, and both to IVF and Ogg are done (d4c9f82, 8472958, d03c93f); `tests/remux_containers.rs` is ffmpeg-gated. Also fixed on the way: a WebM input written to a `.mp4` name was WebM bytes, and MP4 durations were passed to the WebM writer as milliseconds. NOT done: TS input. The TS demuxer gives packets and codec names but no codec configuration; MP4 and WebM output need `avcC`/AAC config built from in-band data (H.264 and AAC, which this repo keeps out of scope), and VP9/AV1 in TS would still need AV1 config extraction. Known gap: the last Opus frame of a WebM with DiscardPadding is 960 samples in MP4 (duration trimmed, decoded frame not).
+- [x] `thumbnails` CLI command: keyframe stills as PNG (two-pass, decodes only keyframes), `--sprite-columns` contact sheet; AV1 and VP9 from WebM, MP4 and IVF; 8-bit 4:2:0 only (8-bit refused otherwise). Poster-style single still is `--count 1`. Not done: WebVTT-style sprite index for scrubbing.
+- [ ] WebVTT subtitle passthrough, HLS/DASH subtitle groups, multi-audio, trick-play: not started.
+- [ ] CENC/CBCS encryption with ClearKey in `Packager` / `LivePackager`: not started.
+- [~] Ogg/Opus and IVF muxers; SRT ingest; WHEP egress; AV1 over WebRTC: IVF (`ivf.rs`, 8472958) and Ogg/Opus (`ogg.rs`, d03c93f) muxers are done. SRT ingest, WHEP egress and AV1 over WebRTC are not started.
+- [x] Streaming MPEG-TS demux (currently whole-buffer `Vec`): `TsDemuxer::from_reader` reads on demand, with a bounded read-ahead for the program tables and a trimmed window after 4 MiB (504b196). probe and doctor open the file instead of loading it. Checked against ffprobe on an H.264+AAC transport stream; unit tests cover trickled reads and a stream past the trim point. Seeking on TS is still unsupported.
+- [~] `probe --json` conformance test against `ffprobe -of json`: done for codec, type, size, channels, rate, format and duration over WebM, MP4 and IVF (7c661b6); IVF now reports its duration. Not done: pixel format, colour and disposition fields (the probe does not know them). Metadata-edit command: not started.
+- [ ] Add a `duration` field to `Packet` (open at `todo-io.md:308`): not started. It is a public `tpt-kinetix-core` change touching every crate; the remux path works around it by passing durations alongside the packet.
+
+### 3. Innovation
+- [ ] `tpt-kinetix-ffi` C ABI (cbindgen) plus npm WASM package and pyo3/napi bindings for probe/remux/package
+- [x] "Untrusted upload sanitizer": `tpt-kinetix sanitize` re-muxes WebM or MP4, keeps only AV1, VP9 and Opus, refuses input over packet, count or byte limits and removes the partial output (913c33e). Measured: a 129 MiB WebM peaks at about 14.5 MiB working set (debug build, sampled). Memory grows with the packet index, not the media bytes, so it is not constant; the bench-io larger-seed and MKV/TS work is still open.
+- [ ] Edge live packager as a Durable Object with a Cache API segment layer
+- [ ] Server-side ABR ladder generation via `rav1e` (optional feature)
+- [x] `tpt-kinetix doctor <file>`: browser playback check on the probe data and MP4 box order, with a non-zero exit on failures (8b5392e). Guidance names constraints rather than browser versions, so it can go stale; the rules are in `tpt-kinetix-cli/src/doctor.rs`.
+- [~] Publish a benchmark dashboard from `docs/perf/*.json` to GitHub Pages with regression tracking in CI: `tools/perf_dashboard.py` renders the ffmpeg-compare decode ratios as charts and flags moves over 10%, plus the Criterion baseline table (`docs/perf/dashboard.html`, `just perf-dashboard`; 5bb2e6b). Not done: the Pages deploy (needs repository Pages settings), and a CI step that regenerates the page.
+
+### 4. Adoption and usability
+- [ ] Prebuilt binaries: cargo-dist (or release matrix), `cargo binstall` metadata, Homebrew/winget, README install one-liner (`cargo install tpt-kinetix-cli`), GHCR Dockerfile
+- [~] `docs/migrating-from-ffmpeg.md` (ffmpeg/ffprobe mapping, behaviour differences, unsupported list) and `--help` examples for probe, remux and package are done (4465325). Not done: the task-oriented examples and their CI job.
+- [ ] Deploy `web-demo/` to GitHub Pages from CI as a hosted playground; publish the wasm package to npm
+- [ ] Move AV1 `dbg_*` / `prof_*` examples out of `tpt-kinetix-av1/examples/` (to `tools/` or behind a feature); add 4-6 task-oriented examples (remote probe, remux, HLS/DASH package, live ingest, edge worker, sanitize upload) and a CI job that runs every example
+- [ ] `cargo-generate` starter templates: CLI media tool, Cloudflare Worker packager (from `examples/edge-worker`), live-ingest server
+- [~] Doctests on front-door crates (`core`, `demux`, `pipeline`, `cli`) gated by `just test-doc` in CI; add a `docs/README.md` index or mdBook user guide: CI now runs `cargo test --workspace --doc` (db9cf95) and `docs/README.md` indexes the docs. `cli` is a binary, so it has no doctests; the integration tests cover it. mdBook not done.
+- [ ] Repo-root hygiene: all of these are tracked by git: `baseline.err`, `baseline.out`, `test_av1.ivf`, `testsrc.obu`, `spec.txt`, `scratch_av1/`, `memory/`, `.kilo/` (2 files), `history/` (16 files). Not moved or deleted: removing tracked files needs a decision on what to keep. Shortening the README top section is not done.
+- [~] Add `SECURITY.md`, `CODE_OF_CONDUCT.md`, a Discussions link: SECURITY.md (private reporting via GitHub) and CODE_OF_CONDUCT.md (Contributor Covenant 2.1, 4465325) are done. Discussions link not added: it needs Discussions enabled in the repository settings first, and the CoC names no direct contact address, which the maintainers should add.
+- [~] Automation: scheduled `cargo-semver-checks`, Dependabot auto-merge, GitHub Releases from CHANGELOG, self-documenting `just --list`: weekly `semver.yml` added (5bb2e6b), best effort and never run here. Not done: Dependabot auto-merge (left out on purpose: it merges without review).
+
+Suggested order: section 1 plus repo hygiene, then binaries/Docker + migration guide + examples, then Pages playground + npm + doctests + benchmark dashboard, then features (remux, thumbnails, WebVTT, CENC, FFI).
+
 > **DECISION 2026-09-30: H.264 will NOT be published** (patents cover decode as well as encode; this repo ships no patent licenses). DONE the same day: crate and directory renamed `tpt-kinetix-h264` -> `out-kinetix-h264` (`out-` = outside the published set), `publish = false`, removed from release-plz publishing, the `codec-h264` feature/dependency and `DecodeStage` (H.264-only) removed from `tpt-kinetix-pipeline`/`tpt-kinetix-cli` (CLI transcode now VP9-input only, the dead `--vcodec h264` stub is gone), PATENTS.md/README/CLAUDE.md/CONTRIBUTING updated. Only the unpublished `tpt-kinetix-test-utils` still depends on it. Workspace build, clippy `-D warnings` and tests pass. The H.264 work below is retained as local/reference work only, deprioritised behind AV1/VP9; historical notes below still use the old `tpt-kinetix-h264` name in places.
 >
 > **2026-09-30 H.264 re-verification:** see the todo-h264.md index row below; it was rewritten from fresh measurements (273 lib tests, 15/15 matrix, ITU 38/64 clips byte-exact, 26 not). The 2026-09-29 'best remaining target' (`cavlc_mot_picaff0_full_B`) now reads byte-exact.
