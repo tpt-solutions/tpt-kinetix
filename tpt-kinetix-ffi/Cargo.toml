@@ -1,0 +1,19 @@
+[package]
+name = "tpt-kinetix-ffi"
+version = "0.1.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "C ABI for the TPT Kinetix container tools: probe and faststart"
+publish = false
+
+[lib]
+# cdylib for C/C++ and other languages, staticlib for linking, rlib for the tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+tpt-kinetix-core = { workspace = true }
+tpt-kinetix-demux = { workspace = true }
+tpt-kinetix-mux = { workspace = true }

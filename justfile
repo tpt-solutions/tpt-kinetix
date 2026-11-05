@@ -70,6 +70,10 @@ fuzz-build:
 perf-dashboard:
     python tools/perf_dashboard.py
 
+# Regenerate the C header for tpt-kinetix-ffi (needs cbindgen).
+ffi-header:
+    cd tpt-kinetix-ffi && cbindgen --lang c --crate tpt-kinetix-ffi --output include/tpt_kinetix.h
+
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
 fuzz crate target seconds="60":
     cd {{crate}} && cargo fuzz run {{target}} -- -max_total_time={{seconds}}

@@ -2663,6 +2663,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tpt-kinetix-ffi"
+version = "0.1.2"
+dependencies = [
+ "tpt-kinetix-core",
+ "tpt-kinetix-demux",
+ "tpt-kinetix-mux",
+]
+
+[[package]]
 name = "tpt-kinetix-kg"
 version = "0.1.2"
 dependencies = [
