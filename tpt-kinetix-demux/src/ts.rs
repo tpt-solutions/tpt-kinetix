@@ -37,6 +37,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::{Cursor, Read};
 
 use tpt_kinetix_core::{
     codec::{CodecId, MediaType},
@@ -48,6 +49,12 @@ use tpt_kinetix_core::{
 use crate::Demuxer;
 
 const TS_PACKET_LEN: usize = 188;
+/// Packets read ahead to learn the program tables before the first `read_packet`.
+const PRESCAN_PACKETS: usize = 8192;
+/// Bytes read from the source at a time.
+const READ_CHUNK: usize = 64 * 1024;
+/// Consumed bytes kept behind the read position before the window is trimmed.
+const TRIM_AFTER: usize = 4 * 1024 * 1024;
 const SYNC_BYTE: u8 = 0x47;
 
 const PID_PAT: u16 = 0x0000;
@@ -104,17 +111,22 @@ struct PesAssembler {
     key_frame: bool,
 }
 
-/// Stateful MPEG-TS demuxer over an in-memory buffer.
+/// Stateful MPEG-TS demuxer over a byte source.
 ///
-/// The constructor pre-scans the buffer for PAT/PMT (and the last PCR) so the
-/// program/stream tables are available immediately; [`Demuxer::read_packet`]
-/// then streams PES packets from the start.
+/// The source is read on demand: the constructor reads ahead only far enough to
+/// learn the program tables (PAT and PMTs, and the last PCR seen in that window),
+/// so they are available immediately, and [`Demuxer::read_packet`] then streams
+/// PES packets from the start. Memory is bounded by the read-ahead window, not
+/// by the file size.
 ///
 /// `stream_index` on emitted packets is the transport-stream PID.
-#[derive(Debug)]
 pub struct TsDemuxer {
-    data: Vec<u8>,
-    /// Offset of the next TS packet.
+    source: Box<dyn Read + Send>,
+    /// Bytes read from the source and not yet trimmed away.
+    buf: Vec<u8>,
+    /// Whether the source has reported its end.
+    eof: bool,
+    /// Offset in `buf` of the next TS packet.
     pos: usize,
 
     programs: Vec<TsProgram>,
@@ -134,19 +146,23 @@ pub struct TsDemuxer {
 }
 
 impl TsDemuxer {
-    /// Creates a new demuxer and pre-scans the buffer for program tables.
-    ///
-    /// Returns an error if the data contains no valid TS sync (a 0x47 byte at
-    /// a 188-byte packet boundary, confirmed by the next packet's sync byte
-    /// when one exists).
+    /// Creates a demuxer over an in-memory buffer. See [`TsDemuxer::from_reader`].
     pub fn new(data: Vec<u8>) -> Result<Self, KinetixError> {
-        let start = find_sync(&data, 0).ok_or_else(|| {
-            KinetixError::Parse("no MPEG-TS sync found (expected 0x47 at packet pitch)".into())
-        })?;
+        Self::from_reader(Cursor::new(data))
+    }
 
+    /// Creates a demuxer that reads `source` on demand, and reads ahead to learn
+    /// the program tables.
+    ///
+    /// Returns an error if the source holds no valid TS sync (a 0x47 byte at a
+    /// 188-byte packet boundary, confirmed by the next packet's sync byte when
+    /// one exists).
+    pub fn from_reader<R: Read + Send + 'static>(source: R) -> Result<Self, KinetixError> {
         let mut demuxer = Self {
-            data,
-            pos: start,
+            source: Box::new(source),
+            buf: Vec::new(),
+            eof: false,
+            pos: 0,
             programs: Vec::new(),
             streams: BTreeMap::new(),
             psi_pids: vec![PID_PAT],
@@ -156,12 +172,25 @@ impl TsDemuxer {
             out: VecDeque::new(),
         };
 
-        // Pre-scan: consume the whole buffer once, keeping only PSI + PCR
-        // state, so `streams()`/`programs()` are populated before any
-        // `read_packet` call. PES assembly is not run in this pass.
-        let mut scan_pos = demuxer.pos;
-        while let Some(pkt) = demuxer.next_packet(&mut scan_pos) {
-            demuxer.process_packet(&pkt, true);
+        // The first packet fixes where the stream starts.
+        let mut scan = 0;
+        if demuxer.next_packet(&mut scan)?.is_none() {
+            return Err(KinetixError::Parse(
+                "no MPEG-TS sync found (expected 0x47 at packet pitch)".into(),
+            ));
+        }
+        let start = scan - TS_PACKET_LEN;
+
+        // Pre-scan a bounded window, keeping only PSI + PCR state, so
+        // `streams()`/`programs()` are populated before any `read_packet` call.
+        // PES assembly is not run in this pass. The window stays buffered and is
+        // read again from `start`.
+        let mut scan = start;
+        for _ in 0..PRESCAN_PACKETS {
+            match demuxer.next_packet(&mut scan)? {
+                Some(pkt) => demuxer.process_packet(&pkt, true),
+                None => break,
+            }
         }
         // Reset transient state; the tables stay.
         demuxer.pos = start;
@@ -182,8 +211,8 @@ impl TsDemuxer {
 
     /// Most recent PCR base value seen on `pid`, in 90 kHz ticks.
     ///
-    /// Note the constructor pre-scans the whole buffer, so before the first
-    /// [`Demuxer::read_packet`] call this reports the last PCR in the file.
+    /// The constructor pre-scans a bounded window, so before the first
+    /// [`Demuxer::read_packet`] call this reports the last PCR in that window.
     pub fn pcr_90khz(&self, pid: u16) -> Option<u64> {
         self.pcr.get(&pid).copied()
     }
@@ -192,15 +221,46 @@ impl TsDemuxer {
         pid == PID_PAT || self.psi_pids.contains(&pid) || PID_SI_RANGE.contains(&pid)
     }
 
-    /// Returns the next 188-byte packet starting at `*pos`, advancing `*pos`
+    /// Reads from the source until the window holds `need` bytes or the source
+    /// has ended.
+    fn fill(&mut self, need: usize) -> Result<(), KinetixError> {
+        let mut chunk = vec![0u8; READ_CHUNK];
+        while self.buf.len() < need && !self.eof {
+            let n = self.source.read(&mut chunk)?;
+            if n == 0 {
+                self.eof = true;
+            } else {
+                self.buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the next 188-byte packet at or after `*pos`, advancing `*pos`
     /// past it. Re-synchronizes by scanning forward for a sync byte confirmed
     /// by the following packet's sync byte when alignment is lost.
-    fn next_packet(&self, pos: &mut usize) -> Option<[u8; TS_PACKET_LEN]> {
-        let p = find_sync(&self.data, *pos)?;
-        let mut pkt = [0u8; TS_PACKET_LEN];
-        pkt.copy_from_slice(&self.data[p..p + TS_PACKET_LEN]);
-        *pos = p + TS_PACKET_LEN;
-        Some(pkt)
+    fn next_packet(
+        &mut self,
+        pos: &mut usize,
+    ) -> Result<Option<[u8; TS_PACKET_LEN]>, KinetixError> {
+        let mut p = *pos;
+        loop {
+            // A candidate needs its own packet and the next one's sync byte.
+            self.fill(p + 2 * TS_PACKET_LEN)?;
+            if p + TS_PACKET_LEN > self.buf.len() {
+                return Ok(None);
+            }
+            // `fill` has either supplied both packets or reached the end.
+            let confirmed =
+                p + 2 * TS_PACKET_LEN > self.buf.len() || self.buf[p + TS_PACKET_LEN] == SYNC_BYTE;
+            if self.buf[p] == SYNC_BYTE && confirmed {
+                let mut pkt = [0u8; TS_PACKET_LEN];
+                pkt.copy_from_slice(&self.buf[p..p + TS_PACKET_LEN]);
+                *pos = p + TS_PACKET_LEN;
+                return Ok(Some(pkt));
+            }
+            p += 1;
+        }
     }
 
     /// Parse one 188-byte packet and feed its payload into the PSI or PES
@@ -503,14 +563,30 @@ impl TsDemuxer {
     }
 }
 
+impl std::fmt::Debug for TsDemuxer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TsDemuxer")
+            .field("streams", &self.streams)
+            .field("programs", &self.programs)
+            .field("buffered", &self.buf.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Demuxer for TsDemuxer {
     fn read_packet(&mut self) -> Result<Option<Packet>, KinetixError> {
         loop {
             if let Some(pkt) = self.out.pop_front() {
                 return Ok(Some(pkt));
             }
+            // Drop bytes well behind the read position so the window stays small.
+            if self.pos > TRIM_AFTER {
+                let cut = self.pos - TS_PACKET_LEN;
+                self.buf.drain(..cut);
+                self.pos -= cut;
+            }
             let mut pos = self.pos;
-            let Some(pkt) = self.next_packet(&mut pos) else {
+            let Some(pkt) = self.next_packet(&mut pos)? else {
                 self.pos = pos;
                 // End of data: flush any PES still under assembly, in PID
                 // order for determinism.
@@ -535,21 +611,6 @@ impl Demuxer for TsDemuxer {
             "MPEG-TS seeking is not yet supported".into(),
         ))
     }
-}
-
-/// Find the offset of a usable TS sync: a 0x47 byte with room for a full
-/// packet, confirmed by the next packet's sync byte when one exists.
-fn find_sync(data: &[u8], from: usize) -> Option<usize> {
-    let mut p = from;
-    while p + TS_PACKET_LEN <= data.len() {
-        if data[p] == SYNC_BYTE
-            && (p + 2 * TS_PACKET_LEN > data.len() || data[p + TS_PACKET_LEN] == SYNC_BYTE)
-        {
-            return Some(p);
-        }
-        p += 1;
-    }
-    None
 }
 
 /// Parse a complete (or trailing, possibly truncated) PES byte string.
@@ -726,9 +787,12 @@ mod tests {
         data.extend_from_slice(&[0u8; TS_PACKET_LEN - 1]);
         data.extend_from_slice(&[SYNC_BYTE]);
         data.extend_from_slice(&[0u8; TS_PACKET_LEN - 1]);
-        let demuxer = TsDemuxer::new(data).expect("sync found after garbage");
+        let mut demuxer = TsDemuxer::new(data).expect("sync found after garbage");
         let mut pos = demuxer.pos;
-        let pkt = demuxer.next_packet(&mut pos).expect("one packet");
+        let pkt = demuxer
+            .next_packet(&mut pos)
+            .expect("no read error")
+            .expect("one packet");
         assert_eq!(pkt.len(), TS_PACKET_LEN);
     }
 
@@ -1107,5 +1171,79 @@ mod tests {
         let mut ts = TsDemuxer::new(h264_single_program_ts()).expect("parse");
         let err = ts.seek(0).unwrap_err();
         assert!(matches!(err, KinetixError::Unsupported(_)));
+    }
+
+    /// A reader that returns at most `step` bytes per call, like a slow socket.
+    struct Trickle {
+        data: Vec<u8>,
+        at: usize,
+        step: usize,
+    }
+
+    impl std::io::Read for Trickle {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.step.min(out.len()).min(self.data.len() - self.at);
+            out[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+            self.at += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn trickled_reads_give_the_same_packets_as_a_buffer() {
+        let data = h264_single_program_ts();
+        let mut whole = TsDemuxer::new(data.clone()).unwrap();
+        let mut slow = TsDemuxer::from_reader(Trickle {
+            data,
+            at: 0,
+            step: 7,
+        })
+        .unwrap();
+        assert_eq!(slow.streams(), whole.streams());
+        loop {
+            match (whole.read_packet().unwrap(), slow.read_packet().unwrap()) {
+                (None, None) => break,
+                (Some(a), Some(b)) => {
+                    assert_eq!(a.data, b.data);
+                    assert_eq!(a.pts.value, b.pts.value);
+                    assert_eq!(a.stream_index, b.stream_index);
+                }
+                (a, b) => panic!(
+                    "packet counts differ: {:?} vs {:?}",
+                    a.is_some(),
+                    b.is_some()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_longer_than_the_trim_window_reads_to_the_end() {
+        // 3000 access units of 4000 bytes: about 12 MB, so the read window is trimmed.
+        let mut data = Vec::new();
+        data.extend_from_slice(&psi_packet(PID_PAT, &sample_pat(0x1000)));
+        data.extend_from_slice(&psi_packet(0x1000, &sample_pmt(0x1B, 0x0100, &[])));
+        let units = 3000u64;
+        for i in 0..units {
+            let payload = vec![(i % 251) as u8; 4000];
+            data.extend_from_slice(&concat(&pes_packets(
+                0x0100,
+                0xE0,
+                i * 3600,
+                true,
+                &payload,
+            )));
+        }
+        let mut ts = TsDemuxer::from_reader(Cursor::new(data)).unwrap();
+        let mut count = 0u64;
+        let mut last = Vec::new();
+        while let Some(p) = ts.read_packet().unwrap() {
+            assert_eq!(p.data.len(), 4000);
+            assert_eq!(p.data[0], (count % 251) as u8);
+            last = p.data;
+            count += 1;
+        }
+        assert_eq!(count, units);
+        assert_eq!(last[0], ((units - 1) % 251) as u8);
     }
 }

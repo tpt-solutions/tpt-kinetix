@@ -102,12 +102,13 @@ pub fn rules(
 
     for (i, t) in tracks.iter().enumerate() {
         let label = match t.kind {
-            MediaType::Video => format!(
+            MediaType::Video if t.width > 0 => format!(
                 "video track {i}: {} {}x{}",
                 t.codec_name(),
                 t.width,
                 t.height
             ),
+            MediaType::Video => format!("video track {i}: {}", t.codec_name()),
             MediaType::Audio => format!("audio track {i}: {}", t.codec_name()),
             _ => continue,
         };
@@ -208,9 +209,7 @@ fn inspect(input: &Path) -> Result<(Container, Vec<Track>, Option<bool>)> {
         ));
     }
     if head.len() >= 189 && head[0] == 0x47 && head[188] == 0x47 {
-        let data =
-            std::fs::read(input).with_context(|| format!("failed to read {}", input.display()))?;
-        let demuxer = TsDemuxer::new(data)
+        let demuxer = TsDemuxer::from_reader(File::open(input)?)
             .with_context(|| format!("failed to parse MPEG-TS: {}", input.display()))?;
         let tracks = demuxer
             .streams()

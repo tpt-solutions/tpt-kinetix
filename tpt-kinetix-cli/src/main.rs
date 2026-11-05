@@ -578,11 +578,8 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
         .with_context(|| format!("failed to read input file: {}", input.display()))?;
 
     if looks_like_mpeg_ts(&head) {
-        // The TS demuxer still takes a whole buffer (streaming TS is tracked in
-        // `todo-io.md`, M1); MP4 and Matroska below never load the file.
-        let data = std::fs::read(input)
-            .with_context(|| format!("failed to read input file: {}", input.display()))?;
-        return probe_ts(input, data, json);
+        // The TS demuxer reads the file on demand, so the probe never loads it.
+        return probe_ts(input, json);
     }
 
     if looks_like_matroska(&head) {
@@ -747,8 +744,10 @@ fn looks_like_mpeg_ts(data: &[u8]) -> bool {
 
 /// Inspect an MPEG-TS stream and print its programs, streams, and a
 /// per-PID packet summary.
-fn probe_ts(input: &std::path::Path, data: Vec<u8>, json: bool) -> Result<()> {
-    let mut demuxer = tpt_kinetix_demux::TsDemuxer::new(data)
+fn probe_ts(input: &std::path::Path, json: bool) -> Result<()> {
+    let file = std::fs::File::open(input)
+        .with_context(|| format!("failed to open input file: {}", input.display()))?;
+    let mut demuxer = tpt_kinetix_demux::TsDemuxer::from_reader(file)
         .with_context(|| format!("failed to parse MPEG-TS stream: {}", input.display()))?;
 
     println!("File: {}", input.display());
