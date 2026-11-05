@@ -41,3 +41,6 @@ codec-vp9 = ["dep:tpt-kinetix-vp9", "tpt-kinetix-pipeline/codec-vp9"]
 whip = ["tpt-kinetix-stream/whip"]
 # TLS for `live`: HTTPS / `wss://` on the HTTP port and RTMPS (`--tls-cert`, `--tls-key`).
 tls = ["tpt-kinetix-stream/rtmps"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

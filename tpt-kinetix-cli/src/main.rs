@@ -792,7 +792,7 @@ fn probe_ivf(data: &[u8], json: bool) -> Result<()> {
             probe_json::document(
                 "ivf",
                 "IVF (raw AV1/VP9)",
-                None,
+                probe_json::duration_of(std::slice::from_ref(&info)),
                 data.len() as u64,
                 &probe_json::streams(std::slice::from_ref(&info), &[Some(frames)]),
             )

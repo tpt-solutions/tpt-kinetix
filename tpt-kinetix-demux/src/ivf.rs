@@ -157,6 +157,8 @@ fn parse(data: &[u8]) -> Result<ParsedIvf, KinetixError> {
     if frames.is_empty() {
         return Err(KinetixError::Parse("IVF file contains no frames".into()));
     }
+    // Frame `i` starts at `i * ticks_per_frame`, so the track lasts one step per frame.
+    info.duration = frames.len() as u64 * ticks_per_frame;
     Ok((info, frames, ticks_per_frame))
 }
 
