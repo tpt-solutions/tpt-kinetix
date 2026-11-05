@@ -68,6 +68,19 @@ enum Target {
 struct Layout {
     faststart: bool,
     fragment_ms: Option<u32>,
+    /// Set by `sanitize`: keep only royalty-free streams and enforce these limits.
+    sanitize: Option<Limits>,
+}
+
+/// Bounds for untrusted input. Input beyond one of them is refused, never truncated.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// The largest packet, in bytes.
+    pub max_packet_bytes: usize,
+    /// The most packets read from the input.
+    pub max_packets: u64,
+    /// The most bytes read from the input, in total.
+    pub max_total_bytes: u64,
 }
 
 /// Whether `output` names an Ogg file (Opus audio).
@@ -107,6 +120,31 @@ pub fn remux(
     want_faststart: bool,
     fragment_ms: Option<u32>,
 ) -> Result<()> {
+    let layout = Layout {
+        faststart: want_faststart,
+        fragment_ms,
+        sanitize: None,
+    };
+    remux_with(input, output, layout)
+}
+
+/// Writes a sanitised copy of `input`: only AV1, VP9 and Opus streams are kept, and
+/// `limits` bound what is read. Exceeding a limit fails and removes the output.
+pub fn sanitize(input: &str, output: &Path, limits: Limits) -> Result<()> {
+    let layout = Layout {
+        faststart: false,
+        fragment_ms: None,
+        sanitize: Some(limits),
+    };
+    let result = remux_with(input, output, layout);
+    if result.is_err() {
+        let _ = std::fs::remove_file(output);
+    }
+    result
+}
+
+fn remux_with(input: &str, output: &Path, layout: Layout) -> Result<()> {
+    let fragment_ms = layout.fragment_ms;
     let remote = input.starts_with("http://") || input.starts_with("https://");
     // The input's magic decides the reader; the output path decides the writer.
     let input_is_webm = if remote {
@@ -135,10 +173,6 @@ pub fn remux(
         Target::Webm
     } else {
         Target::Mp4
-    };
-    let layout = Layout {
-        faststart: want_faststart,
-        fragment_ms,
     };
     if target != Target::Mp4 && (layout.faststart || layout.fragment_ms.is_some()) {
         if target == Target::Webm {
@@ -203,14 +237,15 @@ fn remux_from_mp4<S: ReadAt>(
 ) -> Result<()> {
     let streams = reader.streams();
     let scales: Vec<u32> = streams.iter().map(|s| s.timescale).collect();
-    let mut next = move || -> Result<Option<Frame>> {
+    let next: Box<NextFrame> = Box::new(move || -> Result<Option<Frame>> {
         let Some((p, ticks)) = reader.read_packet_timed()? else {
             return Ok(None);
         };
         let scale = scales.get(p.stream_index as usize).copied().unwrap_or(1000);
         Ok(Some((p, ticks, scale, 0)))
-    };
-    write_output(streams, &mut next, output, target, layout)
+    });
+    let (streams, mut next) = guard(streams, next, layout.sanitize);
+    write_output(streams, &mut *next, output, target, layout)
 }
 
 /// Copies a WebM input. Durations are distances to the next frame of the same
@@ -224,15 +259,16 @@ fn remux_from_mkv<S: ReadAt>(
     let streams: Vec<StreamInfo> = reader.streams().to_vec();
     let timings = frame_timings(&reader);
     let mut i = 0usize;
-    let mut next = move || -> Result<Option<Frame>> {
+    let next: Box<NextFrame> = Box::new(move || -> Result<Option<Frame>> {
         let Some(p) = reader.read_packet()? else {
             return Ok(None);
         };
         let (dur_ms, discard) = timings.get(i).copied().unwrap_or((0, 0));
         i += 1;
         Ok(Some((p, dur_ms, 1000, discard)))
-    };
-    write_output(streams, &mut next, output, target, layout)
+    });
+    let (streams, mut next) = guard(streams, next, layout.sanitize);
+    write_output(streams, &mut *next, output, target, layout)
 }
 
 /// The full duration of every frame in milliseconds, plus its `DiscardPadding`.
@@ -252,6 +288,70 @@ fn frame_timings(reader: &MkvReader<impl ReadAt>) -> Vec<(u32, u64)> {
         next_of[s.stream] = Some(i);
     }
     out
+}
+
+/// Applies `sanitize`'s policy to a reader: drops streams that are not AV1, VP9 or
+/// Opus, skips their packets, and fails when a limit is exceeded. Without a policy
+/// the reader passes through unchanged.
+fn guard<'a>(
+    streams: Vec<StreamInfo>,
+    mut next: Box<NextFrame<'a>>,
+    limits: Option<Limits>,
+) -> (Vec<StreamInfo>, Box<NextFrame<'a>>) {
+    let Some(limits) = limits else {
+        return (streams, next);
+    };
+    // Input stream position -> output position, for the streams that are kept.
+    let mut keep: Vec<Option<u32>> = Vec::with_capacity(streams.len());
+    let mut kept = Vec::new();
+    for s in streams {
+        let royalty_free = matches!(s.codec, CodecId::Av1 | CodecId::Vp9 | CodecId::Opus);
+        let media = matches!(s.media_type, MediaType::Video | MediaType::Audio);
+        if royalty_free && media {
+            keep.push(Some(kept.len() as u32));
+            kept.push(s);
+        } else {
+            eprintln!(
+                "dropping stream {} ({}): sanitized output keeps only AV1, VP9 and Opus",
+                s.index,
+                s.codec.name()
+            );
+            keep.push(None);
+        }
+    }
+    let mut packets = 0u64;
+    let mut total = 0u64;
+    let guarded: Box<NextFrame<'a>> = Box::new(move || -> Result<Option<Frame>> {
+        loop {
+            let Some((mut p, ticks, scale, discard)) = next()? else {
+                return Ok(None);
+            };
+            let Some(Some(new_index)) = keep.get(p.stream_index as usize).copied() else {
+                continue;
+            };
+            packets += 1;
+            if packets > limits.max_packets {
+                bail!("the input has more than {} packets", limits.max_packets);
+            }
+            if p.data.len() > limits.max_packet_bytes {
+                bail!(
+                    "a packet of {} bytes is over the {} byte limit",
+                    p.data.len(),
+                    limits.max_packet_bytes
+                );
+            }
+            total += p.data.len() as u64;
+            if total > limits.max_total_bytes {
+                bail!(
+                    "the input is over the {} byte limit",
+                    limits.max_total_bytes
+                );
+            }
+            p.stream_index = new_index;
+            return Ok(Some((p, ticks, scale, discard)));
+        }
+    });
+    (kept, guarded)
 }
 
 /// Keeps the streams `accept` takes and gives each its index in the output.

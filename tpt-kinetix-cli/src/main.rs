@@ -71,6 +71,26 @@ enum Commands {
         #[arg(long, default_value_t = 2000, requires = "fragmented")]
         fragment_ms: u32,
     },
+    /// Re-mux an untrusted file, keeping only royalty-free streams (AV1, VP9, Opus),
+    /// and refuse it if it exceeds size limits. No decoding happens.
+    #[command(after_help = "Examples:
+  tpt-kinetix sanitize upload.webm clean.webm
+  tpt-kinetix sanitize upload.mp4 clean.mp4 --max-total-mb 500")]
+    Sanitize {
+        /// Input file or http(s) URL: WebM or MP4.
+        input: String,
+        /// Output path; the extension picks the container, as for `remux`.
+        output: PathBuf,
+        /// Largest packet allowed, in bytes.
+        #[arg(long, default_value_t = 16 * 1024 * 1024)]
+        max_packet_bytes: usize,
+        /// Most packets allowed.
+        #[arg(long, default_value_t = 10_000_000)]
+        max_packets: u64,
+        /// Most media bytes allowed, in MiB.
+        #[arg(long, default_value_t = 4096)]
+        max_total_mb: u64,
+    },
     /// Say whether a file will play in a browser, and why not (no decoding).
     #[command(after_help = "Examples:
   tpt-kinetix doctor in.webm
@@ -320,6 +340,21 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Probe { input, json } => probe(&input, json),
         Commands::Doctor { input } => doctor::run(&input),
+        Commands::Sanitize {
+            input,
+            output,
+            max_packet_bytes,
+            max_packets,
+            max_total_mb,
+        } => remux::sanitize(
+            &input,
+            &output,
+            remux::Limits {
+                max_packet_bytes,
+                max_packets,
+                max_total_bytes: max_total_mb * 1024 * 1024,
+            },
+        ),
         Commands::Thumbnails {
             input,
             output,
