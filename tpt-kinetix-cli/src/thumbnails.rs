@@ -22,10 +22,23 @@ use tpt_kinetix_demux::{Demuxer, IvfDemuxer, MkvReader, Mp4Reader};
 
 use crate::png;
 
-/// Writes `count` PNG stills, spread evenly over the video's keyframes, to `output`.
-pub fn run(input: &Path, output: &Path, count: usize) -> Result<()> {
+/// A contact sheet: the stills scaled to `tile_width` and laid out in `columns`.
+#[derive(Debug, Clone, Copy)]
+pub struct Sprite {
+    pub columns: usize,
+    pub tile_width: u32,
+}
+
+/// Writes `count` PNG stills, spread evenly over the video's keyframes, to
+/// `output`, and a `sprite.png` contact sheet when `sprite` is given.
+pub fn run(input: &Path, output: &Path, count: usize, sprite: Option<Sprite>) -> Result<()> {
     if count == 0 {
         bail!("--count must be at least 1");
+    }
+    if let Some(s) = sprite {
+        if s.columns == 0 || s.tile_width == 0 {
+            bail!("--sprite-columns and --sprite-width must be at least 1");
+        }
     }
     let (mut reader, streams) = open(input)?;
     let (video, codec) = video_track(&streams)?;
@@ -53,6 +66,8 @@ pub fn run(input: &Path, output: &Path, count: usize) -> Result<()> {
     let mut ordinal = 0u64;
     let mut next = wanted.iter().copied().peekable();
     let mut written = Vec::new();
+    // Scaled copies for the contact sheet: small, so kept in memory.
+    let mut tiles: Vec<(u32, u32, Vec<u8>)> = Vec::new();
     while let Some(p) = reader.read_packet()? {
         if p.stream_index as usize != video {
             continue;
@@ -71,7 +86,30 @@ pub fn run(input: &Path, output: &Path, count: usize) -> Result<()> {
         let rgb = to_rgb(&frame)?;
         std::fs::write(&path, png::encode_rgb(frame.width, frame.height, &rgb))
             .with_context(|| format!("failed to write {}", path.display()))?;
+        if let Some(s) = sprite {
+            let th = tile_height(frame.width, frame.height, s.tile_width);
+            tiles.push((
+                s.tile_width,
+                th,
+                scale_nearest(&rgb, frame.width, frame.height, s.tile_width, th),
+            ));
+        }
         written.push((path, seconds(&p)));
+    }
+
+    if let Some(s) = sprite {
+        if let Some(&(tw, th, _)) = tiles.first() {
+            let (w, h, rgb) = compose(
+                &tiles.iter().map(|t| t.2.clone()).collect::<Vec<_>>(),
+                tw,
+                th,
+                s.columns,
+            );
+            let path = output.join("sprite.png");
+            std::fs::write(&path, png::encode_rgb(w, h, &rgb))
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            println!("{}  {}x{} ({} per row)", path.display(), w, h, s.columns);
+        }
     }
 
     for (path, at) in &written {
@@ -158,6 +196,44 @@ fn seconds(p: &Packet) -> f64 {
     p.pts.value as f64 * f64::from(num) / f64::from(den)
 }
 
+/// The height of a tile that keeps the frame's aspect ratio.
+fn tile_height(width: u32, height: u32, tile_width: u32) -> u32 {
+    let h = u64::from(height) * u64::from(tile_width) / u64::from(width.max(1));
+    u32::try_from(h.max(1)).unwrap_or(u32::MAX)
+}
+
+/// Nearest-neighbour resize of packed RGB.
+fn scale_nearest(rgb: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u8> {
+    let (w, h, nw, nh) = (w as usize, h as usize, nw as usize, nh as usize);
+    let mut out = Vec::with_capacity(nw * nh * 3);
+    for y in 0..nh {
+        let sy = (y * h / nh).min(h - 1);
+        for x in 0..nw {
+            let sx = (x * w / nw).min(w - 1);
+            let at = (sy * w + sx) * 3;
+            out.extend_from_slice(&rgb[at..at + 3]);
+        }
+    }
+    out
+}
+
+/// Lays equal-sized RGB tiles out in rows of `columns`; the last row is padded black.
+fn compose(tiles: &[Vec<u8>], tw: u32, th: u32, columns: usize) -> (u32, u32, Vec<u8>) {
+    let (tw, th) = (tw as usize, th as usize);
+    let rows = tiles.len().div_ceil(columns);
+    let (cw, ch) = (tw * columns, th * rows);
+    let mut out = vec![0u8; cw * ch * 3];
+    for (i, tile) in tiles.iter().enumerate() {
+        let (col, row) = (i % columns, i / columns);
+        for y in 0..th {
+            let dst = ((row * th + y) * cw + col * tw) * 3;
+            let src = y * tw * 3;
+            out[dst..dst + tw * 3].copy_from_slice(&tile[src..src + tw * 3]);
+        }
+    }
+    (cw as u32, ch as u32, out)
+}
+
 /// Converts an 8-bit 4:2:0 frame to packed RGB (BT.601, limited range).
 fn to_rgb(frame: &VideoFrame) -> Result<Vec<u8>> {
     if frame.pixel_format != PixelFormat::Yuv420p {
@@ -209,6 +285,25 @@ mod tests {
         let many = pick(&keys, 4);
         assert_eq!(many.len(), 4);
         assert!(many.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn scaling_and_composing_place_tiles_in_a_grid() {
+        // A 2x2 image of distinct pixels, scaled to 4x4 by nearest neighbour.
+        let rgb = vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4];
+        let big = scale_nearest(&rgb, 2, 2, 4, 4);
+        assert_eq!(&big[..6], &[1, 1, 1, 1, 1, 1]);
+        assert_eq!(&big[(4 * 3)..(4 * 3) + 3], &[1, 1, 1]);
+        // Three one-pixel tiles in two columns: a 2x2 sheet with a black gap.
+        let (w, h, out) = compose(
+            &[vec![10, 10, 10], vec![20, 20, 20], vec![30, 30, 30]],
+            1,
+            1,
+            2,
+        );
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(&out[..6], &[10, 10, 10, 20, 20, 20]);
+        assert_eq!(&out[6..], &[30, 30, 30, 0, 0, 0]);
     }
 
     #[test]

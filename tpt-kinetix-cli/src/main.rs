@@ -94,6 +94,12 @@ enum Commands {
         /// Number of stills, spread evenly over the keyframes.
         #[arg(long, default_value_t = 10)]
         count: usize,
+        /// Also write `sprite.png`, a contact sheet of the stills with this many per row.
+        #[arg(long)]
+        sprite_columns: Option<usize>,
+        /// Width of each tile in the contact sheet, in pixels.
+        #[arg(long, default_value_t = 160, requires = "sprite_columns")]
+        sprite_width: u32,
     },
     /// Package an MP4 into HLS (fMP4) and DASH: playlists, init and media segments.
     ///
@@ -318,7 +324,17 @@ async fn main() -> Result<()> {
             input,
             output,
             count,
-        } => thumbnails::run(&input, &output, count),
+            sprite_columns,
+            sprite_width,
+        } => thumbnails::run(
+            &input,
+            &output,
+            count,
+            sprite_columns.map(|columns| thumbnails::Sprite {
+                columns,
+                tile_width: sprite_width,
+            }),
+        ),
         Commands::Live {
             port,
             segment_seconds,

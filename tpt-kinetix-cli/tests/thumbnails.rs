@@ -85,5 +85,35 @@ fn thumbnails_are_png_stills_at_the_video_size() {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "320,240");
     }
+    // A contact sheet: three 160-wide tiles of 120 rows in one row.
+    let sheet_dir = dir.join("sheet");
+    let status = Command::new(env!("CARGO_BIN_EXE_tpt-kinetix"))
+        .arg("thumbnails")
+        .arg(&src)
+        .arg(&sheet_dir)
+        .args([
+            "--count",
+            "3",
+            "--sprite-columns",
+            "3",
+            "--sprite-width",
+            "160",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let probe = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(sheet_dir.join("sprite.png"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "480,120");
     let _ = std::fs::remove_dir_all(&dir);
 }
