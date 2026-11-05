@@ -40,6 +40,8 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 /// Most body bytes a rejected request is read through before the reply, so a
 /// refusal never has to pull a large upload off the wire.
 const MAX_DRAIN_BYTES: u64 = 64 * 1024;
+/// How long a refused publish's connection lingers after the reply (see `respond_drained`).
+const LINGER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long a blocking playlist reload holds a connection open before giving up.
 const MAX_BLOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
 /// How often a blocked playlist request re-checks the packager.
@@ -1194,7 +1196,17 @@ async fn respond_drained(
         )
         .await;
     }
-    respond(r.get_mut(), reply, false).await
+    respond(r.get_mut(), reply, false).await?;
+    // Lingering close: `respond` has half-closed our side (FIN), so keep reading
+    // until the client closes its side (or a short timeout). Dropping the socket
+    // while bytes are still arriving would reset the connection, and the client
+    // could lose the status line it has not read yet.
+    let _ = tokio::time::timeout(
+        LINGER_TIMEOUT,
+        tokio::io::copy(&mut *r, &mut tokio::io::sink()),
+    )
+    .await;
+    Ok(())
 }
 
 async fn respond(s: &mut Conn, r: Reply, head_only: bool) -> Result<()> {
