@@ -168,7 +168,11 @@ fn document(format: &str, streams: &[StreamInfo]) -> String {
         .enumerate()
         .map(|(i, s)| stream_json(i, s))
         .collect();
-    format!("{{\"format\":\"{}\",\"streams\":[{}]}}", format, items.join(","))
+    format!(
+        "{{\"format\":\"{}\",\"streams\":[{}]}}",
+        format,
+        items.join(",")
+    )
 }
 
 fn stream_json(index: usize, s: &StreamInfo) -> String {
