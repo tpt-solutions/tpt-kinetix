@@ -28,6 +28,10 @@ struct Cli {
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Inspect a media container and print its tracks (demux-only, runnable today).
+    #[command(after_help = "Examples:
+  tpt-kinetix probe in.mp4
+  tpt-kinetix probe --json in.webm
+  tpt-kinetix probe https://example.com/in.mp4")]
     Probe {
         /// Input file path (MP4/ISO-BMFF, MPEG-TS, or Matroska/WebM), or an
         /// `http(s)://` URL for MP4 (probed with range requests).
@@ -41,6 +45,12 @@ enum Commands {
     ///
     /// Video and audio are passed through bit-for-bit, including audio codecs
     /// Kinetix cannot decode. The input may be a file or an `http(s)://` URL.
+    #[command(after_help = "Examples:
+  tpt-kinetix remux in.webm out.mp4                  # WebM to MP4
+  tpt-kinetix remux in.mp4 out.mp4 --faststart       # moov first, for progressive playback
+  tpt-kinetix remux in.mp4 - --fragmented            # fragmented MP4 to stdout
+  tpt-kinetix remux in.mp4 out.webm                  # MP4 to WebM
+  tpt-kinetix remux in.webm out.ivf                  # first AV1/VP9 video track as IVF")]
     Remux {
         /// Input MP4 or WebM (path or http(s) URL).
         input: String,
@@ -64,6 +74,9 @@ enum Commands {
     /// be a file or an `http(s)://` URL of any size. Tracks become separate
     /// renditions (`master.m3u8`, `track-N.m3u8`, `init-N.mp4`, `seg-N-M.m4s`,
     /// `manifest.mpd`).
+    #[command(after_help = "Examples:
+  tpt-kinetix package in.mp4 out/                    # HLS + DASH, 6 s segments
+  tpt-kinetix package in.mp4 out/ --segment-seconds 4")]
     Package {
         /// Input MP4 (path or http(s) URL).
         input: String,
