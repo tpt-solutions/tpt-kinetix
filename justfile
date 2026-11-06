@@ -74,6 +74,11 @@ perf-dashboard:
 ffi-header:
     cd tpt-kinetix-ffi && cbindgen --lang c --crate tpt-kinetix-ffi --output include/tpt_kinetix.h
 
+# C ABI: the header is current, and a C program links the library and runs every call.
+ffi-smoke:
+    bash tools/ffi-smoke-test.sh
+
+
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
 fuzz crate target seconds="60":
     cd {{crate}} && cargo fuzz run {{target}} -- -max_total_time={{seconds}}
