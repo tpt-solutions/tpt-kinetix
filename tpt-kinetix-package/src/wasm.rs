@@ -201,7 +201,9 @@ impl WasmPackager {
             .iframe_rendition(&self.source, track)
             .await
             .map_err(js_err)?;
-        self.inner.iframe_playlist(track, &rendition).map_err(js_err)
+        self.inner
+            .iframe_playlist(track, &rendition)
+            .map_err(js_err)
     }
 
     /// The trick-play rendition file of video `track` (`iframes-{track}.m4s`).
