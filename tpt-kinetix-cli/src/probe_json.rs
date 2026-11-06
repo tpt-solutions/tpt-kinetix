@@ -99,6 +99,10 @@ fn stream_json(index: usize, s: &StreamInfo, frames: Option<u64>) -> String {
     if let Some(n) = frames {
         let _ = write!(out, "\"nb_frames\":{n},");
     }
+    if let Some(lang) = &s.language {
+        // ffprobe's shape: language is a tag of the stream.
+        let _ = write!(out, "\"tags\":{{\"language\":{}}},", quote(lang));
+    }
     // Trim the trailing comma.
     if out.ends_with(',') {
         out.pop();
@@ -202,5 +206,15 @@ mod tests {
         assert!(!json.contains("nb_frames"), "{json}");
         assert!(!json.contains("\"duration\":null"), "{json}");
         assert!(json.contains("\"size\":10"), "{json}");
+    }
+
+    #[test]
+    fn language_is_a_stream_tag_only_when_known() {
+        let mut a = StreamInfo::new(0, CodecId::Opus, 48_000);
+        a.language = Some("fra".into());
+        let tagged = stream_json(0, &a, None);
+        assert!(tagged.contains("\"tags\":{\"language\":\"fra\"}"), "{tagged}");
+        let untagged = stream_json(0, &StreamInfo::new(0, CodecId::Opus, 48_000), None);
+        assert!(!untagged.contains("tags"), "{untagged}");
     }
 }

@@ -697,6 +697,9 @@ fn print_mkv_tracks(label: &str, reader: &tpt_kinetix_demux::MkvReader<std::fs::
         if !s.extradata.is_empty() {
             println!("    codec config: {} bytes", s.extradata.len());
         }
+        if let Some(lang) = &s.language {
+            println!("    language: {lang}");
+        }
     }
     println!("Frames: {}", reader.sample_count());
     println!("Duration: {:.3}s", reader.duration_ms() as f64 / 1000.0);
@@ -754,6 +757,9 @@ fn print_mp4_tracks<S: tpt_kinetix_demux::ReadAt>(
         }
         if !track.extradata.is_empty() {
             println!("    codec config: {} bytes", track.extradata.len());
+        }
+        if let Some(lang) = &track.language {
+            println!("    language: {lang}");
         }
 
         if let Some(caps) = decoder_capabilities_for(track.codec) {
