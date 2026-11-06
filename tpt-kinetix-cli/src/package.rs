@@ -116,13 +116,14 @@ pub fn package(
                 files += 1;
             }
         }
-        if let Some(playlist) = p.subtitle_media_playlist() {
-            std::fs::write(out.join("subs.m3u8"), playlist)?;
+        for k in 0..p.subtitle_count() {
+            let playlist = p.subtitle_media_playlist(k).unwrap_or_default();
+            std::fs::write(out.join(format!("subs-{k}.m3u8")), playlist)?;
             files += 1;
             for n in 1..=p.segment_count() {
-                let vtt = block_on(p.subtitle_segment(&Blocking(&*source), n))?;
+                let vtt = block_on(p.subtitle_segment(&Blocking(&*source), k, n))?;
                 bytes += vtt.len() as u64;
-                std::fs::write(out.join(format!("sub-{n}.vtt")), vtt)?;
+                std::fs::write(out.join(format!("sub-{k}-{n}.vtt")), vtt)?;
                 files += 1;
             }
         }
@@ -217,21 +218,28 @@ fn route(p: &Packager, source: &dyn ReadAt, path: &str) -> Reply {
                 }
             }
         }
-        if name == "subs.m3u8" {
-            if let Some(playlist) = p.subtitle_media_playlist() {
+        if let Some(k) = name
+            .strip_prefix("subs-")
+            .and_then(|s| s.strip_suffix(".m3u8"))
+            .and_then(num)
+        {
+            if let Some(playlist) = p.subtitle_media_playlist(k) {
                 return Ok(Reply::Ok(
                     "application/vnd.apple.mpegurl",
                     playlist.into_bytes(),
                 ));
             }
         }
-        if let Some(n) = name
+        if let Some(rest) = name
             .strip_prefix("sub-")
             .and_then(|s| s.strip_suffix(".vtt"))
-            .and_then(num)
         {
-            let vtt = block_on(p.subtitle_segment(&Blocking(source), n))?;
-            return Ok(Reply::Ok("text/vtt", vtt));
+            if let Some((k, n)) = rest.split_once('-') {
+                if let (Some(k), Some(n)) = (num(k), num(n)) {
+                    let vtt = block_on(p.subtitle_segment(&Blocking(source), k, n))?;
+                    return Ok(Reply::Ok("text/vtt", vtt));
+                }
+            }
         }
         Ok(Reply::NotFound(format!("no such resource: /{name}")))
     })();

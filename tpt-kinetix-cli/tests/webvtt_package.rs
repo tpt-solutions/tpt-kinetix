@@ -14,6 +14,9 @@ use tpt_kinetix_core::timestamp::Timestamp;
 use tpt_kinetix_demux::{Demuxer, Mp4Reader};
 use tpt_kinetix_mux::{Mp4Writer, WriterOptions};
 
+/// A second subtitle track (another language), to check numbered renditions.
+const CUES_FR: [(&str, i64, i64); 2] = [("Bonjour", 0, 3000), ("Au revoir", 3000, 6000)];
+
 const CUES: [(&str, i64, i64); 3] = [
     ("Hello subtitles", 0, 2500),
     ("Second cue", 2500, 5000),
@@ -38,7 +41,7 @@ fn cue_sample(text: &str) -> Vec<u8> {
     vttc
 }
 
-/// Writes `dir/src.mp4` with the A/V of `av` plus a WebVTT track of three cues.
+/// Writes `dir/src.mp4` with the A/V of `av` plus two WebVTT tracks.
 fn make_source(av: &Path, dir: &Path) -> std::path::PathBuf {
     let bytes = std::fs::read(av).unwrap();
     let mut reader = Mp4Reader::open(bytes).unwrap();
@@ -48,18 +51,22 @@ fn make_source(av: &Path, dir: &Path) -> std::path::PathBuf {
         packets.push(p);
     }
 
-    let mut sub = StreamInfo::new(streams.len() as u32, CodecId::WebVtt, 1000);
-    sub.extradata = b"WEBVTT\n".to_vec();
-    let sub_index = sub.index;
-    streams.push(sub);
-    for (text, start, _) in CUES {
-        packets.push(Packet {
-            pts: Timestamp::new(start, (1, 1000)),
-            dts: Timestamp::new(start, (1, 1000)),
-            data: cue_sample(text),
-            stream_index: sub_index,
-            is_key_frame: true,
-        });
+    for cues in [&CUES[..], &CUES_FR[..]] {
+        let mut sub = StreamInfo::new(streams.len() as u32, CodecId::WebVtt, 1000);
+        sub.extradata = b"WEBVTT
+"
+        .to_vec();
+        let sub_index = sub.index;
+        streams.push(sub);
+        for &(text, start, _) in cues {
+            packets.push(Packet {
+                pts: Timestamp::new(start, (1, 1000)),
+                dts: Timestamp::new(start, (1, 1000)),
+                data: cue_sample(text),
+                stream_index: sub_index,
+                is_key_frame: true,
+            });
+        }
     }
     packets.sort_by(|a, b| a.dts.as_secs_f64().total_cmp(&b.dts.as_secs_f64()));
 
@@ -146,8 +153,17 @@ fn package_writes_the_subtitle_group_and_segments() {
         "{master}"
     );
     assert!(master.contains("SUBTITLES=\"subs\""), "{master}");
+    // A second track is a second rendition, not a default.
+    assert!(
+        master.contains("NAME=\"subtitles-1\"") && master.contains("URI=\"subs-1.m3u8\""),
+        "{master}"
+    );
+    assert!(
+        master.contains("NAME=\"subtitles-0\"") && master.contains("DEFAULT=YES"),
+        "{master}"
+    );
 
-    let subs = std::fs::read_to_string(out.join("subs.m3u8")).unwrap();
+    let subs = std::fs::read_to_string(out.join("subs-0.m3u8")).unwrap();
     assert!(subs.contains("#EXT-X-ENDLIST"), "{subs}");
     let segments = subs.matches("sub-").count();
     assert!(segments >= 2, "expected several subtitle segments: {subs}");
@@ -155,7 +171,7 @@ fn package_writes_the_subtitle_group_and_segments() {
     // Every cue appears in at least one segment that covers its time.
     let mut all = String::new();
     for n in 1..=segments {
-        all.push_str(&std::fs::read_to_string(out.join(format!("sub-{n}.vtt"))).unwrap());
+        all.push_str(&std::fs::read_to_string(out.join(format!("sub-0-{n}.vtt"))).unwrap());
     }
     for (text, _, _) in CUES {
         assert!(
@@ -165,7 +181,7 @@ fn package_writes_the_subtitle_group_and_segments() {
     }
 
     // The first segment starts at 0 and must hold the first cue but not the last.
-    let first = std::fs::read_to_string(out.join("sub-1.vtt")).unwrap();
+    let first = std::fs::read_to_string(out.join("sub-0-1.vtt")).unwrap();
     assert!(first.starts_with("WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"));
     assert!(
         first.contains("00:00:00.000 --> 00:00:02.500\nHello subtitles"),
@@ -173,13 +189,20 @@ fn package_writes_the_subtitle_group_and_segments() {
     );
     assert!(!first.contains("Third cue"), "{first}");
 
+    // The second track is packaged on the same grid, with its own cues.
+    let fr = std::fs::read_to_string(out.join("sub-1-1.vtt")).unwrap();
+    assert!(fr.contains("Bonjour"), "{fr}");
+    assert!(std::fs::read_to_string(out.join("subs-1.m3u8"))
+        .unwrap()
+        .contains("sub-1-1.vtt"));
+
     // DASH: a text adaptation set on the same segment grid.
     let mpd = std::fs::read_to_string(out.join("manifest.mpd")).unwrap();
     assert!(
         mpd.contains("contentType=\"text\" mimeType=\"text/vtt\""),
         "{mpd}"
     );
-    assert!(mpd.contains("media=\"sub-$Number$.vtt\""), "{mpd}");
+    assert!(mpd.contains("media=\"sub-0-$Number$.vtt\""), "{mpd}");
 
     // serve: the same resources, packaged on demand over HTTP.
     let port = 18_000 + (std::process::id() % 2000) as u16;
@@ -206,11 +229,11 @@ fn package_writes_the_subtitle_group_and_segments() {
         }
         panic!("serve did not start");
     };
-    let playlist = get("/subs.m3u8");
-    let vtt = get("/sub-1.vtt");
+    let playlist = get("/subs-0.m3u8");
+    let vtt = get("/sub-0-1.vtt");
     let _ = server.kill();
     let _ = server.wait();
-    assert!(playlist.contains("sub-1.vtt"), "{playlist}");
+    assert!(playlist.contains("sub-0-1.vtt"), "{playlist}");
     assert!(vtt.contains("Hello subtitles"), "{vtt}");
 
     let _ = std::fs::remove_dir_all(&dir);

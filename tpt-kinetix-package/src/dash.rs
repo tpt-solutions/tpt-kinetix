@@ -129,8 +129,8 @@ pub(crate) fn mpd(p: &Packager) -> String {
         let _ = writeln!(out, "      </Representation>");
         let _ = writeln!(out, "    </AdaptationSet>");
     }
-    if p.has_subtitles() {
-        subtitle_set(p, streams.len(), &mut out);
+    for k in 0..p.subtitle_count() {
+        subtitle_set(p, k, streams.len() + k, &mut out);
     }
     let _ = writeln!(out, "  </Period>\n</MPD>");
     out
@@ -138,7 +138,7 @@ pub(crate) fn mpd(p: &Packager) -> String {
 
 /// The WebVTT text adaptation set: one `sub-{n}.vtt` per A/V segment, on a
 /// millisecond timeline taken from the lead track's segment grid.
-fn subtitle_set(p: &Packager, id: usize, out: &mut String) {
+fn subtitle_set(p: &Packager, k: usize, id: usize, out: &mut String) {
     let plan = p.plan();
     let lead = plan.lead;
     let scale = f64::from(p.streams()[lead].timescale.max(1));
@@ -166,11 +166,11 @@ fn subtitle_set(p: &Packager, id: usize, out: &mut String) {
     let _ = writeln!(
         out,
         "      <Representation id=\"{id}\" codecs=\"wvtt\" bandwidth=\"{}\">",
-        p.subtitle_bandwidth().max(1)
+        p.subtitle_bandwidth(k).max(1)
     );
     let _ = writeln!(
         out,
-        "        <SegmentTemplate timescale=\"1000\" media=\"sub-$Number$.vtt\" startNumber=\"1\">"
+        "        <SegmentTemplate timescale=\"1000\" media=\"sub-{k}-$Number$.vtt\" startNumber=\"1\">"
     );
     let _ = writeln!(out, "          <SegmentTimeline>");
     for (k, (t, d, r)) in runs.iter().enumerate() {

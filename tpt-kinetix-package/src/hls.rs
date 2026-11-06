@@ -45,11 +45,12 @@ pub(crate) fn master(p: &Packager) -> String {
             streams[a].channels.max(1)
         );
     }
-    let subs = p.has_subtitles();
-    if subs {
+    let subs = p.subtitle_count() > 0;
+    for k in 0..p.subtitle_count() {
+        let default = if k == 0 { "YES" } else { "NO" };
         let _ = writeln!(
             out,
-            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"subtitles\",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE=\"und\",URI=\"subs.m3u8\""
+            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"subtitles-{k}\",DEFAULT={default},AUTOSELECT=YES,LANGUAGE=\"und\",URI=\"subs-{k}.m3u8\""
         );
     }
     let subs_attr = if subs { ",SUBTITLES=\"subs\"" } else { "" };

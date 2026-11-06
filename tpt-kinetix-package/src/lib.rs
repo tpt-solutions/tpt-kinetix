@@ -148,8 +148,8 @@ struct PackagedTrack {
 pub struct Packager {
     index: Box<dyn SampleIndex + Send + Sync>,
     tracks: Vec<PackagedTrack>,
-    /// The first WebVTT track, packaged as an HLS subtitle group (`subs.m3u8`).
-    subtitle: Option<subtitles::SubtitleTrack>,
+    /// The WebVTT tracks, packaged as HLS subtitle renditions (`subs-{k}.m3u8`).
+    subtitles: Vec<subtitles::SubtitleTrack>,
     plan: SegmentPlan,
     opts: PackagerOptions,
 }
@@ -208,11 +208,11 @@ impl Packager {
         let sources: Vec<usize> = tracks.iter().map(|t| t.source_index).collect();
         let plan = plan::plan_segments(index.as_ref(), &sources, opts.segment_seconds);
         // Subtitles follow the A/V segment grid; they never drive it.
-        let subtitle = index
+        let subtitles: Vec<subtitles::SubtitleTrack> = index
             .streams()
             .iter()
             .enumerate()
-            .find(|(i, s)| {
+            .filter(|(i, s)| {
                 s.codec == CodecId::WebVtt
                     && s.media_type == MediaType::Subtitle
                     && index.sample_count(*i) > 0
@@ -220,11 +220,12 @@ impl Packager {
             .map(|(i, s)| subtitles::SubtitleTrack {
                 source_index: i,
                 timescale: s.timescale,
-            });
+            })
+            .collect();
         Ok(Self {
             index,
             tracks,
-            subtitle,
+            subtitles,
             plan,
             opts,
         })
@@ -365,14 +366,14 @@ impl Packager {
         Ok(out)
     }
 
-    /// Whether the source has a WebVTT subtitle track to package.
-    pub fn has_subtitles(&self) -> bool {
-        self.subtitle.is_some()
+    /// Number of WebVTT subtitle tracks packaged (0 when the source has none).
+    pub fn subtitle_count(&self) -> usize {
+        self.subtitles.len()
     }
 
-    /// Average bits per second of the subtitle track (0 when there is none).
-    pub(crate) fn subtitle_bandwidth(&self) -> u64 {
-        let Some(sub) = &self.subtitle else {
+    /// Average bits per second of subtitle track `k` (0 when there is none).
+    pub(crate) fn subtitle_bandwidth(&self, k: usize) -> u64 {
+        let Some(sub) = self.subtitles.get(k) else {
             return 0;
         };
         let samples = self.index.samples(sub.source_index);
@@ -386,11 +387,11 @@ impl Packager {
         }
     }
 
-    /// The HLS media playlist of the subtitle group (`subs.m3u8`), or `None`
-    /// when the source has no WebVTT track. Its segments are `sub-{n}.vtt` and
-    /// line up with the A/V segments.
-    pub fn subtitle_media_playlist(&self) -> Option<String> {
-        self.subtitle.as_ref()?;
+    /// The HLS media playlist of subtitle track `k` (`subs-{k}.m3u8`), or `None`
+    /// when there is no such track. Its segments are `sub-{k}-{n}.vtt` and line
+    /// up with the A/V segments.
+    pub fn subtitle_media_playlist(&self, k: usize) -> Option<String> {
+        self.subtitles.get(k)?;
         let segs = &self.plan.segments;
         let lead = self.plan.lead;
         let target = segs
@@ -400,30 +401,41 @@ impl Packager {
             .ceil()
             .max(1.0) as u64;
         let mut out = format!(
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+            "#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:{target}
+#EXT-X-MEDIA-SEQUENCE:1
+#EXT-X-PLAYLIST-TYPE:VOD
+"
         );
         for (i, seg) in segs.iter().enumerate() {
             out.push_str(&format!(
-                "#EXTINF:{:.6},\nsub-{}.vtt\n",
+                "#EXTINF:{:.6},
+sub-{k}-{}.vtt
+",
                 seg.seconds[lead],
                 i + 1
             ));
         }
-        out.push_str("#EXT-X-ENDLIST\n");
+        out.push_str(
+            "#EXT-X-ENDLIST
+",
+        );
         Some(out)
     }
 
-    /// WebVTT segment `n` (1-based) of the subtitle group: every cue that
-    /// overlaps the segment's time window, as a standalone `.vtt` file.
+    /// WebVTT segment `n` (1-based) of subtitle track `k`: every cue that overlaps
+    /// the segment's time window, as a standalone `.vtt` file.
     pub async fn subtitle_segment<S: AsyncReadAt>(
         &self,
         source: &S,
+        k: usize,
         n: usize,
     ) -> Result<Vec<u8>, PackageError> {
         let sub = self
-            .subtitle
-            .as_ref()
-            .ok_or_else(|| PackageError::NotFound("no subtitle track".into()))?;
+            .subtitles
+            .get(k)
+            .ok_or_else(|| PackageError::NotFound(format!("subtitle track {k}")))?;
         let seg = n
             .checked_sub(1)
             .and_then(|i| self.plan.segments.get(i))
