@@ -1,0 +1,16 @@
+# Keep build context small: build outputs, VCS data, fixtures and local media.
+target/
+.git/
+.github/
+history/
+.kilo/
+web-demo/pkg/
+**/fuzz/
+**/fixtures/
+**/node_modules/
+*.mp4
+*.mkv
+*.webm
+*.ivf
+*.ts
+*.yuv

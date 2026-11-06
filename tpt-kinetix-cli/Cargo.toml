@@ -12,6 +12,16 @@ categories = ["multimedia", "command-line-utilities"]
 readme = "README.md"
 documentation = "https://docs.rs/tpt-kinetix-cli"
 
+# `cargo binstall tpt-kinetix-cli` downloads the archives that
+# .github/workflows/binaries.yml attaches to each v<version> GitHub Release.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/tpt-kinetix-v{ version }-{ target }.{ archive-format }"
+bin-dir = "tpt-kinetix-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "tpt-kinetix"
 path = "src/main.rs"

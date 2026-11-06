@@ -166,6 +166,21 @@ tpt-kinetix (workspace)
 - Rust 1.82 or later (`rustup update stable`)
 - `cargo-deny` for supply-chain checks (`cargo install cargo-deny`)
 
+### Install the CLI
+
+Prebuilt `tpt-kinetix` binaries (Linux x86_64, macOS x86_64 and arm64, Windows x86_64)
+are attached to each GitHub Release, with SHA-256 sums. Or build from source:
+
+```bash
+cargo binstall tpt-kinetix-cli        # prebuilt, from the GitHub Release
+cargo install tpt-kinetix-cli         # from source, once published to crates.io
+docker run --rm ghcr.io/tpt-solutions/tpt-kinetix:<version> --help   # container image
+```
+
+The container image is built from the [Dockerfile](Dockerfile) and published by the
+Binaries workflow under the version tag only (there is no `latest` tag). To work on a
+local file, mount it: `docker run --rm -v "$PWD:/data" ghcr.io/tpt-solutions/tpt-kinetix:<version> probe in.mp4`.
+
 ### Build
 
 ```bash
