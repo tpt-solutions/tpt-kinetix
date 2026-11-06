@@ -24,6 +24,7 @@ members = [
   "tpt-kinetix-ffi",
   "tpt-kinetix-ops",
   "tpt-kinetix-py",
+  "tpt-kinetix-node",
 ]
 exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "out-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz", "tpt-kinetix-vision/fuzz"]
 
