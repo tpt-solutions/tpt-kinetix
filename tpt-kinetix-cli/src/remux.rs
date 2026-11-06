@@ -273,16 +273,21 @@ fn remux_from_mkv<S: ReadAt>(
 
 /// The full duration of every frame in milliseconds, plus its `DiscardPadding`.
 ///
-/// A frame's duration is its distance to the next frame *of the same track*;
-/// the last one has no successor, so it uses the Opus nominal 20 ms.
+/// A frame's duration is its own `BlockDuration` when it states one (a WebVTT
+/// cue's end is only stated this way), else its distance to the next frame *of
+/// the same track*; the last one has no successor, so it uses the Opus nominal
+/// 20 ms.
 fn frame_timings(reader: &MkvReader<impl ReadAt>) -> Vec<(u32, u64)> {
     let samples = reader.samples();
     let mut out = vec![(0u32, 0u64); samples.len()];
     // Last index seen per track, so each frame can look forward in its own track.
     let mut next_of: Vec<Option<usize>> = vec![None; reader.streams().len().max(1)];
     for (i, s) in samples.iter().enumerate().rev() {
-        let dur = next_of[s.stream]
-            .map(|n| (samples[n].pts_ms - s.pts_ms).max(1))
+        let dur = s
+            .duration_ms
+            .map(i64::from)
+            .filter(|d| *d > 0)
+            .or_else(|| next_of[s.stream].map(|n| (samples[n].pts_ms - s.pts_ms).max(1)))
             .unwrap_or(20);
         out[i] = (dur.min(u32::MAX as i64) as u32, s.discard_padding);
         next_of[s.stream] = Some(i);
@@ -389,7 +394,10 @@ fn mp4_can_carry(s: &StreamInfo) -> bool {
 
 /// Streams WebM can carry.
 fn webm_can_carry(s: &StreamInfo) -> bool {
-    matches!(s.codec, CodecId::Av1 | CodecId::Vp9 | CodecId::Opus)
+    matches!(
+        s.codec,
+        CodecId::Av1 | CodecId::Vp9 | CodecId::Opus | CodecId::WebVtt
+    )
 }
 
 /// Writes the frames of any input to the chosen container.

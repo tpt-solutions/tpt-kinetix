@@ -174,6 +174,8 @@ fn codec_id(codec: CodecId) -> Option<&'static str> {
         CodecId::Av1 => Some("V_AV1"),
         CodecId::Vp9 => Some("V_VP9"),
         CodecId::Opus => Some("A_OPUS"),
+        // The official Matroska ID for WebVTT (see the demuxer for the older one).
+        CodecId::WebVtt => Some("D_WEBVTT/SUBTITLES"),
         _ => None,
     }
 }
@@ -195,6 +197,8 @@ fn codec_private(info: &StreamInfo) -> Result<Option<Vec<u8>>, KinetixError> {
             Ok(Some(info.extradata.clone()))
         }
         CodecId::Vp9 => Ok(None),
+        // WebVTT's CodecPrivate is the header, and it is optional.
+        CodecId::WebVtt => Ok((!info.extradata.is_empty()).then(|| info.extradata.clone())),
         CodecId::Opus => {
             let dops = info.extradata.as_slice();
             if dops.len() < 11 {
@@ -358,7 +362,10 @@ impl<W: Write> WebmWriter<W> {
         }
         let mut tracks = Vec::new();
         for (i, info) in infos.iter().enumerate() {
-            if matches!(info.media_type, MediaType::Audio | MediaType::Video) {
+            if matches!(
+                info.media_type,
+                MediaType::Audio | MediaType::Video | MediaType::Subtitle
+            ) {
                 if codec_id(info.codec).is_none() {
                     continue;
                 }
@@ -452,6 +459,7 @@ impl<W: Write> WebmWriter<W> {
             return Ok(()); // a track we do not write
         };
         let timescale = track.info.timescale.max(1);
+        let is_subtitle = track.info.media_type == MediaType::Subtitle;
         let pts_ms = packet.pts.as_millis().unwrap_or(0);
         let key = packet.is_key_frame;
         let data = packet.data.clone();
@@ -477,6 +485,13 @@ impl<W: Write> WebmWriter<W> {
             // applied, so the last frame would decode to a different length.
             let trim_ns = discard * 1_000_000_000 / 48_000;
             self.write_block_group(number, rel as i16, key, &data, None, trim_ns)?;
+        } else if is_subtitle && duration.is_some() {
+            // A WebVTT cue's end time is its block's duration, so a subtitle block
+            // is written as a BlockGroup that states it.
+            // BlockDuration counts TimestampScale units, which is milliseconds here.
+            let ticks = u64::from(duration.unwrap_or(0));
+            let ms = ticks * 1000 / u64::from(timescale);
+            self.write_block_group(number, rel as i16, key, &data, Some(ms), 0)?;
         } else {
             self.write_block(number, rel as i16, key, &data)?;
         }
@@ -688,8 +703,9 @@ impl<W: Write> WebmWriter<W> {
         self.flush(&buf)
     }
 
-    /// Writes a `BlockGroup` around the block, with a `BlockDuration` and a
-    /// `DiscardPadding` (both in nanoseconds, per the Matroska TimestampScale).
+    /// Writes a `BlockGroup` around the block, with an optional `BlockDuration`
+    /// (in TimestampScale units, milliseconds here) and a `DiscardPadding` (in
+    /// nanoseconds).
     ///
     /// A `SimpleBlock` cannot carry either, so this is how a trailing partial
     /// frame (the encoder's `DiscardPadding`) survives a remux: without it a
@@ -700,13 +716,13 @@ impl<W: Write> WebmWriter<W> {
         rel_ms: i16,
         key: bool,
         data: &[u8],
-        duration_ns: Option<u64>,
+        block_duration: Option<u64>,
         discard: u64,
     ) -> Result<(), KinetixError> {
         let mut group = Vec::new();
         elem(&mut group, ID_BLOCK, &block_body(track, rel_ms, key, data));
-        if let Some(ns) = duration_ns {
-            elem_uint(&mut group, ID_BLOCK_DURATION, ns);
+        if let Some(d) = block_duration {
+            elem_uint(&mut group, ID_BLOCK_DURATION, d);
         }
         elem_sint(&mut group, ID_DISCARD_PADDING, discard);
         let mut buf = Vec::new();

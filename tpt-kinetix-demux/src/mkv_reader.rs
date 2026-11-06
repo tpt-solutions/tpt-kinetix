@@ -58,6 +58,8 @@ pub struct MkvSample {
     /// Samples to discard from the end of this frame's presentation
     /// (`DiscardPadding`, 48 kHz for Opus). `0` when the container states none.
     pub discard_padding: u64,
+    /// The block's own `BlockDuration` in milliseconds, when it states one.
+    pub duration_ms: Option<u32>,
 }
 
 /// A Matroska / WebM file indexed over a [`ReadAt`] source.
@@ -112,10 +114,18 @@ impl MkvIndex {
             for (i, f) in frames.iter().enumerate() {
                 // A frame's duration is its distance to the next one; Matroska
                 // states it per block and most muxers omit it.
-                let dur_ms = frames
-                    .get(i + 1)
-                    .map(|n| n.pts_ms - f.pts_ms)
+                // A block's own BlockDuration is authoritative (a WebVTT cue's end
+                // is only ever stated this way); otherwise use the gap to the next.
+                let dur_ms = f
+                    .duration_ms
+                    .map(i64::from)
                     .filter(|d| *d > 0)
+                    .or_else(|| {
+                        frames
+                            .get(i + 1)
+                            .map(|n| n.pts_ms - f.pts_ms)
+                            .filter(|d| *d > 0)
+                    })
                     .unwrap_or_else(|| nominal_frame_ms(info));
                 let mut duration = u64::try_from(dur_ms.max(0)).unwrap_or(0) * scale / 1000;
                 // `DiscardPadding` shortens the frame's presentation; honour it so
@@ -298,6 +308,7 @@ fn sample_of(f: &MkvFrame) -> Result<MkvSample, KinetixError> {
         pts_ms: f.pts_ms,
         is_key: f.key,
         discard_padding: f.discard_padding,
+        duration_ms: f.duration_ms,
     })
 }
 

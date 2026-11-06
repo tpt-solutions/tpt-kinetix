@@ -701,6 +701,16 @@ fn build_stream_info(
             s.extradata = dops;
             Ok(Built::Info(s))
         }
+        // WebVTT in Matroska: each block is a cue in the same `vttc` form as an
+        // MP4 `wvtt` sample; CodecPrivate, when present, is the WebVTT header.
+        // Block times are milliseconds, so the timescale is 1000. The official
+        // ID is D_WEBVTT/SUBTITLES (what ffmpeg writes); S_TEXT/WEBVTT is the
+        // older text-subtitle form, read too.
+        (17, "D_WEBVTT/SUBTITLES" | "S_TEXT/WEBVTT") => {
+            let mut s = StreamInfo::new(index, CodecId::WebVtt, 1000);
+            s.extradata = b.private.clone();
+            Ok(Built::Info(s))
+        }
         (t, _) if t == 1 || t == 2 => Ok(Built::Unsupported),
         _ => Ok(Built::Unsupported),
     }
