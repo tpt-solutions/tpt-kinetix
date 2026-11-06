@@ -138,6 +138,13 @@ enum Commands {
         /// Target segment length in seconds (cut at the next video key frame).
         #[arg(long, default_value_t = 6.0)]
         segment_seconds: f64,
+        /// Protect the output with CENC (ClearKey): the key ID, 32 hex digits.
+        /// Needs `--cenc-key`. Applies to the fMP4 segments, not to the manifests.
+        #[arg(long, requires = "cenc_key")]
+        cenc_key_id: Option<String>,
+        /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
+        #[arg(long, requires = "cenc_key_id")]
+        cenc_key: Option<String>,
     },
     /// Run a live server: publish AV1/VP9 + Opus WebM over HTTP, play it as live HLS.
     ///
@@ -227,6 +234,12 @@ enum Commands {
         /// Listen on all interfaces instead of localhost only.
         #[arg(long)]
         public: bool,
+        /// Protect the fMP4 segments with CENC (ClearKey): the key ID, 32 hex digits.
+        #[arg(long, requires = "cenc_key")]
+        cenc_key_id: Option<String>,
+        /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
+        #[arg(long, requires = "cenc_key_id")]
+        cenc_key: Option<String>,
     },
     /// Transcode a media file (VP9 MP4 → AV1).
     Transcode {
@@ -473,13 +486,23 @@ async fn main() -> Result<()> {
             input,
             output,
             segment_seconds,
-        } => package::package(&input, &output, segment_seconds),
+            cenc_key_id,
+            cenc_key,
+        } => {
+            let encryption = package::cenc_from_args(cenc_key_id, cenc_key)?;
+            package::package(&input, &output, segment_seconds, encryption)
+        }
         Commands::Serve {
             input,
             port,
             segment_seconds,
             public,
-        } => package::serve(&input, port, segment_seconds, public),
+            cenc_key_id,
+            cenc_key,
+        } => {
+            let encryption = package::cenc_from_args(cenc_key_id, cenc_key)?;
+            package::serve(&input, port, segment_seconds, public, encryption)
+        }
         Commands::Remux {
             input,
             output,

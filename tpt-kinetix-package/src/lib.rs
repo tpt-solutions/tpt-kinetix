@@ -22,6 +22,7 @@ mod dash;
 mod hls;
 pub mod live;
 mod plan;
+mod subtitles;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -119,6 +120,10 @@ pub struct PackagerOptions {
     /// Merge two sample reads into one request when the bytes between them are
     /// at most this many (trading wasted bytes for fewer round trips).
     pub max_read_gap: u64,
+    /// Protect every packaged track with CENC `cenc` under this key, or leave
+    /// the output clear when `None`. Protection applies to the fMP4 init and
+    /// media segments; the HLS and DASH manifests do not signal it yet.
+    pub encryption: Option<tpt_kinetix_mux::Encryption>,
 }
 
 impl Default for PackagerOptions {
@@ -126,6 +131,7 @@ impl Default for PackagerOptions {
         Self {
             segment_seconds: 6.0,
             max_read_gap: 256 * 1024,
+            encryption: None,
         }
     }
 }
@@ -142,6 +148,8 @@ struct PackagedTrack {
 pub struct Packager {
     index: Box<dyn SampleIndex + Send + Sync>,
     tracks: Vec<PackagedTrack>,
+    /// The first WebVTT track, packaged as an HLS subtitle group (`subs.m3u8`).
+    subtitle: Option<subtitles::SubtitleTrack>,
     plan: SegmentPlan,
     opts: PackagerOptions,
 }
@@ -199,9 +207,24 @@ impl Packager {
         }
         let sources: Vec<usize> = tracks.iter().map(|t| t.source_index).collect();
         let plan = plan::plan_segments(index.as_ref(), &sources, opts.segment_seconds);
+        // Subtitles follow the A/V segment grid; they never drive it.
+        let subtitle = index
+            .streams()
+            .iter()
+            .enumerate()
+            .find(|(i, s)| {
+                s.codec == CodecId::WebVtt
+                    && s.media_type == MediaType::Subtitle
+                    && index.sample_count(*i) > 0
+            })
+            .map(|(i, s)| subtitles::SubtitleTrack {
+                source_index: i,
+                timescale: s.timescale,
+            });
         Ok(Self {
             index,
             tracks,
+            subtitle,
             plan,
             opts,
         })
@@ -211,6 +234,11 @@ impl Packager {
     /// `track-{i}.m3u8`).
     pub fn streams(&self) -> Vec<&StreamInfo> {
         self.tracks.iter().map(|t| &t.info).collect()
+    }
+
+    /// The CENC key the packaged tracks are protected with, if any.
+    pub fn encryption(&self) -> Option<&tpt_kinetix_mux::Encryption> {
+        self.opts.encryption.as_ref()
     }
 
     /// RFC 6381 codec string of packaged track `track`.
@@ -239,7 +267,9 @@ impl Packager {
         let t = self.track(track)?;
         let mut info = t.info.clone();
         info.index = 0;
-        Ok(FragmentWriter::new(&[info])?.init_segment())
+        Ok(FragmentWriter::new(&[info])?
+            .with_encryption(self.opts.encryption.clone())?
+            .init_segment())
     }
 
     /// Segment `n` (1-based) of `track` as `moof` + `mdat`, reading only that
@@ -267,13 +297,18 @@ impl Packager {
         let mut info = t.info.clone();
         info.index = 0;
         let mut w = FragmentWriter::new(&[info])?
+            .with_encryption(self.opts.encryption.clone())?
             .starting_sequence(n as u32)
             .with_segment_index(true);
         let scale = t.info.timescale;
-        for (s, bytes) in samples.iter().zip(data) {
+        // CENC IVs must be unique per key: the track number in the top 16 bits,
+        // the sample's index within the track below. Segments never reuse one.
+        let iv_base = (track as u64) << 48;
+        let first = seg.samples[track].start as u64;
+        for (j, (s, bytes)) in samples.iter().zip(data).enumerate() {
             let dts = s.dts as i64;
             let tb = (1, scale);
-            w.push(
+            w.push_with_iv(
                 &Packet {
                     pts: Timestamp::new(dts + i64::from(s.cts_offset), tb),
                     dts: Timestamp::new(dts, tb),
@@ -282,6 +317,7 @@ impl Packager {
                     is_key_frame: s.is_key,
                 },
                 Some(s.duration),
+                iv_base | (first + j as u64),
             )?;
         }
         w.flush(true)?
@@ -327,6 +363,94 @@ impl Packager {
             i = j;
         }
         Ok(out)
+    }
+
+    /// Whether the source has a WebVTT subtitle track to package.
+    pub fn has_subtitles(&self) -> bool {
+        self.subtitle.is_some()
+    }
+
+    /// Average bits per second of the subtitle track (0 when there is none).
+    pub(crate) fn subtitle_bandwidth(&self) -> u64 {
+        let Some(sub) = &self.subtitle else {
+            return 0;
+        };
+        let samples = self.index.samples(sub.source_index);
+        let bytes: u64 = samples.iter().map(|s| u64::from(s.size)).sum();
+        let ticks: u64 = samples.iter().map(|s| u64::from(s.duration)).sum();
+        let secs = ticks as f64 / f64::from(sub.timescale.max(1));
+        if secs > 0.0 {
+            (bytes as f64 * 8.0 / secs) as u64
+        } else {
+            0
+        }
+    }
+
+    /// The HLS media playlist of the subtitle group (`subs.m3u8`), or `None`
+    /// when the source has no WebVTT track. Its segments are `sub-{n}.vtt` and
+    /// line up with the A/V segments.
+    pub fn subtitle_media_playlist(&self) -> Option<String> {
+        self.subtitle.as_ref()?;
+        let segs = &self.plan.segments;
+        let lead = self.plan.lead;
+        let target = segs
+            .iter()
+            .map(|s| s.seconds[lead])
+            .fold(0.0f64, f64::max)
+            .ceil()
+            .max(1.0) as u64;
+        let mut out = format!(
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+        );
+        for (i, seg) in segs.iter().enumerate() {
+            out.push_str(&format!(
+                "#EXTINF:{:.6},\nsub-{}.vtt\n",
+                seg.seconds[lead],
+                i + 1
+            ));
+        }
+        out.push_str("#EXT-X-ENDLIST\n");
+        Some(out)
+    }
+
+    /// WebVTT segment `n` (1-based) of the subtitle group: every cue that
+    /// overlaps the segment's time window, as a standalone `.vtt` file.
+    pub async fn subtitle_segment<S: AsyncReadAt>(
+        &self,
+        source: &S,
+        n: usize,
+    ) -> Result<Vec<u8>, PackageError> {
+        let sub = self
+            .subtitle
+            .as_ref()
+            .ok_or_else(|| PackageError::NotFound("no subtitle track".into()))?;
+        let seg = n
+            .checked_sub(1)
+            .and_then(|i| self.plan.segments.get(i))
+            .ok_or_else(|| PackageError::NotFound(format!("segment {n}")))?;
+        let lead = self.plan.lead;
+        let lead_scale = f64::from(self.tracks[lead].info.timescale.max(1));
+        let from = seg.start_ticks[lead] as f64 / lead_scale;
+        let to = from + seg.seconds[lead];
+        let picked: Vec<SampleRef> = self
+            .index
+            .samples(sub.source_index)
+            .iter()
+            .copied()
+            .filter(|s| subtitles::overlaps(s, sub.timescale, from, to))
+            .collect();
+        let bytes = self.read_samples(source, &picked).await?;
+        let scale = f64::from(sub.timescale.max(1));
+        let mut cues = Vec::new();
+        for (s, data) in picked.iter().zip(bytes) {
+            // Empty (`vtte`) samples carry no cue.
+            let Some(cue) = subtitles::parse_sample(&data) else {
+                continue;
+            };
+            let start = s.dts as f64 / scale;
+            cues.push((cue, start, start + f64::from(s.duration) / scale));
+        }
+        Ok(subtitles::segment_file(&cues).into_bytes())
     }
 
     /// The HLS master playlist. `track-{i}.m3u8` URIs are relative.

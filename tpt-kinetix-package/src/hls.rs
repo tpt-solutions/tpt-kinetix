@@ -45,6 +45,14 @@ pub(crate) fn master(p: &Packager) -> String {
             streams[a].channels.max(1)
         );
     }
+    let subs = p.has_subtitles();
+    if subs {
+        let _ = writeln!(
+            out,
+            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"subtitles\",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE=\"und\",URI=\"subs.m3u8\""
+        );
+    }
+    let subs_attr = if subs { ",SUBTITLES=\"subs\"" } else { "" };
     let lead_audio = audio.first().copied();
     let audio_bw = lead_audio.map_or((0, 0), |a| bitrates(p, a));
     if video.is_empty() {
@@ -53,7 +61,7 @@ pub(crate) fn master(p: &Packager) -> String {
             let (peak, avg) = bitrates(p, a);
             let _ = writeln!(
                 out,
-                "#EXT-X-STREAM-INF:BANDWIDTH={},AVERAGE-BANDWIDTH={},CODECS=\"{}\"\ntrack-{a}.m3u8",
+                "#EXT-X-STREAM-INF:BANDWIDTH={},AVERAGE-BANDWIDTH={},CODECS=\"{}\"{subs_attr}\ntrack-{a}.m3u8",
                 peak.max(1),
                 avg.max(1),
                 p.codec(a).unwrap_or("")
@@ -83,6 +91,7 @@ pub(crate) fn master(p: &Packager) -> String {
         if lead_audio.is_some() {
             attrs.push_str(",AUDIO=\"audio\"");
         }
+        attrs.push_str(subs_attr);
         let _ = writeln!(out, "#EXT-X-STREAM-INF:{attrs}\ntrack-{v}.m3u8");
     }
     out

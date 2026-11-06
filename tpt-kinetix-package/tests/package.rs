@@ -330,6 +330,7 @@ fn one_segment_costs_few_reads_and_a_zero_gap_costs_many() {
         PackagerOptions {
             segment_seconds: 3.0,
             max_read_gap: 256 * 1024,
+            encryption: None,
         },
     ))
     .unwrap();
@@ -346,6 +347,7 @@ fn one_segment_costs_few_reads_and_a_zero_gap_costs_many() {
         PackagerOptions {
             segment_seconds: 3.0,
             max_read_gap: 0,
+            encryption: None,
         },
     ))
     .unwrap();

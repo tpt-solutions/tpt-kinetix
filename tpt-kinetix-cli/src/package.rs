@@ -26,13 +26,33 @@ fn is_webm(source: &dyn ReadAt) -> Result<bool> {
 }
 
 /// Opens `input` and runs `f` with a [`Packager`] and its (blocking) source.
+/// Builds the CENC key from the two `--cenc-*` flags (both or neither).
+pub fn cenc_from_args(
+    key_id: Option<String>,
+    key: Option<String>,
+) -> Result<Option<tpt_kinetix_mux::Encryption>> {
+    match (key_id, key) {
+        (None, None) => Ok(None),
+        (Some(id), Some(k)) => {
+            let key_id = tpt_kinetix_mux::cenc::parse_hex16(&id)
+                .context("--cenc-key-id must be 32 hex digits")?;
+            let key = tpt_kinetix_mux::cenc::parse_hex16(&k)
+                .context("--cenc-key must be 32 hex digits")?;
+            Ok(Some(tpt_kinetix_mux::Encryption { key_id, key }))
+        }
+        _ => bail!("--cenc-key-id and --cenc-key go together"),
+    }
+}
+
 fn with_packager<R>(
     input: &str,
     segment_seconds: f64,
+    encryption: Option<tpt_kinetix_mux::Encryption>,
     f: impl FnOnce(Packager, Arc<dyn ReadAt + Send + Sync>) -> Result<R>,
 ) -> Result<R> {
     let opts = PackagerOptions {
         segment_seconds,
+        encryption,
         ..Default::default()
     };
     let source: Arc<dyn ReadAt + Send + Sync> =
@@ -60,9 +80,14 @@ fn build_segment(p: &Packager, source: &dyn ReadAt, track: usize, n: usize) -> R
 }
 
 /// Writes `master.m3u8`, `track-*.m3u8`, `init-*.mp4`, `seg-*.m4s` and `manifest.mpd` into `out`.
-pub fn package(input: &str, out: &Path, segment_seconds: f64) -> Result<()> {
+pub fn package(
+    input: &str,
+    out: &Path,
+    segment_seconds: f64,
+    encryption: Option<tpt_kinetix_mux::Encryption>,
+) -> Result<()> {
     let started = Instant::now();
-    with_packager(input, segment_seconds, |p, source| {
+    with_packager(input, segment_seconds, encryption, |p, source| {
         std::fs::create_dir_all(out)
             .with_context(|| format!("failed to create {}", out.display()))?;
         std::fs::write(out.join("master.m3u8"), p.hls_master())?;
@@ -84,6 +109,16 @@ pub fn package(input: &str, out: &Path, segment_seconds: f64) -> Result<()> {
                 files += 1;
             }
         }
+        if let Some(playlist) = p.subtitle_media_playlist() {
+            std::fs::write(out.join("subs.m3u8"), playlist)?;
+            files += 1;
+            for n in 1..=p.segment_count() {
+                let vtt = block_on(p.subtitle_segment(&Blocking(&*source), n))?;
+                bytes += vtt.len() as u64;
+                std::fs::write(out.join(format!("sub-{n}.vtt")), vtt)?;
+                files += 1;
+            }
+        }
         println!(
             "packaged {} track(s) into {} segment(s) each: {files} files, {:.1} MiB, {:.2}s -> {}",
             p.streams().len(),
@@ -97,8 +132,14 @@ pub fn package(input: &str, out: &Path, segment_seconds: f64) -> Result<()> {
 }
 
 /// Serves the stream just-in-time on `127.0.0.1:port` (or `0.0.0.0` with `public`).
-pub fn serve(input: &str, port: u16, segment_seconds: f64, public: bool) -> Result<()> {
-    with_packager(input, segment_seconds, |p, source| {
+pub fn serve(
+    input: &str,
+    port: u16,
+    segment_seconds: f64,
+    public: bool,
+    encryption: Option<tpt_kinetix_mux::Encryption>,
+) -> Result<()> {
+    with_packager(input, segment_seconds, encryption, |p, source| {
         let host = if public { "0.0.0.0" } else { "127.0.0.1" };
         let listener = TcpListener::bind((host, port))
             .with_context(|| format!("failed to bind {host}:{port}"))?;
@@ -168,6 +209,22 @@ fn route(p: &Packager, source: &dyn ReadAt, path: &str) -> Reply {
                     ));
                 }
             }
+        }
+        if name == "subs.m3u8" {
+            if let Some(playlist) = p.subtitle_media_playlist() {
+                return Ok(Reply::Ok(
+                    "application/vnd.apple.mpegurl",
+                    playlist.into_bytes(),
+                ));
+            }
+        }
+        if let Some(n) = name
+            .strip_prefix("sub-")
+            .and_then(|s| s.strip_suffix(".vtt"))
+            .and_then(num)
+        {
+            let vtt = block_on(p.subtitle_segment(&Blocking(source), n))?;
+            return Ok(Reply::Ok("text/vtt", vtt));
         }
         Ok(Reply::NotFound(format!("no such resource: /{name}")))
     })();
