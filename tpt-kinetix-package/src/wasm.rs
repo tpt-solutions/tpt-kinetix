@@ -170,4 +170,48 @@ impl WasmPackager {
             .await
             .map_err(js_err)
     }
+
+    /// Number of WebVTT subtitle tracks.
+    #[wasm_bindgen(getter, js_name = subtitleCount)]
+    pub fn subtitle_count(&self) -> usize {
+        self.inner.subtitle_count()
+    }
+
+    /// The HLS media playlist of subtitle track `k` (`subs-{k}.m3u8`).
+    #[wasm_bindgen(js_name = subtitleMediaPlaylist)]
+    pub fn subtitle_media_playlist(&self, k: usize) -> Option<String> {
+        self.inner.subtitle_media_playlist(k)
+    }
+
+    /// WebVTT segment `n` (1-based) of subtitle track `k`, from ranged reads.
+    #[wasm_bindgen(js_name = subtitleSegment)]
+    pub async fn subtitle_segment(&self, k: usize, n: usize) -> Result<Vec<u8>, JsValue> {
+        self.inner
+            .subtitle_segment(&self.source, k, n)
+            .await
+            .map_err(js_err)
+    }
+
+    /// The I-frames-only playlist of video `track` (builds the rendition from
+    /// ranged reads of its key frames).
+    #[wasm_bindgen(js_name = iframePlaylist)]
+    pub async fn iframe_playlist(&self, track: usize) -> Result<String, JsValue> {
+        let rendition = self
+            .inner
+            .iframe_rendition(&self.source, track)
+            .await
+            .map_err(js_err)?;
+        self.inner.iframe_playlist(track, &rendition).map_err(js_err)
+    }
+
+    /// The trick-play rendition file of video `track` (`iframes-{track}.m4s`).
+    #[wasm_bindgen(js_name = iframeFile)]
+    pub async fn iframe_file(&self, track: usize) -> Result<Vec<u8>, JsValue> {
+        let rendition = self
+            .inner
+            .iframe_rendition(&self.source, track)
+            .await
+            .map_err(js_err)?;
+        Ok(rendition.file)
+    }
 }

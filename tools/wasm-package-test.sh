@@ -8,7 +8,9 @@ work="${TMPDIR:-/tmp}/tpt-wasm-package-test"
 rm -rf "$work" && mkdir -p "$work"
 ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=320x240:rate=25 -t 12 \
   -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 \
-  -c:v libx264 -bf 2 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 "$work/src.mp4"
+  -c:v libx264 -bf 2 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 "$work/av.mp4"
+# Add a WebVTT track, so subtitle and trick-play renditions are compared too.
+cargo run --release -q -p tpt-kinetix-cli --example make_webvtt_sample -- "$work/av.mp4" "$work/src.mp4"
 wasm-pack build tpt-kinetix-package --target nodejs --release --no-opt \
   --out-dir "$PWD/target/wasm-pkg" -- --features wasm
 cargo run --release -q -p tpt-kinetix-cli -- package "$work/src.mp4" "$work/native" --segment-seconds 3
