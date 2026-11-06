@@ -10,7 +10,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use tpt_kinetix_demux::{block_on, Blocking, ReadAt};
@@ -88,73 +87,24 @@ fn build_segment(p: &Packager, source: &dyn ReadAt, track: usize, n: usize) -> R
 }
 
 /// Writes `master.m3u8`, `track-*.m3u8`, `init-*.mp4`, `seg-*.m4s` and `manifest.mpd` into `out`.
+/// The work is done by `tpt-kinetix-ops`, which the bindings share; this prints the summary.
 pub fn package(
     input: &str,
     out: &Path,
     segment_seconds: f64,
     encryption: Option<tpt_kinetix_mux::Encryption>,
 ) -> Result<()> {
-    let started = Instant::now();
-    with_packager(input, segment_seconds, encryption, |p, source| {
-        std::fs::create_dir_all(out)
-            .with_context(|| format!("failed to create {}", out.display()))?;
-        std::fs::write(out.join("master.m3u8"), p.hls_master())?;
-        std::fs::write(out.join("manifest.mpd"), p.dash_mpd())?;
-        if let Some(license) = p.clearkey_license() {
-            std::fs::write(out.join("key.json"), license)?;
-        }
-        let (mut files, mut bytes) = (2usize, 0u64);
-        for t in 0..p.streams().len() {
-            std::fs::write(out.join(format!("track-{t}.m3u8")), p.hls_media(t)?)?;
-            let init = p.init_segment(t)?;
-            bytes += init.len() as u64;
-            std::fs::write(out.join(format!("init-{t}.mp4")), init)?;
-            files += 2;
-            for n in 1..=p.segment_count() {
-                if p.plan().segments[n - 1].samples[t].is_empty() {
-                    continue;
-                }
-                let seg = build_segment(&p, &*source, t, n)?;
-                bytes += seg.len() as u64;
-                std::fs::write(out.join(format!("seg-{t}-{n}.m4s")), seg)?;
-                files += 1;
-            }
-        }
-        // Trick-play: one I-frame rendition per video track.
-        for t in 0..p.streams().len() {
-            if p.streams()[t].media_type != tpt_kinetix_core::codec::MediaType::Video {
-                continue;
-            }
-            let rendition = block_on(p.iframe_rendition(&Blocking(&*source), t))?;
-            bytes += rendition.file.len() as u64;
-            std::fs::write(out.join(format!("iframes-{t}.m4s")), &rendition.file)?;
-            std::fs::write(
-                out.join(format!("iframes-{t}.m3u8")),
-                p.iframe_playlist(t, &rendition)?,
-            )?;
-            files += 2;
-        }
-        for k in 0..p.subtitle_count() {
-            let playlist = p.subtitle_media_playlist(k).unwrap_or_default();
-            std::fs::write(out.join(format!("subs-{k}.m3u8")), playlist)?;
-            files += 1;
-            for n in 1..=p.segment_count() {
-                let vtt = block_on(p.subtitle_segment(&Blocking(&*source), k, n))?;
-                bytes += vtt.len() as u64;
-                std::fs::write(out.join(format!("sub-{k}-{n}.vtt")), vtt)?;
-                files += 1;
-            }
-        }
-        println!(
-            "packaged {} track(s) into {} segment(s) each: {files} files, {:.1} MiB, {:.2}s -> {}",
-            p.streams().len(),
-            p.segment_count(),
-            bytes as f64 / (1 << 20) as f64,
-            started.elapsed().as_secs_f64(),
-            out.display()
-        );
-        Ok(())
-    })
+    let done = tpt_kinetix_ops::package::package(input, out, segment_seconds, encryption)?;
+    println!(
+        "packaged {} track(s) into {} segment(s) each: {} files, {:.1} MiB, {:.2}s -> {}",
+        done.tracks,
+        done.segments,
+        done.files,
+        done.bytes as f64 / (1 << 20) as f64,
+        done.elapsed.as_secs_f64(),
+        out.display()
+    );
+    Ok(())
 }
 
 /// Serves the stream just-in-time on `127.0.0.1:port` (or `0.0.0.0` with `public`).

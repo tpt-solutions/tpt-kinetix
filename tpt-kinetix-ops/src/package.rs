@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use tpt_kinetix_core::codec::MediaType;
@@ -24,6 +24,8 @@ pub struct PackageSummary {
     pub files: usize,
     /// Bytes of media written (init, segment, trick-play and subtitle payloads).
     pub bytes: u64,
+    /// Wall-clock time the run took.
+    pub elapsed: Duration,
 }
 
 /// Builds the optional CENC key from hex strings, as the bindings and the CLI take
@@ -147,20 +149,11 @@ pub fn package(
             files += 1;
         }
     }
-    let summary = PackageSummary {
+    Ok(PackageSummary {
         tracks: p.streams().len(),
         segments: p.segment_count(),
         files,
         bytes,
-    };
-    tracing::info!(
-        tracks = summary.tracks,
-        segments = summary.segments,
-        files = summary.files,
-        bytes = summary.bytes,
-        elapsed_s = started.elapsed().as_secs_f64(),
-        output = %out.display(),
-        "packaged"
-    );
-    Ok(summary)
+        elapsed: started.elapsed(),
+    })
 }
