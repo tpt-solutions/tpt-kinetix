@@ -439,6 +439,30 @@ impl LiveServer {
                 .dash_mpd()
                 .map_or_else(not_ready, |m| Reply::xml(m.into_bytes()));
         }
+        // WebVTT subtitle renditions: `subs-{k}.m3u8` and `sub-{k}-{n}.vtt`.
+        if let Some(k) = name
+            .strip_prefix("subs-")
+            .and_then(|s| s.strip_suffix(".m3u8"))
+            .and_then(num)
+        {
+            return live
+                .lock_recover()
+                .subtitle_playlist(k)
+                .map_or_else(not_ready, |p| Reply::playlist(p.into_bytes()));
+        }
+        if let Some(rest) = name
+            .strip_prefix("sub-")
+            .and_then(|s| s.strip_suffix(".vtt"))
+        {
+            if let Some((k, n)) = rest.split_once('-') {
+                if let (Some(k), Ok(n)) = (num(k), n.parse::<u64>()) {
+                    return live.lock_recover().subtitle_segment(k, n).map_or_else(
+                        || Reply::text(404, "no such subtitle segment"),
+                        |b| Reply::media("text/vtt", b),
+                    );
+                }
+            }
+        }
         if let Some(t) = name
             .strip_prefix("track-")
             .and_then(|s| s.strip_suffix(".m3u8"))

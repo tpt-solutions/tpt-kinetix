@@ -111,6 +111,10 @@ struct Part {
 
 struct Segment {
     number: u64,
+    /// The segment's window on the media timeline (ms): WebVTT subtitle segments
+    /// are cut to it.
+    start_ms: i64,
+    end_ms: i64,
     /// Per track; `None` when the track had no samples in this segment.
     data: Vec<Option<Arc<Vec<u8>>>>,
     seconds: Vec<f64>,
@@ -142,7 +146,34 @@ pub struct CompletedSegment {
 }
 
 /// Builds a live sliding-window HLS presentation.
+/// Where an ingest track's frames go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Input {
+    /// An audio or video track, by its index in `tracks`.
+    Track(usize),
+    /// A WebVTT subtitle track, by its index in `subs`.
+    Subtitle(usize),
+    /// A track the packager does not carry.
+    Skip,
+}
+
+/// A WebVTT cue on the media timeline.
+struct LiveCue {
+    start_ms: i64,
+    end_ms: i64,
+    cue: crate::subtitles::Cue,
+}
+
+/// One subtitle rendition of a live presentation.
+struct LiveSub {
+    language: Option<String>,
+    cues: VecDeque<LiveCue>,
+}
+
 pub struct LivePackager {
+    /// Where each ingest track's frames go, indexed as the ingest announced them.
+    inputs: Vec<Input>,
+    subs: Vec<LiveSub>,
     /// Segments finished but not yet drained, when recording is on.
     completed: Vec<CompletedSegment>,
     recording: bool,
@@ -177,6 +208,16 @@ pub struct LivePackager {
     /// Added to every incoming timestamp (set from `resume_base_ms` on the first
     /// frame after a resume).
     ts_offset_ms: i64,
+}
+
+/// Whether `info` is an audio or video track (the ones a live packager carries).
+fn is_av(info: &StreamInfo) -> bool {
+    matches!(info.media_type, MediaType::Video | MediaType::Audio)
+}
+
+/// Whether `info` is a WebVTT subtitle track.
+fn is_webvtt(info: &StreamInfo) -> bool {
+    info.codec == CodecId::WebVtt && info.media_type == MediaType::Subtitle
 }
 
 /// One `#EXT-X-PART` line naming the part's URI.
@@ -230,6 +271,8 @@ impl LivePackager {
     /// A packager with `opts`; call [`Self::set_tracks`] before pushing frames.
     pub fn new(opts: LiveOptions) -> Self {
         Self {
+            inputs: Vec::new(),
+            subs: Vec::new(),
             completed: Vec::new(),
             recording: false,
             ast_ms: None,
@@ -269,14 +312,19 @@ impl LivePackager {
     /// Whether `infos` could continue this presentation: it has no tracks yet,
     /// or its tracks carry the same codec configuration.
     pub fn accepts_tracks(&self, infos: &[StreamInfo]) -> bool {
-        self.tracks.is_empty()
-            || (self.tracks.len() == infos.len()
-                && self.tracks.iter().zip(infos).all(|(t, i)| {
-                    // VP9's `vpcC` carries no size, so compare the dimensions too.
-                    t.info.extradata == i.extradata
-                        && t.info.width == i.width
-                        && t.info.height == i.height
-                }))
+        if self.tracks.is_empty() {
+            return true;
+        }
+        let carried: Vec<&StreamInfo> = infos.iter().filter(|i| is_av(i)).collect();
+        let subtitles = infos.iter().filter(|i| is_webvtt(i)).count();
+        self.tracks.len() == carried.len()
+            && subtitles == self.subs.len()
+            && self.tracks.iter().zip(carried).all(|(t, i)| {
+                // VP9's `vpcC` carries no size, so compare the dimensions too.
+                t.info.extradata == i.extradata
+                    && t.info.width == i.width
+                    && t.info.height == i.height
+            })
     }
 
     /// Reopens a finished presentation for a reconnecting publisher.
@@ -325,8 +373,18 @@ impl LivePackager {
             };
         }
         let mut tracks = Vec::new();
+        let mut inputs = Vec::with_capacity(infos.len());
+        let mut subs = Vec::new();
         for (i, mut info) in infos.into_iter().enumerate() {
             info.index = i as u32;
+            if is_webvtt(&info) {
+                inputs.push(Input::Subtitle(subs.len()));
+                subs.push(LiveSub {
+                    language: info.language.clone(),
+                    cues: VecDeque::new(),
+                });
+                continue;
+            }
             match info.media_type {
                 MediaType::Video => info.timescale = VIDEO_TIMESCALE,
                 MediaType::Audio => {
@@ -334,8 +392,11 @@ impl LivePackager {
                         info.timescale = info.sample_rate;
                     }
                 }
-                // Subtitles are not packaged live yet: they are left out, not refused.
-                MediaType::Subtitle | MediaType::Other => continue,
+                // Other tracks are left out, not refused.
+                MediaType::Subtitle | MediaType::Other => {
+                    inputs.push(Input::Skip);
+                    continue;
+                }
             }
             if codec_string(&info).is_none() {
                 return Err(LiveError::Config(format!(
@@ -343,6 +404,7 @@ impl LivePackager {
                     info.codec.name()
                 )));
             }
+            inputs.push(Input::Track(tracks.len()));
             tracks.push(Track {
                 info,
                 pending: Vec::new(),
@@ -352,6 +414,8 @@ impl LivePackager {
         if tracks.is_empty() {
             return Err(LiveError::Config("no audio or video track".into()));
         }
+        self.inputs = inputs;
+        self.subs = subs;
         self.lead = tracks
             .iter()
             .position(|t| t.info.media_type == MediaType::Video)
@@ -374,9 +438,21 @@ impl LivePackager {
         data: Vec<u8>,
         duration_ms: Option<u32>,
     ) -> Result<(), LiveError> {
-        if self.finished || stream >= self.tracks.len() {
+        if self.finished {
             return Ok(());
         }
+        let stream = match self.inputs.get(stream).copied() {
+            Some(Input::Track(t)) if t < self.tracks.len() => t,
+            Some(Input::Subtitle(k)) => {
+                if let Some(base) = self.resume_base_ms.take() {
+                    self.ts_offset_ms = base - pts_ms;
+                }
+                let pts_ms = pts_ms + self.ts_offset_ms;
+                self.push_cue(k, pts_ms, duration_ms, &data);
+                return Ok(());
+            }
+            _ => return Ok(()),
+        };
         if let Some(base) = self.resume_base_ms.take() {
             self.ts_offset_ms = base - pts_ms;
         }
@@ -386,6 +462,25 @@ impl LivePackager {
         } else {
             self.push_audio(stream, pts_ms, data);
             Ok(())
+        }
+    }
+
+    /// Keeps one WebVTT cue of subtitle rendition `k`. An empty (`vtte`) sample,
+    /// or one with no text, carries no cue.
+    fn push_cue(&mut self, k: usize, pts_ms: i64, duration_ms: Option<u32>, data: &[u8]) {
+        let cue_box = tpt_kinetix_core::webvtt::to_cue_box(data);
+        let Some(cue) = crate::subtitles::parse_sample(&cue_box) else {
+            return;
+        };
+        // Matroska states a cue's end only as its BlockDuration. Without one, the
+        // cue is shown for two seconds, a common default.
+        let dur = i64::from(duration_ms.unwrap_or(2000));
+        if let Some(sub) = self.subs.get_mut(k) {
+            sub.cues.push_back(LiveCue {
+                start_ms: pts_ms,
+                end_ms: pts_ms + dur,
+                cue,
+            });
         }
     }
 
@@ -663,6 +758,8 @@ impl LivePackager {
         self.part_start_ms = Some(end_ms);
         self.segments.push_back(Segment {
             number,
+            start_ms,
+            end_ms,
             data,
             seconds,
             start_ticks,
@@ -681,6 +778,12 @@ impl LivePackager {
         while self.segments.len() > self.opts.window + 3 {
             if let Some(old) = self.segments.pop_front() {
                 self.discontinuities_dropped += u64::from(old.discontinuity);
+            }
+        }
+        // Cues that end before the oldest retained segment can never be fetched.
+        if let Some(oldest) = self.segments.front().map(|s| s.start_ms) {
+            for sub in &mut self.subs {
+                sub.cues.retain(|c| c.end_ms > oldest);
             }
         }
         self.seg_start_ms = Some(end_ms);
@@ -1020,6 +1123,57 @@ impl LivePackager {
         self.tracks.get(track).and_then(|t| codec_string(&t.info))
     }
 
+    /// Number of WebVTT subtitle renditions (0 when the ingest has none).
+    pub fn subtitle_count(&self) -> usize {
+        self.subs.len()
+    }
+
+    /// The media playlist of subtitle rendition `k` (`subs-{k}.m3u8`): a sliding
+    /// window that follows the audio and video segments, one WebVTT file per
+    /// segment. `None` until the first segment exists.
+    pub fn subtitle_playlist(&self, k: usize) -> Option<String> {
+        self.subs.get(k)?;
+        let first = self.window().next()?;
+        let secs = |s: &Segment| (s.end_ms - s.start_ms) as f64 / 1000.0;
+        let max = self
+            .window()
+            .map(secs)
+            .fold(self.opts.segment_seconds, f64::max);
+        let mut out = format!(
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n",
+            max.ceil() as u64,
+            first.number
+        );
+        for s in self.window() {
+            let _ = writeln!(out, "#EXTINF:{:.6},\nsub-{k}-{}.vtt", secs(s), s.number);
+        }
+        if self.finished {
+            out.push_str("#EXT-X-ENDLIST\n");
+        }
+        Some(out)
+    }
+
+    /// WebVTT segment `n` of subtitle rendition `k`: every cue that overlaps the
+    /// segment's time window, as a standalone file. `None` once the segment has
+    /// left the retained window.
+    pub fn subtitle_segment(&self, k: usize, n: u64) -> Option<Vec<u8>> {
+        let sub = self.subs.get(k)?;
+        let seg = self.segments.iter().find(|s| s.number == n)?;
+        let cues: Vec<(crate::subtitles::Cue, f64, f64)> = sub
+            .cues
+            .iter()
+            .filter(|c| c.start_ms < seg.end_ms && c.end_ms > seg.start_ms)
+            .map(|c| {
+                (
+                    c.cue.clone(),
+                    c.start_ms as f64 / 1000.0,
+                    c.end_ms as f64 / 1000.0,
+                )
+            })
+            .collect();
+        Some(crate::subtitles::segment_file(&cues).into_bytes())
+    }
+
     /// The master playlist.
     pub fn master_playlist(&self) -> Option<String> {
         if !self.is_ready() {
@@ -1046,6 +1200,19 @@ impl LivePackager {
                 self.tracks[a].info.channels.max(1)
             );
         }
+        for (k, sub) in self.subs.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"subtitles-{k}\",DEFAULT={},AUTOSELECT=YES,LANGUAGE=\"{}\",URI=\"subs-{k}.m3u8\"",
+                if k == 0 { "YES" } else { "NO" },
+                sub.language.as_deref().unwrap_or("und")
+            );
+        }
+        let subs_attr = if self.subs.is_empty() {
+            ""
+        } else {
+            ",SUBTITLES=\"subs\""
+        };
         let lead_audio = audio.first().copied();
         for (v, t) in self
             .tracks
@@ -1063,7 +1230,7 @@ impl LivePackager {
             }
             let _ = writeln!(
                 out,
-                "#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{codecs}\",RESOLUTION={}x{}{audio_attr}\ntrack-{v}.m3u8",
+                "#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{codecs}\",RESOLUTION={}x{}{audio_attr}{subs_attr}\ntrack-{v}.m3u8",
                 bw.max(1),
                 t.info.width,
                 t.info.height
@@ -1074,7 +1241,7 @@ impl LivePackager {
             for &a in &audio {
                 let _ = writeln!(
                     out,
-                    "#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"\ntrack-{a}.m3u8",
+                    "#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"{subs_attr}\ntrack-{a}.m3u8",
                     bandwidth(a).max(1),
                     codec_string(&self.tracks[a].info)?
                 );
