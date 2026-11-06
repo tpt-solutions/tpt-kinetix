@@ -285,6 +285,32 @@ jobs:
         # only shows up in browsers.
         run: bash tools/wasm-package-test.sh
 
+  language-bindings:
+    name: Language bindings (C ABI, Python, Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install cbindgen
+        run: cargo install cbindgen --locked
+      - name: C ABI smoke test (header current, C program links and runs)
+        run: bash tools/ffi-smoke-test.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install maturin
+        run: pip install maturin
+      - name: Python bindings (wheel installed into a clean venv)
+        run: bash tools/py-binding-test.sh
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Node bindings (tarball installed into a clean project)
+        run: bash tools/node-binding-test.sh
+
   edge-worker-test:
     name: Edge Worker handler
     runs-on: ubuntu-latest
