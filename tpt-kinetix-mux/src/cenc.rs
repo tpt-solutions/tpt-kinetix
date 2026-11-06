@@ -188,6 +188,20 @@ pub fn protect_entry(entry: &[u8], audio: bool, enc: &Encryption) -> Result<Vec<
     Ok(boxed(kind, &body))
 }
 
+/// The ClearKey `pssh` box (system ID `1077efec-c0b2-4d02-ace3-3c1e52e2fb4b`,
+/// version 1) naming one key ID. Players fire their encrypted event for it: an
+/// HLS player (hls.js) only creates a key session when it sees a `pssh`.
+pub fn pssh_clearkey(key_id: &[u8; 16]) -> Vec<u8> {
+    let mut body = vec![
+        0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02, 0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2, 0xfb,
+        0x4b,
+    ];
+    body.extend_from_slice(&1u32.to_be_bytes()); // KID_count
+    body.extend_from_slice(key_id);
+    body.extend_from_slice(&0u32.to_be_bytes()); // Data_size
+    full_box(b"pssh", 1, 0, &body)
+}
+
 /// The `senc` box for one fragment's samples: one IV per sample (each of the
 /// scheme's IV length), no subsample map.
 pub fn senc(ivs: &[Vec<u8>]) -> Vec<u8> {
@@ -288,6 +302,25 @@ mod tests {
         };
         let w = FragmentWriter::new(&[s]).unwrap();
         assert!(w.with_encryption(Some(enc)).is_err());
+    }
+
+    #[test]
+    fn clearkey_pssh_names_the_key_id() {
+        let kid = [0x42u8; 16];
+        let b = pssh_clearkey(&kid);
+        assert_eq!(&b[4..8], b"pssh");
+        assert_eq!(b[8], 1, "version 1 lists its key IDs");
+        assert_eq!(
+            &b[12..28],
+            &[
+                0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02, 0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2,
+                0xfb, 0x4b
+            ]
+        );
+        assert_eq!(&b[28..32], &1u32.to_be_bytes(), "one key ID");
+        assert_eq!(&b[32..48], &kid);
+        assert_eq!(&b[48..52], &0u32.to_be_bytes(), "no system data");
+        assert_eq!(b.len(), 52);
     }
 
     #[test]

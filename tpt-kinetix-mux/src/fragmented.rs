@@ -174,6 +174,9 @@ impl FragmentWriter {
         mvhd.extend_from_slice(&(self.tracks.len() as u32 + 1).to_be_bytes());
 
         let mut moov = full_box(b"mvhd", 0, 0, &mvhd);
+        if let Some(enc) = self.tracks.iter().find_map(|t| t.enc.as_ref()) {
+            moov.extend(cenc::pssh_clearkey(&enc.key_id));
+        }
         let mut mvex = Vec::new();
         for (i, t) in self.tracks.iter().enumerate() {
             let id = i as u32 + 1;
