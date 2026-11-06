@@ -37,6 +37,7 @@
 //! assert_eq!(&bytes[4..8], b"ftyp");
 //! ```
 
+pub mod cenc;
 pub mod entries;
 pub mod faststart;
 pub mod fragmented;
@@ -46,6 +47,7 @@ pub mod ogg;
 pub mod webm;
 pub mod writer;
 
+pub use cenc::Encryption;
 pub use faststart::{faststart, FaststartReport};
 pub use fragmented::FragmentWriter;
 pub use ivf::IvfWriter;

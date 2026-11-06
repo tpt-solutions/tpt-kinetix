@@ -2711,7 +2711,9 @@ dependencies = [
 name = "tpt-kinetix-mux"
 version = "0.1.2"
 dependencies = [
+ "aes",
  "criterion",
+ "ctr",
  "proptest",
  "thiserror",
  "tpt-kinetix-core",

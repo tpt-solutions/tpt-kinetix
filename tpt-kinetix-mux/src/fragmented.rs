@@ -18,6 +18,7 @@ use tpt_kinetix_core::codec::CodecId;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
 
+use crate::cenc::{self, Encryption};
 use crate::entries::{boxed, full_box, handler_for, sample_entry};
 use crate::MuxError;
 
@@ -30,6 +31,8 @@ struct Sample {
     cts: i32,
     duration: Option<u32>,
     key: bool,
+    /// CENC IV, present only on protected tracks (`data` is then encrypted).
+    iv: Option<[u8; 8]>,
     data: Vec<u8>,
 }
 
@@ -38,6 +41,10 @@ struct Track {
     entry: Vec<u8>,
     pending: Vec<Sample>,
     last_dts: Option<i64>,
+    /// The CENC key, for a protected track.
+    enc: Option<Encryption>,
+    /// Next IV counter for [`FragmentWriter::push`].
+    iv_next: u64,
 }
 
 /// Writes fMP4 initialization and media segments.
@@ -86,6 +93,8 @@ impl FragmentWriter {
                 info,
                 pending: Vec::new(),
                 last_dts: None,
+                enc: None,
+                iv_next: 0,
             });
         }
         Ok(Self {
@@ -103,6 +112,32 @@ impl FragmentWriter {
     pub fn with_segment_index(mut self, on: bool) -> Self {
         self.segment_index = on;
         self
+    }
+
+    /// Protects every track with CENC `cenc` (AES-128-CTR, whole samples) under
+    /// `enc`, or leaves them clear when `enc` is `None`. Call before pushing any
+    /// samples. Samples pushed with [`FragmentWriter::push`] take IVs from a
+    /// per-writer counter, so segments written separately need
+    /// [`FragmentWriter::push_with_iv`] to keep IVs unique.
+    pub fn with_encryption(mut self, enc: Option<Encryption>) -> Result<Self, MuxError> {
+        for t in &mut self.tracks {
+            if enc.is_some() && matches!(t.info.codec, CodecId::H264 | CodecId::H265) {
+                // Whole-sample CTR would scramble the NAL length prefixes, so the
+                // result would not decode. Those codecs need subsample encryption.
+                return Err(MuxError::Unsupported(
+                    "whole-sample CENC is only valid for samples without NAL units \
+                     (VP9, AV1, Opus); H.264/H.265 need subsample encryption, which is not implemented"
+                        .into(),
+                ));
+            }
+            t.entry = sample_entry(&t.info)?;
+            if let Some(e) = &enc {
+                let audio = t.info.media_type == tpt_kinetix_core::codec::MediaType::Audio;
+                t.entry = cenc::protect_entry(&t.entry, audio, e)?;
+            }
+            t.enc = enc.clone();
+        }
+        Ok(self)
     }
 
     /// Starts fragment sequence numbers at `n` instead of 1 (so independently
@@ -156,6 +191,27 @@ impl FragmentWriter {
     /// duration in its stream's timescale when the source knows it; otherwise it
     /// is inferred from the next packet's decode time.
     pub fn push(&mut self, p: &Packet, duration: Option<u32>) -> Result<(), MuxError> {
+        self.push_inner(p, duration, None)
+    }
+
+    /// Like [`FragmentWriter::push`], but a protected sample's IV is `iv` rather
+    /// than the next counter value. Use the sample's index within its track so
+    /// that segments written separately never reuse a keystream.
+    pub fn push_with_iv(
+        &mut self,
+        p: &Packet,
+        duration: Option<u32>,
+        iv: u64,
+    ) -> Result<(), MuxError> {
+        self.push_inner(p, duration, Some(iv))
+    }
+
+    fn push_inner(
+        &mut self,
+        p: &Packet,
+        duration: Option<u32>,
+        iv: Option<u64>,
+    ) -> Result<(), MuxError> {
         let ti = p.stream_index as usize;
         let t = self
             .tracks
@@ -183,12 +239,30 @@ impl FragmentWriter {
             }
         }
         t.last_dts = Some(dts);
+        let (data, iv) = match t.enc.as_ref().map(|e| e.key) {
+            None => (p.data.clone(), None),
+            Some(key) => {
+                let counter = match iv {
+                    Some(v) => v,
+                    None => {
+                        let c = t.iv_next;
+                        t.iv_next += 1;
+                        c
+                    }
+                };
+                let iv = counter.to_be_bytes();
+                let mut data = p.data.clone();
+                cenc::apply_ctr(&key, iv, &mut data);
+                (data, Some(iv))
+            }
+        };
         t.pending.push(Sample {
             dts,
             cts,
             duration,
             key: p.is_key_frame,
-            data: p.data.clone(),
+            iv,
+            data,
         });
         Ok(())
     }
@@ -415,7 +489,12 @@ fn build_moof(sequence: u32, tracks: &[Vec<Sample>], data_offsets: &[i32]) -> Ve
             trun.extend_from_slice(&(s.cts as u32).to_be_bytes());
         }
         let trun = full_box(b"trun", 1, 0x000F01, &trun);
-        moof.extend(boxed(b"traf", &[tfhd, tfdt, trun].concat()));
+        let mut parts = vec![tfhd, tfdt, trun];
+        if samples[0].iv.is_some() {
+            let ivs: Vec<[u8; 8]> = samples.iter().filter_map(|s| s.iv).collect();
+            parts.push(cenc::senc(&ivs));
+        }
+        moof.extend(boxed(b"traf", &parts.concat()));
     }
     boxed(b"moof", &moof)
 }

@@ -15,6 +15,9 @@ documentation = "https://docs.rs/tpt-kinetix-mux"
 [dependencies]
 thiserror = { workspace = true }
 tpt-kinetix-core = { workspace = true }
+# CENC (ISO/IEC 23001-7) AES-128 counter mode for protected fragments.
+aes = "0.8"
+ctr = "0.9"
 
 [dev-dependencies]
 tpt-kinetix-demux = { path = "../tpt-kinetix-demux" }
