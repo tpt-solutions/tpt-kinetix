@@ -78,6 +78,9 @@ ffi-header:
 ffi-smoke:
     bash tools/ffi-smoke-test.sh
 
+# Python bindings: build the wheel with maturin, install it in a clean venv, run its tests.
+py-test:
+    bash tools/py-binding-test.sh
 
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
 fuzz crate target seconds="60":

@@ -1,0 +1,23 @@
+[package]
+name = "tpt-kinetix-py"
+version = "0.1.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Python bindings for the TPT Kinetix container tools (probe, remux, package)"
+publish = false
+
+[lib]
+# Built as a Python extension by maturin (see pyproject.toml).
+name = "_tpt_kinetix"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# maturin turns this on; a plain `cargo check` builds without linking to libpython.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+tpt-kinetix-ops = { workspace = true }
