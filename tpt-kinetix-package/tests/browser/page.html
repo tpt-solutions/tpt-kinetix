@@ -14,9 +14,19 @@
   const errors = [];
   let done = false;
 
+  // WebVTT cues that hls.js has put on the video's text tracks (subtitle runs only).
+  function subtitleCues() {
+    const cues = [];
+    for (const t of v.textTracks || []) {
+      for (const c of t.cues || []) cues.push(c.text);
+    }
+    return cues;
+  }
+
   function report(extra) {
     if (done) return;
     done = true;
+    const subs = subtitleCues();
     const audioTracks = v.audioTracks ? v.audioTracks.length : null;
     // For LL-HLS the page object stashes the player first (`window.__hls`);
     // latency is live edge minus playhead at report time.
@@ -38,6 +48,8 @@
         droppedFrames: v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().droppedVideoFrames : null,
         latency: liveEdge !== null ? Math.max(0, liveEdge - v.currentTime) : null,
         liveSyncPosition: liveEdge,
+        subtitleCues: subs.length,
+        subtitleText: subs.slice(0, 3),
         ...extra,
       }),
     });
@@ -53,7 +65,7 @@
   });
   setTimeout(() => report({ ok: false, timeout: true }), 40000);
 
-  if (kind === "hls") {
+  if (kind === "hls" || kind === "hlssubs") {
     if (!Hls.isSupported()) { errors.push("Hls.isSupported() is false"); report({ ok: false }); }
     else {
       // Low-latency mode: small back-buffer and `liveSyncDurationCount` of one
@@ -69,6 +81,13 @@
         if (!d.fatal && d.details === "bufferStalledError") { console.warn("hls: non-fatal stall"); return; }
         errors.push(`${d.type}/${d.details}${d.fatal ? " (fatal)" : ""}`);
       });
+      if (kind === "hlssubs") {
+        // Turn on the subtitle group the master playlist's DEFAULT=YES rendition names.
+        hls.subtitleDisplay = true;
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
+          if (hls.subtitleTracks.length > 0) hls.subtitleTrack = 0;
+        });
+      }
       hls.loadSource(url);
       hls.attachMedia(v);
       v.play().catch((e) => errors.push("play: " + e));
@@ -76,6 +95,17 @@
   } else {
     const p = dashjs.MediaPlayer().create();
     p.on("error", (e) => errors.push("dash error " + JSON.stringify(e.error || e).slice(0, 200)));
+    // CENC (ClearKey): the key ID and key come as hex, and ClearKey wants base64url.
+    const kid = q.get("kid");
+    const key = q.get("key");
+    if (kid && key) {
+      const b64url = (hex) => {
+        let s = "";
+        for (let i = 0; i < hex.length; i += 2) s += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+        return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      };
+      p.setProtectionData({ "org.w3.clearkey": { clearkeys: { [b64url(kid)]: b64url(key) } } });
+    }
     p.initialize(v, url, true);
   }
 </script>

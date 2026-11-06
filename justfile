@@ -237,6 +237,14 @@ edge-worker-test:
 browser-package-test:
     bash tools/browser-package-test.sh
 
+# hls.js in headless Chrome plays packaged HLS with a WebVTT subtitle group and shows the cues.
+browser-subtitle-test:
+    bash tools/browser-subtitle-test.sh
+
+# dash.js in headless Chrome decrypts CENC (ClearKey) protected VP9/Opus DASH output.
+browser-cenc-test:
+    bash tools/browser-cenc-test.sh
+
 # Publish AV1/VP9 + Opus live and play it with hls.js in headless Chrome mid-stream.
 live-browser-test:
     bash tools/live-browser-test.sh

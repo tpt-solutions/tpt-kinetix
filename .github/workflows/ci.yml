@@ -335,6 +335,16 @@ jobs:
         env:
           CHROME: ${{ steps.chrome.outputs.path }}
         run: bash tools/browser-package-test.sh
+      - name: Run the WebVTT subtitle playback test (hls.js)
+        # hls.js in Chrome must show the packaged subtitle cues on the video.
+        env:
+          CHROME: ${{ steps.chrome.outputs.path }}
+        run: bash tools/browser-subtitle-test.sh
+      - name: Run the CENC (ClearKey) DASH playback test
+        # dash.js with EME: the browser must decrypt the protected VP9/Opus fragments.
+        env:
+          CHROME: ${{ steps.chrome.outputs.path }}
+        run: bash tools/browser-cenc-test.sh
 
   live-browser-test:
     name: Live playback (Chrome)
@@ -362,3 +372,17 @@ jobs:
         env:
           CHROME: ${{ steps.chrome.outputs.path }}
         run: bash tools/live-browser-test.sh
+
+  task-examples:
+    name: Task examples (every script in examples/tasks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Build the CLI
+        run: cargo build --release -p tpt-kinetix-cli
+      - name: Run every task example
+        run: bash examples/tasks/run-all.sh

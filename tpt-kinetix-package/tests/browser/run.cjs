@@ -46,7 +46,10 @@ function runOne(kind, url) {
     }
     server.listen(0, "127.0.0.1", () => {
       const port = server.address().port;
-      const page = `http://127.0.0.1:${port}/page.html?kind=${kind}&seconds=${secs}&url=${encodeURIComponent(url)}`;
+      // CENC_KID / CENC_KEY (hex) make the page configure ClearKey for protected DASH.
+      const cenc = process.env.CENC_KID && process.env.CENC_KEY
+        ? `&kid=${process.env.CENC_KID}&key=${process.env.CENC_KEY}` : "";
+      const page = `http://127.0.0.1:${port}/page.html?kind=${kind}&seconds=${secs}&url=${encodeURIComponent(url)}${cenc}`;
       proc = spawn(chrome, [
         "--headless=new", "--disable-gpu", "--no-sandbox", "--mute-audio",
         "--autoplay-policy=no-user-gesture-required",
@@ -61,7 +64,9 @@ function runOne(kind, url) {
   let failed = false;
   for (const [kind, file] of specs.split(",").map((s) => s.split(":"))) {
     const r = await runOne(kind, `${base}/${file}`);
-    const good = r.ok && r.videoWidth > 0 && (r.errors || []).length === 0 && (r.decodedFrames || 0) > 20;
+    // `hlssubs` also needs WebVTT cues on the video's text track (the subtitle group).
+    const subsOk = kind !== "hlssubs" || (r.subtitleCues || 0) > 0;
+    const good = r.ok && r.videoWidth > 0 && (r.errors || []).length === 0 && (r.decodedFrames || 0) > 20 && subsOk;
     console.log(
       `${good ? "PASS" : "FAIL"} ${kind}: played to ${r.currentTime && r.currentTime.toFixed(2)}s of ` +
         `${r.duration && r.duration.toFixed ? r.duration.toFixed(2) : r.duration}s, ` +
@@ -69,7 +74,8 @@ function runOne(kind, url) {
         (r.latency !== null && r.latency !== undefined
           ? `latency ${Number(r.latency).toFixed(2)}s (live edge ${r.liveSyncPosition}), `
           : `latency n/a (live edge ${r.liveSyncPosition}), `) +
-        `errors: ${JSON.stringify(r.errors)}`
+        `errors: ${JSON.stringify(r.errors)}` +
+        (kind === "hlssubs" ? `, subtitle cues ${r.subtitleCues} ${JSON.stringify(r.subtitleText || [])}` : "")
     );
     if (!good) failed = true;
   }
