@@ -3,6 +3,7 @@
 # the browser's EME must decrypt the VP9 and Opus fragments with the key, and
 # playback must advance with video decoded. Uses VP9 + Opus, the royalty-free
 # codecs that whole-sample CENC is valid for.
+# CENC_SCHEME=cbcs selects the CBC scheme (default cenc).
 # Needs: node >= 18, Chrome (set CHROME=/path/to/chrome), curl + network (to fetch
 # dash.js once), ffmpeg with libvpx-vp9 and libopus, a built tpt-kinetix.
 set -euo pipefail
@@ -34,7 +35,7 @@ export CENC_KID=00112233445566778899aabbccddeeff
 export CENC_KEY=0f0e0d0c0b0a09080706050403020100
 port=8863
 target/release/tpt-kinetix serve "$work/av.mp4" --port "$port" --segment-seconds 3 \
-  --cenc-key-id "$CENC_KID" --cenc-key "$CENC_KEY" >"$work/serve.log" 2>&1 &
+  --cenc-key-id "$CENC_KID" --cenc-key "$CENC_KEY" --cenc-scheme "${CENC_SCHEME:-cenc}" >"$work/serve.log" 2>&1 &
 server=$!
 trap 'kill $server 2>/dev/null || true' EXIT
 sleep 2

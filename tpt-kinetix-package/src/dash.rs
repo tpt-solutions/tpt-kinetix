@@ -51,9 +51,11 @@ pub(crate) fn mpd(p: &Packager) -> String {
         );
         if let Some(enc) = p.encryption() {
             // CENC (`cenc` scheme) with the ClearKey system, which names the key ID.
+            let fourcc = enc.scheme.fourcc();
+            let scheme = std::str::from_utf8(&fourcc).unwrap_or("cenc");
             let _ = writeln!(
                 out,
-                "      <ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" value=\"cenc\" xmlns:cenc=\"urn:mpeg:cenc:2013\" cenc:default_KID=\"{}\"/>",
+                "      <ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" value=\"{scheme}\" xmlns:cenc=\"urn:mpeg:cenc:2013\" cenc:default_KID=\"{}\"/>",
                 uuid(&enc.key_id)
             );
             let _ = writeln!(

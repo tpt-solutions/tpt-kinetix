@@ -145,6 +145,9 @@ enum Commands {
         /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
         #[arg(long, requires = "cenc_key_id")]
         cenc_key: Option<String>,
+        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        #[arg(long, default_value = "cenc")]
+        cenc_scheme: String,
     },
     /// Run a live server: publish AV1/VP9 + Opus WebM over HTTP, play it as live HLS.
     ///
@@ -240,6 +243,9 @@ enum Commands {
         /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
         #[arg(long, requires = "cenc_key_id")]
         cenc_key: Option<String>,
+        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        #[arg(long, default_value = "cenc")]
+        cenc_scheme: String,
     },
     /// Transcode a media file (VP9 MP4 → AV1).
     Transcode {
@@ -488,8 +494,9 @@ async fn main() -> Result<()> {
             segment_seconds,
             cenc_key_id,
             cenc_key,
+            cenc_scheme,
         } => {
-            let encryption = package::cenc_from_args(cenc_key_id, cenc_key)?;
+            let encryption = package::cenc_from_args(cenc_key_id, cenc_key, &cenc_scheme)?;
             package::package(&input, &output, segment_seconds, encryption)
         }
         Commands::Serve {
@@ -499,8 +506,9 @@ async fn main() -> Result<()> {
             public,
             cenc_key_id,
             cenc_key,
+            cenc_scheme,
         } => {
-            let encryption = package::cenc_from_args(cenc_key_id, cenc_key)?;
+            let encryption = package::cenc_from_args(cenc_key_id, cenc_key, &cenc_scheme)?;
             package::serve(&input, port, segment_seconds, public, encryption)
         }
         Commands::Remux {

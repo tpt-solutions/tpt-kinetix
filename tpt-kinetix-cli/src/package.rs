@@ -30,6 +30,7 @@ fn is_webm(source: &dyn ReadAt) -> Result<bool> {
 pub fn cenc_from_args(
     key_id: Option<String>,
     key: Option<String>,
+    scheme: &str,
 ) -> Result<Option<tpt_kinetix_mux::Encryption>> {
     match (key_id, key) {
         (None, None) => Ok(None),
@@ -38,7 +39,13 @@ pub fn cenc_from_args(
                 .context("--cenc-key-id must be 32 hex digits")?;
             let key = tpt_kinetix_mux::cenc::parse_hex16(&k)
                 .context("--cenc-key must be 32 hex digits")?;
-            Ok(Some(tpt_kinetix_mux::Encryption { key_id, key }))
+            let scheme = tpt_kinetix_mux::cenc::Scheme::parse(scheme)
+                .context("--cenc-scheme must be cenc or cbcs")?;
+            Ok(Some(tpt_kinetix_mux::Encryption {
+                key_id,
+                key,
+                scheme,
+            }))
         }
         _ => bail!("--cenc-key-id and --cenc-key go together"),
     }
