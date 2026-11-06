@@ -75,7 +75,8 @@ function runOne(kind, url) {
           ? `latency ${Number(r.latency).toFixed(2)}s (live edge ${r.liveSyncPosition}), `
           : `latency n/a (live edge ${r.liveSyncPosition}), `) +
         `errors: ${JSON.stringify(r.errors)}` +
-        (kind === "hlssubs" ? `, subtitle cues ${r.subtitleCues} ${JSON.stringify(r.subtitleText || [])}` : "")
+        (kind === "hlssubs" ? `, subtitle cues ${r.subtitleCues} ${JSON.stringify(r.subtitleText || [])}` : "") +
+        (kind === "hlsenc" ? `\n  notes: ${JSON.stringify(r.notes || [])}` : "")
     );
     if (!good) failed = true;
   }

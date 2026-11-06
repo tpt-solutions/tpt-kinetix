@@ -100,6 +100,9 @@ pub fn package(
             .with_context(|| format!("failed to create {}", out.display()))?;
         std::fs::write(out.join("master.m3u8"), p.hls_master())?;
         std::fs::write(out.join("manifest.mpd"), p.dash_mpd())?;
+        if let Some(license) = p.clearkey_license() {
+            std::fs::write(out.join("key.json"), license)?;
+        }
         let (mut files, mut bytes) = (2usize, 0u64);
         for t in 0..p.streams().len() {
             std::fs::write(out.join(format!("track-{t}.m3u8")), p.hls_media(t)?)?;
@@ -222,6 +225,11 @@ fn route(p: &Packager, source: &dyn ReadAt, cache: &IFrameCache, path: &str) -> 
                 "application/vnd.apple.mpegurl",
                 p.hls_master().into_bytes(),
             ));
+        }
+        if name == "key.json" {
+            if let Some(license) = p.clearkey_license() {
+                return Ok(Reply::Ok("application/json", license.into_bytes()));
+            }
         }
         if name == "manifest.mpd" {
             return Ok(Reply::Ok("application/dash+xml", p.dash_mpd().into_bytes()));

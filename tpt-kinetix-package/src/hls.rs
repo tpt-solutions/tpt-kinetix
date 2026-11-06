@@ -117,6 +117,18 @@ pub(crate) fn master(p: &Packager) -> String {
     out
 }
 
+/// The `EXT-X-KEY` line that tells a player how the segments are protected: CENC
+/// (`cenc`, AES-CTR) with the ClearKey system, whose license is `key.json`.
+/// Empty for clear output, and for `cbcs`, which is not signalled in HLS yet.
+pub(crate) fn key_line(p: &Packager) -> String {
+    match p.encryption() {
+        Some(enc) if enc.scheme == tpt_kinetix_mux::cenc::Scheme::Cenc => {
+            "#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,KEYFORMAT=\"org.w3.clearkey\",KEYFORMATVERSIONS=\"1\",URI=\"key.json\"\n".to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 /// The I-frames-only media playlist of video track `track`: each key frame is a
 /// byte range of the rendition file.
 pub(crate) fn iframe_media(track: usize, rendition: &crate::IFrameRendition) -> String {
@@ -161,8 +173,9 @@ pub(crate) fn media(p: &Packager, track: usize) -> String {
         .fold(0.0f64, f64::max)
         .ceil()
         .max(1.0) as u64;
+    let key = key_line(p);
     let mut out = format!(
-        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init-{track}.mp4\"\n"
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n{key}#EXT-X-MAP:URI=\"init-{track}.mp4\"\n"
     );
     for (i, seg) in segs.iter().enumerate() {
         if seg.samples[track].is_empty() {

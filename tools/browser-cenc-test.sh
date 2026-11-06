@@ -4,6 +4,8 @@
 # playback must advance with video decoded. Uses VP9 + Opus, the royalty-free
 # codecs that whole-sample CENC is valid for.
 # CENC_SCHEME=cbcs selects the CBC scheme (default cenc).
+# CENC_PROTOCOL=hls plays the HLS output (EXT-X-KEY with the ClearKey license,
+# key.json) instead of DASH; the default is dash.
 # Needs: node >= 18, Chrome (set CHROME=/path/to/chrome), curl + network (to fetch
 # dash.js once), ffmpeg with libvpx-vp9 and libopus, a built tpt-kinetix.
 set -euo pipefail
@@ -39,4 +41,9 @@ target/release/tpt-kinetix serve "$work/av.mp4" --port "$port" --segment-seconds
 server=$!
 trap 'kill $server 2>/dev/null || true' EXIT
 sleep 2
-node tpt-kinetix-package/tests/browser/run.cjs "$chrome" "$PWD/$libs" "http://127.0.0.1:$port" 5 "dash:manifest.mpd"
+if [ "${CENC_PROTOCOL:-dash}" = hls ]; then
+  spec="hlsenc:master.m3u8"
+else
+  spec="dash:manifest.mpd"
+fi
+node tpt-kinetix-package/tests/browser/run.cjs "$chrome" "$PWD/$libs" "http://127.0.0.1:$port" 5 "$spec"
