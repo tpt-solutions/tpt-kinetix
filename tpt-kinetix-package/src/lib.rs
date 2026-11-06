@@ -136,6 +136,28 @@ impl Default for PackagerOptions {
     }
 }
 
+/// One key frame of a trick-play (I-frame) rendition: where its fragment sits in
+/// the rendition file, and how long the frame is shown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IFrameEntry {
+    /// Byte offset of the fragment in the rendition file.
+    pub offset: u64,
+    /// Length of the fragment in bytes.
+    pub len: u64,
+    /// Seconds from this key frame to the next one (the last runs to the end).
+    pub seconds: f64,
+}
+
+/// The trick-play rendition of one video track: a single-sample fragment for
+/// every key frame, concatenated, with the byte range of each.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IFrameRendition {
+    /// The concatenated fragments (`iframes-{track}.m4s`).
+    pub file: Vec<u8>,
+    /// One entry per key frame, in presentation order.
+    pub entries: Vec<IFrameEntry>,
+}
+
 /// A packaged track: its stream info and which sample ranges form each segment.
 struct PackagedTrack {
     /// Index of the track in the source file.
@@ -469,6 +491,99 @@ sub-{k}-{}.vtt
             cues.push((cue, start, start + f64::from(s.duration) / scale));
         }
         Ok(subtitles::segment_file(&cues).into_bytes())
+    }
+
+    /// Average bits per second of the key frames of packaged track `track`: the
+    /// bitrate a trick-play rendition advertises (0 for a track with none).
+    pub(crate) fn iframe_bandwidth(&self, track: usize) -> u64 {
+        let Some(t) = self.tracks.get(track) else {
+            return 0;
+        };
+        let samples = self.index.samples(t.source_index);
+        let (mut bytes, mut ticks) = (0u64, 0u64);
+        for s in samples.iter() {
+            ticks += u64::from(s.duration);
+            if s.is_key {
+                bytes += u64::from(s.size);
+            }
+        }
+        let secs = ticks as f64 / f64::from(t.info.timescale.max(1));
+        if secs > 0.0 {
+            (bytes as f64 * 8.0 / secs) as u64
+        } else {
+            0
+        }
+    }
+
+    /// The trick-play rendition of video track `track`: one single-sample
+    /// fragment per key frame, concatenated, with each fragment's byte range.
+    /// Reads only the key frames from `source`.
+    pub async fn iframe_rendition<S: AsyncReadAt>(
+        &self,
+        source: &S,
+        track: usize,
+    ) -> Result<IFrameRendition, PackageError> {
+        let t = self.track(track)?;
+        if t.info.media_type != MediaType::Video {
+            return Err(PackageError::NotFound(format!(
+                "track {track} is not video"
+            )));
+        }
+        let samples = self.index.samples(t.source_index);
+        let keys: Vec<usize> = (0..samples.len()).filter(|&i| samples[i].is_key).collect();
+        let scale = f64::from(t.info.timescale.max(1));
+        let mut info = t.info.clone();
+        info.index = 0;
+        // Same IV rule as the media segments: the same sample is encrypted the same way.
+        let iv_base = (track as u64) << 48;
+        let mut file = Vec::new();
+        let mut entries = Vec::with_capacity(keys.len());
+        for (n, &i) in keys.iter().enumerate() {
+            let s = samples[i];
+            let next = keys.get(n + 1).copied().unwrap_or(samples.len());
+            let shown: u64 = samples[i..next].iter().map(|x| u64::from(x.duration)).sum();
+            let data = self
+                .read_samples(source, std::slice::from_ref(&s))
+                .await?
+                .remove(0);
+            let mut w = FragmentWriter::new(std::slice::from_ref(&info))?
+                .with_encryption(self.opts.encryption.clone())?
+                .starting_sequence(n as u32 + 1);
+            let dts = s.dts as i64;
+            let tb = (1, t.info.timescale);
+            w.push_with_iv(
+                &Packet {
+                    pts: Timestamp::new(dts + i64::from(s.cts_offset), tb),
+                    dts: Timestamp::new(dts, tb),
+                    data,
+                    stream_index: 0,
+                    is_key_frame: true,
+                },
+                Some(s.duration),
+                iv_base | i as u64,
+            )?;
+            let fragment = w
+                .flush(true)?
+                .ok_or_else(|| PackageError::NotFound(format!("key frame {i} produced no data")))?;
+            entries.push(IFrameEntry {
+                offset: file.len() as u64,
+                len: fragment.len() as u64,
+                seconds: shown as f64 / scale,
+            });
+            file.extend_from_slice(&fragment);
+        }
+        Ok(IFrameRendition { file, entries })
+    }
+
+    /// The HLS I-frames-only media playlist of video track `track` for its
+    /// trick-play rendition (`iframes-{track}.m4s`, byte ranges per key frame).
+    pub fn iframe_playlist(
+        &self,
+        track: usize,
+        rendition: &IFrameRendition,
+    ) -> Result<String, PackageError> {
+        self.track(track)?;
+        Ok(hls::iframe_media(track, rendition))
     }
 
     /// The HLS master playlist. `track-{i}.m3u8` URIs are relative.

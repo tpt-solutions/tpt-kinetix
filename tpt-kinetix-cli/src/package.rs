@@ -116,6 +116,20 @@ pub fn package(
                 files += 1;
             }
         }
+        // Trick-play: one I-frame rendition per video track.
+        for t in 0..p.streams().len() {
+            if p.streams()[t].media_type != tpt_kinetix_core::codec::MediaType::Video {
+                continue;
+            }
+            let rendition = block_on(p.iframe_rendition(&Blocking(&*source), t))?;
+            bytes += rendition.file.len() as u64;
+            std::fs::write(out.join(format!("iframes-{t}.m4s")), &rendition.file)?;
+            std::fs::write(
+                out.join(format!("iframes-{t}.m3u8")),
+                p.iframe_playlist(t, &rendition)?,
+            )?;
+            files += 2;
+        }
         for k in 0..p.subtitle_count() {
             let playlist = p.subtitle_media_playlist(k).unwrap_or_default();
             std::fs::write(out.join(format!("subs-{k}.m3u8")), playlist)?;
@@ -217,6 +231,25 @@ fn route(p: &Packager, source: &dyn ReadAt, path: &str) -> Reply {
                     ));
                 }
             }
+        }
+        if let Some(t) = name
+            .strip_prefix("iframes-")
+            .and_then(|s| s.strip_suffix(".m3u8"))
+            .and_then(num)
+        {
+            let rendition = block_on(p.iframe_rendition(&Blocking(source), t))?;
+            return Ok(Reply::Ok(
+                "application/vnd.apple.mpegurl",
+                p.iframe_playlist(t, &rendition)?.into_bytes(),
+            ));
+        }
+        if let Some(t) = name
+            .strip_prefix("iframes-")
+            .and_then(|s| s.strip_suffix(".m4s"))
+            .and_then(num)
+        {
+            let rendition = block_on(p.iframe_rendition(&Blocking(source), t))?;
+            return Ok(Reply::Ok("video/iso.segment", rendition.file));
         }
         if let Some(k) = name
             .strip_prefix("subs-")

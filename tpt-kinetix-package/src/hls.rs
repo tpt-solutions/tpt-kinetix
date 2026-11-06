@@ -100,7 +100,55 @@ pub(crate) fn master(p: &Packager) -> String {
         }
         attrs.push_str(subs_attr);
         let _ = writeln!(out, "#EXT-X-STREAM-INF:{attrs}\ntrack-{v}.m3u8");
+        // The trick-play rendition of this variant, for seeking and scrubbing.
+        let mut iframe = format!(
+            "BANDWIDTH={},CODECS=\"{}\"",
+            p.iframe_bandwidth(v).max(1),
+            p.codec(v).unwrap_or("")
+        );
+        if s.width > 0 && s.height > 0 {
+            let _ = write!(iframe, ",RESOLUTION={}x{}", s.width, s.height);
+        }
+        let _ = writeln!(
+            out,
+            "#EXT-X-I-FRAME-STREAM-INF:{iframe},URI=\"iframes-{v}.m3u8\""
+        );
     }
+    out
+}
+
+/// The I-frames-only media playlist of video track `track`: each key frame is a
+/// byte range of the rendition file.
+pub(crate) fn iframe_media(track: usize, rendition: &crate::IFrameRendition) -> String {
+    let target = rendition
+        .entries
+        .iter()
+        .map(|e| e.seconds)
+        .fold(0.0f64, f64::max)
+        .ceil()
+        .max(1.0) as u64;
+    let mut out = format!(
+        "#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:{target}
+#EXT-X-I-FRAMES-ONLY
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI=\"init-{track}.mp4\"
+"
+    );
+    for e in &rendition.entries {
+        let _ = writeln!(
+            out,
+            "#EXTINF:{:.6},
+#EXT-X-BYTERANGE:{}@{}
+iframes-{track}.m4s",
+            e.seconds, e.len, e.offset
+        );
+    }
+    out.push_str(
+        "#EXT-X-ENDLIST
+",
+    );
     out
 }
 
