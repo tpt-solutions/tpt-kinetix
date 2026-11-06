@@ -22,7 +22,7 @@
 //! rejected, and the frame count is bounded by [`MAX_FRAMES`].
 
 use crate::mp4::SampleRef;
-use tpt_kinetix_core::codec::MediaType;
+use tpt_kinetix_core::codec::{CodecId, MediaType};
 use tpt_kinetix_core::error::KinetixError;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
@@ -258,6 +258,10 @@ impl<S: ReadAt> MkvReader<S> {
             usize::try_from(s.size).map_err(|_| KinetixError::Parse("frame too large".into()))?;
         let mut data = vec![0u8; size];
         self.source.read_at(s.offset, &mut data)?;
+        // A WebVTT cue is text in the file; callers see the MP4 `vttc` form.
+        if self.streams.get(s.stream).map(|t| t.codec) == Some(CodecId::WebVtt) {
+            return Ok(tpt_kinetix_core::webvtt::to_cue_box(&data));
+        }
         Ok(data)
     }
 

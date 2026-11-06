@@ -462,7 +462,12 @@ impl<W: Write> WebmWriter<W> {
         let is_subtitle = track.info.media_type == MediaType::Subtitle;
         let pts_ms = packet.pts.as_millis().unwrap_or(0);
         let key = packet.is_key_frame;
-        let data = packet.data.clone();
+        // A WebVTT cue is stored as text in Matroska, not as a `vttc` box.
+        let data = if is_subtitle {
+            tpt_kinetix_core::webvtt::matroska_from_cue_box(&packet.data)
+        } else {
+            packet.data.clone()
+        };
         let number = track.number;
         let is_lead = number == self.tracks[self.lead].number;
 
