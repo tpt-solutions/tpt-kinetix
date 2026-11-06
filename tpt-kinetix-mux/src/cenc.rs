@@ -1,5 +1,11 @@
-//! Common Encryption (CENC, ISO/IEC 23001-7), the `cenc` scheme: AES-128 in
-//! counter mode over whole samples, with 8-byte per-sample IVs.
+//! Common Encryption (CENC, ISO/IEC 23001-7) over whole samples.
+//!
+//! Two schemes are written:
+//!
+//! - `cenc`: AES-128 in counter mode, 8-byte per-sample IVs.
+//! - `cbcs`: AES-128 in CBC mode, 16-byte per-sample IVs, with no pattern
+//!   (every complete 16-byte block is encrypted; a trailing partial block stays
+//!   clear, as the spec requires).
 //!
 //! Only the whole-sample form is written. That is valid for VP9, AV1 and Opus,
 //! whose samples have no NAL-unit structure that a subsample map would need to
@@ -7,21 +13,61 @@
 
 use std::fmt;
 
+use aes::cipher::generic_array::GenericArray;
+use aes::cipher::{BlockEncrypt, KeyInit, KeyIvInit, StreamCipher};
 use aes::Aes128;
-use ctr::cipher::{KeyIvInit, StreamCipher};
 
 use crate::entries::{boxed, full_box};
 use crate::MuxError;
 
 type Aes128Ctr = ctr::Ctr64BE<Aes128>;
 
-/// A content key and its identifier, shared by every protected track.
+/// The CENC protection scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scheme {
+    /// AES-128-CTR, 8-byte IVs (the `cenc` scheme).
+    #[default]
+    Cenc,
+    /// AES-128-CBC, 16-byte IVs (the `cbcs` scheme, no pattern).
+    Cbcs,
+}
+
+impl Scheme {
+    /// Parses `cenc` or `cbcs` (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "cenc" => Some(Scheme::Cenc),
+            "cbcs" => Some(Scheme::Cbcs),
+            _ => None,
+        }
+    }
+
+    /// The four-character scheme type written to `schm`.
+    pub fn fourcc(self) -> [u8; 4] {
+        match self {
+            Scheme::Cenc => *b"cenc",
+            Scheme::Cbcs => *b"cbcs",
+        }
+    }
+
+    /// Length in bytes of the per-sample IV.
+    pub fn iv_len(self) -> usize {
+        match self {
+            Scheme::Cenc => 8,
+            Scheme::Cbcs => 16,
+        }
+    }
+}
+
+/// A content key, its identifier and the scheme, shared by every protected track.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Encryption {
     /// The key ID that players look the key up by.
     pub key_id: [u8; 16],
     /// The 128-bit content key.
     pub key: [u8; 16],
+    /// The protection scheme.
+    pub scheme: Scheme,
 }
 
 // The key is never printed.
@@ -29,6 +75,7 @@ impl fmt::Debug for Encryption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Encryption")
             .field("key_id", &hex(&self.key_id))
+            .field("scheme", &self.scheme)
             .field("key", &"<redacted>")
             .finish()
     }
@@ -61,24 +108,77 @@ pub fn apply_ctr(key: &[u8; 16], iv: [u8; 8], data: &mut [u8]) {
     cipher.apply_keystream(data);
 }
 
+/// Encrypts the complete 16-byte blocks of `data` in place with AES-CBC. A
+/// trailing partial block is left clear.
+pub fn apply_cbc_encrypt(key: &[u8; 16], iv: [u8; 16], data: &mut [u8]) {
+    let cipher = Aes128::new(key.into());
+    let mut prev = iv;
+    for block in data.chunks_exact_mut(16) {
+        for (b, p) in block.iter_mut().zip(prev.iter()) {
+            *b ^= p;
+        }
+        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+        prev.copy_from_slice(block);
+    }
+}
+
+/// The per-sample CBC IV for a counter value: the AES encryption of the counter
+/// block, so the IV is unique for each sample and not predictable without the key.
+pub fn cbc_iv(key: &[u8; 16], counter: u64) -> [u8; 16] {
+    let cipher = Aes128::new(key.into());
+    let mut block = [0u8; 16];
+    block[8..].copy_from_slice(&counter.to_be_bytes());
+    cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
+    block
+}
+
+/// Protects one sample in place under `enc` for the counter value `counter`, and
+/// returns the IV bytes that the `senc` box must carry.
+pub fn protect_sample(enc: &Encryption, counter: u64, data: &mut [u8]) -> Vec<u8> {
+    match enc.scheme {
+        Scheme::Cenc => {
+            let iv = counter.to_be_bytes();
+            apply_ctr(&enc.key, iv, data);
+            iv.to_vec()
+        }
+        Scheme::Cbcs => {
+            let iv = cbc_iv(&enc.key, counter);
+            apply_cbc_encrypt(&enc.key, iv, data);
+            iv.to_vec()
+        }
+    }
+}
+
 /// Rewrites a sample entry (`vp09`, `Opus`, ...) as its protected form (`encv`
 /// or `enca`): the same body, plus a `sinf` box that names the original format
-/// and carries the `tenc` defaults (protected, 8-byte IVs, the key ID).
+/// and carries the `tenc` defaults (protected, the scheme's IV size, the key ID).
 pub fn protect_entry(entry: &[u8], audio: bool, enc: &Encryption) -> Result<Vec<u8>, MuxError> {
     if entry.len() < 8 {
         return Err(MuxError::InvalidConfig("sample entry is truncated".into()));
     }
     let original: [u8; 4] = [entry[4], entry[5], entry[6], entry[7]];
-    let mut tenc_body = vec![0u8, 0, 1, 8]; // reserved, crypt/skip, isProtected, IV size
-    tenc_body.extend_from_slice(&enc.key_id);
-    let mut schm_body = b"cenc".to_vec();
+    // tenc: version 0 (CENC, no pattern) or version 1 (CBCS, pattern byte 0x00 =
+    // no pattern). Both name the protected flag, the per-sample IV size and the KID.
+    let tenc_body = match enc.scheme {
+        Scheme::Cenc => {
+            let mut b = vec![0u8, 0, 1, enc.scheme.iv_len() as u8];
+            b.extend_from_slice(&enc.key_id);
+            full_box(b"tenc", 0, 0, &b)
+        }
+        Scheme::Cbcs => {
+            let mut b = vec![0u8, 0, 1, enc.scheme.iv_len() as u8];
+            b.extend_from_slice(&enc.key_id);
+            full_box(b"tenc", 1, 0, &b)
+        }
+    };
+    let mut schm_body = enc.scheme.fourcc().to_vec();
     schm_body.extend_from_slice(&0x0001_0000u32.to_be_bytes());
     let sinf = boxed(
         b"sinf",
         &[
             boxed(b"frma", &original),
             full_box(b"schm", 0, 0, &schm_body),
-            boxed(b"schi", &full_box(b"tenc", 0, 0, &tenc_body)),
+            boxed(b"schi", &tenc_body),
         ]
         .concat(),
     );
@@ -88,9 +188,9 @@ pub fn protect_entry(entry: &[u8], audio: bool, enc: &Encryption) -> Result<Vec<
     Ok(boxed(kind, &body))
 }
 
-/// The `senc` box for one fragment's samples: one 8-byte IV per sample, no
-/// subsample map.
-pub fn senc(ivs: &[[u8; 8]]) -> Vec<u8> {
+/// The `senc` box for one fragment's samples: one IV per sample (each of the
+/// scheme's IV length), no subsample map.
+pub fn senc(ivs: &[Vec<u8>]) -> Vec<u8> {
     let mut body = (ivs.len() as u32).to_be_bytes().to_vec();
     for iv in ivs {
         body.extend_from_slice(iv);
@@ -103,7 +203,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cipher_matches_nist_sp800_38a_ctr_vector() {
+    fn ctr_matches_nist_sp800_38a_vector() {
         // NIST SP 800-38A, F.5.1 (CTR-AES128.Encrypt), first block. The counter
         // block is nonce f0..f7 followed by the 64-bit counter f8..ff.
         let key = parse_hex16("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
@@ -112,6 +212,32 @@ mod tests {
         let mut cipher = Aes128Ctr::new((&key).into(), (&block).into());
         cipher.apply_keystream(&mut data);
         assert_eq!(hex(&data), "874d6191b620e3261bef6864990db6ce");
+    }
+
+    #[test]
+    fn cbc_matches_nist_sp800_38a_vector() {
+        // NIST SP 800-38A, F.2.1 (CBC-AES128.Encrypt), first two blocks.
+        let key = parse_hex16("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+        let iv = parse_hex16("000102030405060708090a0b0c0d0e0f").unwrap();
+        let mut data = [
+            parse_hex16("6bc1bee22e409f96e93d7e117393172a").unwrap(),
+            parse_hex16("ae2d8a571e03ac9c9eb76fac45af8e51").unwrap(),
+        ]
+        .concat();
+        apply_cbc_encrypt(&key, iv, &mut data);
+        assert_eq!(
+            hex(&data),
+            "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2"
+        );
+    }
+
+    #[test]
+    fn cbc_leaves_a_partial_block_clear() {
+        let key = [3u8; 16];
+        let mut data = vec![0x55u8; 20];
+        apply_cbc_encrypt(&key, [0u8; 16], &mut data);
+        assert_ne!(&data[..16], &[0x55u8; 16][..]);
+        assert_eq!(&data[16..], &[0x55u8; 4][..]);
     }
 
     #[test]
@@ -126,12 +252,26 @@ mod tests {
     }
 
     #[test]
+    fn cbcs_ivs_are_unique_per_counter() {
+        let key = [9u8; 16];
+        assert_ne!(cbc_iv(&key, 0), cbc_iv(&key, 1));
+        assert_eq!(cbc_iv(&key, 5), cbc_iv(&key, 5));
+    }
+
+    #[test]
     fn key_ids_parse_and_reject_bad_input() {
         let id = parse_hex16("00112233445566778899aabbccddeeff").unwrap();
         assert_eq!(id[0], 0x00);
         assert_eq!(id[15], 0xff);
         assert!(parse_hex16("0011").is_none());
         assert!(parse_hex16("zz112233445566778899aabbccddeeff").is_none());
+    }
+
+    #[test]
+    fn scheme_names_parse() {
+        assert_eq!(Scheme::parse("CENC"), Some(Scheme::Cenc));
+        assert_eq!(Scheme::parse("cbcs"), Some(Scheme::Cbcs));
+        assert_eq!(Scheme::parse("cbc1"), None);
     }
 
     #[test]
@@ -144,6 +284,7 @@ mod tests {
         let enc = Encryption {
             key_id: [1; 16],
             key: [2; 16],
+            scheme: Scheme::Cbcs,
         };
         let w = FragmentWriter::new(&[s]).unwrap();
         assert!(w.with_encryption(Some(enc)).is_err());
@@ -154,6 +295,7 @@ mod tests {
         let e = Encryption {
             key_id: [1; 16],
             key: [0xAB; 16],
+            scheme: Scheme::Cenc,
         };
         let shown = format!("{e:?}");
         assert!(!shown.contains("ab"), "{shown}");

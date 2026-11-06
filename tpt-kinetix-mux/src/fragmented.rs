@@ -32,7 +32,7 @@ struct Sample {
     duration: Option<u32>,
     key: bool,
     /// CENC IV, present only on protected tracks (`data` is then encrypted).
-    iv: Option<[u8; 8]>,
+    iv: Option<Vec<u8>>,
     data: Vec<u8>,
 }
 
@@ -239,9 +239,9 @@ impl FragmentWriter {
             }
         }
         t.last_dts = Some(dts);
-        let (data, iv) = match t.enc.as_ref().map(|e| e.key) {
+        let (data, iv) = match t.enc.clone() {
             None => (p.data.clone(), None),
-            Some(key) => {
+            Some(enc) => {
                 let counter = match iv {
                     Some(v) => v,
                     None => {
@@ -250,9 +250,8 @@ impl FragmentWriter {
                         c
                     }
                 };
-                let iv = counter.to_be_bytes();
                 let mut data = p.data.clone();
-                cenc::apply_ctr(&key, iv, &mut data);
+                let iv = cenc::protect_sample(&enc, counter, &mut data);
                 (data, Some(iv))
             }
         };
@@ -491,7 +490,7 @@ fn build_moof(sequence: u32, tracks: &[Vec<Sample>], data_offsets: &[i32]) -> Ve
         let trun = full_box(b"trun", 1, 0x000F01, &trun);
         let mut parts = vec![tfhd, tfdt, trun];
         if samples[0].iv.is_some() {
-            let ivs: Vec<[u8; 8]> = samples.iter().filter_map(|s| s.iv).collect();
+            let ivs: Vec<Vec<u8>> = samples.iter().filter_map(|s| s.iv.clone()).collect();
             parts.push(cenc::senc(&ivs));
         }
         moof.extend(boxed(b"traf", &parts.concat()));
