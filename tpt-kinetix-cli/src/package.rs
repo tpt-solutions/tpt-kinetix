@@ -5,10 +5,11 @@
 //! cases only the index and the samples of the segments actually requested are
 //! ever read.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -171,16 +172,39 @@ pub fn serve(
             p.streams().len(),
             p.segment_count()
         );
-        let shared = Arc::new((p, source));
+        let shared = Arc::new((p, source, IFrameCache::default()));
         for conn in listener.incoming() {
             let Ok(conn) = conn else { continue };
             let shared = shared.clone();
             std::thread::spawn(move || {
-                let _ = handle(conn, &shared.0, &*shared.1);
+                let _ = handle(conn, &shared.0, &*shared.1, &shared.2);
             });
         }
         bail!("listener closed")
     })
+}
+
+/// Trick-play renditions built so far, per video track. Shared by the serve
+/// threads, so each rendition is built once rather than on every request.
+#[derive(Default)]
+struct IFrameCache(Mutex<HashMap<usize, Arc<tpt_kinetix_package::IFrameRendition>>>);
+
+/// The I-frame rendition of video track `t`, from the cache when it is there.
+fn iframe_rendition(
+    p: &Packager,
+    source: &dyn ReadAt,
+    cache: &IFrameCache,
+    t: usize,
+) -> Result<Arc<tpt_kinetix_package::IFrameRendition>> {
+    let lock = || cache.0.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = lock().get(&t) {
+        return Ok(r.clone());
+    }
+    // Two requests can race and both build it; the second insert wins, and the
+    // bytes are identical either way.
+    let built = Arc::new(block_on(p.iframe_rendition(&Blocking(source), t))?);
+    lock().insert(t, built.clone());
+    Ok(built)
 }
 
 enum Reply {
@@ -189,7 +213,7 @@ enum Reply {
     Error(String),
 }
 
-fn route(p: &Packager, source: &dyn ReadAt, path: &str) -> Reply {
+fn route(p: &Packager, source: &dyn ReadAt, cache: &IFrameCache, path: &str) -> Reply {
     let name = path.trim_start_matches('/');
     let num = |s: &str| s.parse::<usize>().ok();
     let r: Result<Reply> = (|| {
@@ -237,7 +261,7 @@ fn route(p: &Packager, source: &dyn ReadAt, path: &str) -> Reply {
             .and_then(|s| s.strip_suffix(".m3u8"))
             .and_then(num)
         {
-            let rendition = block_on(p.iframe_rendition(&Blocking(source), t))?;
+            let rendition = iframe_rendition(p, source, cache, t)?;
             return Ok(Reply::Ok(
                 "application/vnd.apple.mpegurl",
                 p.iframe_playlist(t, &rendition)?.into_bytes(),
@@ -248,8 +272,8 @@ fn route(p: &Packager, source: &dyn ReadAt, path: &str) -> Reply {
             .and_then(|s| s.strip_suffix(".m4s"))
             .and_then(num)
         {
-            let rendition = block_on(p.iframe_rendition(&Blocking(source), t))?;
-            return Ok(Reply::Ok("video/iso.segment", rendition.file));
+            let rendition = iframe_rendition(p, source, cache, t)?;
+            return Ok(Reply::Ok("video/iso.segment", rendition.file.clone()));
         }
         if let Some(k) = name
             .strip_prefix("subs-")
@@ -289,7 +313,12 @@ fn route(p: &Packager, source: &dyn ReadAt, path: &str) -> Reply {
     }
 }
 
-fn handle(mut conn: TcpStream, p: &Packager, source: &dyn ReadAt) -> std::io::Result<()> {
+fn handle(
+    mut conn: TcpStream,
+    p: &Packager,
+    source: &dyn ReadAt,
+    cache: &IFrameCache,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -309,7 +338,7 @@ fn handle(mut conn: TcpStream, p: &Packager, source: &dyn ReadAt) -> std::io::Re
             b"method not allowed".to_vec(),
         )
     } else {
-        match route(p, source, path) {
+        match route(p, source, cache, path) {
             Reply::Ok(ct, body) => ("200 OK", ct, body),
             Reply::NotFound(m) => ("404 Not Found", "text/plain", m.into_bytes()),
             Reply::Error(m) => ("500 Internal Server Error", "text/plain", m.into_bytes()),
