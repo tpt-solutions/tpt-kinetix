@@ -339,7 +339,10 @@ fn handle(
     let mut parts = request_line.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
     let path = target.split('?').next().unwrap_or("/");
-    let (status, ctype, body) = if method != "GET" && method != "HEAD" {
+    // A ClearKey player POSTs its license request to the license URL; the license
+    // is the same key set `key.json` serves on GET, so that path takes POST too.
+    let license_post = method == "POST" && path.trim_start_matches('/') == "key.json";
+    let (status, ctype, body) = if method != "GET" && method != "HEAD" && !license_post {
         (
             "405 Method Not Allowed",
             "text/plain",

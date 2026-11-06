@@ -59,6 +59,16 @@
   }
 
   v.addEventListener("error", () => errors.push("video element error " + (v.error && v.error.message)));
+  // The media element's own EME and playback events, to see where decoding stops.
+  for (const ev of ["encrypted", "waitingforkey", "stalled", "playing", "loadeddata"]) {
+    v.addEventListener(ev, (e) => {
+      const init = e.initDataType ? " " + e.initDataType : "";
+      notes.push("media " + ev + init);
+    });
+  }
+  if (window.MediaKeys || navigator.requestMediaKeySystemAccess) {
+    notes.push("eme available");
+  }
   // Progress is measured from where playback first started: a live stream begins
   // near the live edge, not at 0.
   let origin = null;
