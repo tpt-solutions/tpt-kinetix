@@ -48,6 +48,7 @@ use crate::Demuxer;
 ///     match track.media_type {
 ///         MediaType::Video => println!("video track, codec = {:?}", track.codec),
 ///         MediaType::Audio => println!("audio track, codec = {:?}", track.codec),
+///         MediaType::Subtitle => println!("subtitle track"),
 ///         MediaType::Other => println!("other track"),
 ///     }
 ///     if track.codec == Some(CodecId::H264) {

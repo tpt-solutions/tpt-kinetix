@@ -52,6 +52,8 @@ pub struct Mp4Track {
     pub sample_rate: u32,
     /// Bits per sample (audio tracks), else 0.
     pub bits_per_sample: u16,
+    /// ISO 639-2/T language of the track (`mdhd`), `None` when `und` or absent.
+    pub language: Option<String>,
 }
 
 impl Mp4Track {
@@ -69,6 +71,7 @@ impl Mp4Track {
         s.bits_per_sample = self.bits_per_sample;
         s.extradata = self.extradata.clone();
         s.edit_media_time = self.edit_media_time;
+        s.language = self.language.clone();
         s
     }
 
@@ -258,7 +261,9 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
         (tkhd.width, tkhd.height)
     };
 
+    let language = mdhd.language.clone();
     Ok(Mp4Track {
+        language,
         track_id: tkhd.track_id,
         timescale: mdhd.timescale,
         duration: mdhd.duration,

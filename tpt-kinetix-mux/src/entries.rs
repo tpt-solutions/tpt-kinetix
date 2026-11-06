@@ -203,6 +203,17 @@ pub fn sample_entry(info: &StreamInfo) -> Result<Vec<u8>, MuxError> {
     })
 }
 
+/// The packed `mdhd` language field for an ISO 639-2/T code (`fra`); `und` when
+/// the code is absent or not three lower-case letters.
+pub fn language_code(lang: Option<&str>) -> u16 {
+    const UND: u16 = 0x55C4;
+    let Some(l) = lang.filter(|l| l.len() == 3 && l.bytes().all(|b| b.is_ascii_lowercase())) else {
+        return UND;
+    };
+    l.bytes()
+        .fold(0u16, |acc, b| (acc << 5) | u16::from(b - 0x60))
+}
+
 /// The `hdlr` handler type for a media type.
 pub fn handler_for(media: MediaType) -> Result<([u8; 4], &'static str), MuxError> {
     match media {

@@ -20,6 +20,7 @@ const HEADER: &[u8] = b"WEBVTT\n";
 fn subtitle_stream() -> StreamInfo {
     let mut s = StreamInfo::new(0, CodecId::WebVtt, 1000);
     s.extradata = HEADER.to_vec();
+    s.language = Some("fra".into());
     s
 }
 
@@ -75,6 +76,11 @@ fn webvtt_track_round_trips_through_the_demuxer() {
     assert_eq!(s.codec, CodecId::WebVtt);
     assert_eq!(s.media_type, MediaType::Subtitle);
     assert_eq!(s.extradata, HEADER, "vttC carries the WebVTT header");
+    assert_eq!(
+        s.language.as_deref(),
+        Some("fra"),
+        "mdhd language round-trips"
+    );
 
     let mut got = Vec::new();
     while let Some(p) = reader.read_packet().expect("read cue") {

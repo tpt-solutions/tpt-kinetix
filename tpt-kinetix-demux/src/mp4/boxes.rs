@@ -6,7 +6,7 @@
 use nom::{
     bytes::complete::take,
     multi::count,
-    number::complete::{be_u32, be_u64, be_u8},
+    number::complete::{be_u16, be_u32, be_u64, be_u8},
     IResult, Parser,
 };
 
@@ -211,6 +211,22 @@ pub struct MdhdBox {
     pub version: u8,
     pub timescale: u32,
     pub duration: u64,
+    /// ISO 639-2/T code, or `None` for `und` / an invalid code.
+    pub language: Option<String>,
+}
+
+/// Decodes the packed `mdhd` language field: three 5-bit letters, each offset
+/// from `'`. Returns `None` for `und` (undetermined) and invalid codes.
+pub fn decode_language(bits: u16) -> Option<String> {
+    let mut out = String::with_capacity(3);
+    for shift in [10u32, 5, 0] {
+        let c = ((bits >> shift) & 0x1F) as u8 + 0x60;
+        if !c.is_ascii_lowercase() {
+            return None;
+        }
+        out.push(char::from(c));
+    }
+    (out != "und").then_some(out)
 }
 
 /// Parses the payload of an `mdhd` box.
@@ -232,12 +248,14 @@ pub fn parse_mdhd(input: &[u8]) -> IResult<&[u8], MdhdBox> {
         (i, ts, dur as u64)
     };
 
+    let (input, lang_bits) = be_u16(input)?;
     Ok((
         input,
         MdhdBox {
             version,
             timescale,
             duration,
+            language: decode_language(lang_bits),
         },
     ))
 }

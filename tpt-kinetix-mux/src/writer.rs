@@ -433,7 +433,9 @@ fn build_trak(
     let mut mdhd = vec![0u8; 8];
     mdhd.extend_from_slice(&t.info.timescale.to_be_bytes());
     mdhd.extend_from_slice(&(media_dur.min(u64::from(u32::MAX)) as u32).to_be_bytes());
-    mdhd.extend_from_slice(&0x55C4u16.to_be_bytes()); // "und"
+    mdhd.extend_from_slice(
+        &crate::entries::language_code(t.info.language.as_deref()).to_be_bytes(),
+    );
     mdhd.extend_from_slice(&[0u8; 2]);
 
     let (handler, name) = handler_for(t.info.media_type)?;

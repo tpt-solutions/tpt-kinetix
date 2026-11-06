@@ -99,6 +99,10 @@ pub struct StreamInfo {
     /// Colour description (`colr` / `mdcv` / `clli`), for video; `None` when
     /// the source did not state one.
     pub color: Option<VideoColor>,
+    /// ISO 639-2/T language code of the track (`mdhd`, e.g. `eng`, `fra`), or
+    /// `None` when the container does not state one or it is `und`.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 impl StreamInfo {
@@ -118,6 +122,7 @@ impl StreamInfo {
             extradata: Vec::new(),
             edit_media_time: None,
             color: None,
+            language: None,
         }
     }
 
