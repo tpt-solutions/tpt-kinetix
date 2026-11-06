@@ -1,0 +1,61 @@
+name: Pages playground
+
+# Publishes web-demo/ (the client-side MP4 probe page) to GitHub Pages. The page
+# loads its wasm build from ./pkg, so the build step generates that first.
+#
+# One-time setup in the repository: Settings > Pages > Build and deployment >
+# Source: "GitHub Actions". Until that is set, the deploy job fails.
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - "web-demo/**"
+      - "tpt-kinetix-demux/**"
+      - "tpt-kinetix-core/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pinned, as in ci.yml: the build flags need a recent wasm-pack.
+          version: "v0.13.1"
+      - name: Build the wasm probe into web-demo/pkg
+        run: |
+          cd tpt-kinetix-demux
+          wasm-pack build --target web --out-dir ../web-demo/pkg -- --features wasm
+      - name: Check the page's module is present
+        run: test -s web-demo/pkg/tpt_kinetix_demux.js
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web-demo
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
