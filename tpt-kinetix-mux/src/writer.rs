@@ -443,10 +443,11 @@ fn build_trak(
     hdlr.extend_from_slice(name.as_bytes());
     hdlr.push(0);
 
-    let media_header = if is_video {
-        full_box(b"vmhd", 0, 1, &[0u8; 8])
-    } else {
-        full_box(b"smhd", 0, 0, &[0u8; 4])
+    let media_header = match t.info.media_type {
+        MediaType::Video => full_box(b"vmhd", 0, 1, &[0u8; 8]),
+        MediaType::Audio => full_box(b"smhd", 0, 0, &[0u8; 4]),
+        // Null media header: the box for subtitle and other non-A/V tracks.
+        _ => full_box(b"nmhd", 0, 0, &[]),
     };
     let dinf = boxed(
         b"dinf",

@@ -94,7 +94,7 @@ fn nominal_frame_ms(info: &StreamInfo) -> i64 {
     match info.media_type {
         MediaType::Audio => 20,
         MediaType::Video => 33, // ~30 fps
-        MediaType::Other => 20,
+        MediaType::Subtitle | MediaType::Other => 20,
     }
 }
 

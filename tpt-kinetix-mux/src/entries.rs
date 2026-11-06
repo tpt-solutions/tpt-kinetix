@@ -180,6 +180,20 @@ pub fn sample_entry(info: &StreamInfo) -> Result<Vec<u8>, MuxError> {
             need_config("E-AC-3 dec3")?;
             audio_entry(b"ec-3", info, &boxed(b"dec3", &info.extradata))
         }
+        CodecId::WebVtt => {
+            // A WebVTT sample entry: SampleEntry header, then the `vttC` box
+            // holding the WebVTT header text. Without a stored header, the
+            // minimal one is "WEBVTT".
+            let header: &[u8] = if info.extradata.is_empty() {
+                b"WEBVTT"
+            } else {
+                &info.extradata
+            };
+            let mut e = vec![0u8; 6]; // reserved
+            e.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+            e.extend_from_slice(&boxed(b"vttC", header));
+            boxed(b"wvtt", &e)
+        }
         CodecId::Unknown(f) => {
             return Err(MuxError::Unsupported(format!(
                 "cannot write a sample entry for unknown codec '{}'",
@@ -194,8 +208,9 @@ pub fn handler_for(media: MediaType) -> Result<([u8; 4], &'static str), MuxError
     match media {
         MediaType::Video => Ok((*b"vide", "VideoHandler")),
         MediaType::Audio => Ok((*b"soun", "SoundHandler")),
+        MediaType::Subtitle => Ok((*b"sbtl", "SubtitleHandler")),
         MediaType::Other => Err(MuxError::Unsupported(
-            "only video and audio tracks can be written".into(),
+            "only video, audio and subtitle tracks can be written".into(),
         )),
     }
 }

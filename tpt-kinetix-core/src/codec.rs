@@ -14,6 +14,8 @@ pub enum MediaType {
     Video,
     /// An audio track (ISO-BMFF handler `soun`).
     Audio,
+    /// A timed-text track (ISO-BMFF handlers `text`, `sbtl`, `subt`).
+    Subtitle,
     /// Any other or unrecognised handler type.
     Other,
 }
@@ -45,6 +47,9 @@ pub enum CodecId {
     Ac3,
     /// Dolby Digital Plus / E-AC-3 (`ec-3`).
     Eac3,
+    /// WebVTT subtitles in ISO-BMFF (`wvtt`, ISO/IEC 14496-30). Samples are
+    /// WebVTT cue boxes; the codec configuration (`vttC`) is the WebVTT header.
+    WebVtt,
     /// An unrecognised codec; carries the raw sample-entry fourcc.
     Unknown([u8; 4]),
 }
@@ -75,6 +80,7 @@ impl CodecId {
             b".mp3" => CodecId::Mp3,
             b"ac-3" => CodecId::Ac3,
             b"ec-3" => CodecId::Eac3,
+            b"wvtt" => CodecId::WebVtt,
             _ => CodecId::Unknown(fourcc),
         }
     }
@@ -91,6 +97,7 @@ impl CodecId {
             | CodecId::Mp3
             | CodecId::Ac3
             | CodecId::Eac3 => MediaType::Audio,
+            CodecId::WebVtt => MediaType::Subtitle,
             CodecId::Unknown(_) => MediaType::Other,
         }
     }
@@ -108,6 +115,7 @@ impl CodecId {
             CodecId::Mp3 => "mp3",
             CodecId::Ac3 => "ac3",
             CodecId::Eac3 => "eac3",
+            CodecId::WebVtt => "webvtt",
             CodecId::Unknown(_) => "unknown",
         }
     }
@@ -128,6 +136,7 @@ pub fn media_type_from_handler(handler: [u8; 4]) -> MediaType {
     match &handler {
         b"vide" => MediaType::Video,
         b"soun" => MediaType::Audio,
+        b"text" | b"sbtl" | b"subt" => MediaType::Subtitle,
         _ => MediaType::Other,
     }
 }

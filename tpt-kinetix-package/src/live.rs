@@ -334,7 +334,8 @@ impl LivePackager {
                         info.timescale = info.sample_rate;
                     }
                 }
-                MediaType::Other => continue,
+                // Subtitles are not packaged live yet: they are left out, not refused.
+                MediaType::Subtitle | MediaType::Other => continue,
             }
             if codec_string(&info).is_none() {
                 return Err(LiveError::Config(format!(

@@ -147,6 +147,9 @@ pub fn parse_sample_entry(media: MediaType, extra: &[u8]) -> SampleEntryConfig {
                 _ => 28,
             }
         }
+        // A text sample entry is just the 8-byte SampleEntry header followed by
+        // its children (`vttC` for WebVTT).
+        MediaType::Subtitle => 8,
         MediaType::Other => return cfg,
     };
     let Some(children) = extra.get(children_at..) else {
@@ -155,6 +158,7 @@ pub fn parse_sample_entry(media: MediaType, extra: &[u8]) -> SampleEntryConfig {
     for (kind, payload) in child_boxes(children) {
         match &kind {
             b"avcC" | b"hvcC" | b"av1C" | b"vpcC" | b"dOps" | b"dfLa" | b"dac3" | b"dec3"
+            | b"vttC"
                 if cfg.extradata.is_empty() =>
             {
                 cfg.extradata = payload.to_vec();

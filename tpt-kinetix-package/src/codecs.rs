@@ -20,6 +20,7 @@ pub fn codec_string(info: &StreamInfo) -> Option<String> {
         CodecId::Flac => "fLaC".into(),
         CodecId::Ac3 => "ac-3".into(),
         CodecId::Eac3 => "ec-3".into(),
+        CodecId::WebVtt => "wvtt".into(),
         CodecId::Unknown(_) => return None,
     })
 }

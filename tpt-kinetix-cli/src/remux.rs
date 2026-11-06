@@ -379,10 +379,12 @@ fn select_streams(
     (kept, map)
 }
 
-/// Streams MP4 can carry: video or audio with a codec the writer knows.
+/// Streams MP4 can carry: video, audio or WebVTT subtitles with a codec the writer knows.
 fn mp4_can_carry(s: &StreamInfo) -> bool {
-    matches!(s.media_type, MediaType::Video | MediaType::Audio)
-        && !matches!(s.codec, CodecId::Unknown(_))
+    matches!(
+        s.media_type,
+        MediaType::Video | MediaType::Audio | MediaType::Subtitle
+    ) && !matches!(s.codec, CodecId::Unknown(_))
 }
 
 /// Streams WebM can carry.
