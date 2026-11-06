@@ -213,7 +213,10 @@ mod tests {
         let mut a = StreamInfo::new(0, CodecId::Opus, 48_000);
         a.language = Some("fra".into());
         let tagged = stream_json(0, &a, None);
-        assert!(tagged.contains("\"tags\":{\"language\":\"fra\"}"), "{tagged}");
+        assert!(
+            tagged.contains("\"tags\":{\"language\":\"fra\"}"),
+            "{tagged}"
+        );
         let untagged = stream_json(0, &StreamInfo::new(0, CodecId::Opus, 48_000), None);
         assert!(!untagged.contains("tags"), "{untagged}");
     }
