@@ -2,6 +2,10 @@
 /target
 **/*.rs.bk
 
+# C smoke-test build outputs (tpt-kinetix-ffi/tests/c)
+/tpt-kinetix-ffi/tests/c/*.exe
+/tpt-kinetix-ffi/tests/c/*.obj
+
 # Cargo.lock: committed for binary crates / workspace, excluded for pure libraries.
 # This workspace contains binaries, so Cargo.lock is tracked (not ignored).
 
