@@ -38,9 +38,14 @@ pub(crate) fn master(p: &Packager) -> String {
 
     let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n");
     for (n, &a) in audio.iter().enumerate() {
+        let lang = streams[a]
+            .language
+            .as_deref()
+            .map(|l| format!(",LANGUAGE=\"{l}\""))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio-{a}\",DEFAULT={},AUTOSELECT=YES,CHANNELS=\"{}\",URI=\"track-{a}.m3u8\"",
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"audio-{a}\",DEFAULT={},AUTOSELECT=YES,CHANNELS=\"{}\"{lang},URI=\"track-{a}.m3u8\"",
             if n == 0 { "YES" } else { "NO" },
             streams[a].channels.max(1)
         );
@@ -50,7 +55,8 @@ pub(crate) fn master(p: &Packager) -> String {
         let default = if k == 0 { "YES" } else { "NO" };
         let _ = writeln!(
             out,
-            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"subtitles-{k}\",DEFAULT={default},AUTOSELECT=YES,LANGUAGE=\"und\",URI=\"subs-{k}.m3u8\""
+            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"subtitles-{k}\",DEFAULT={default},AUTOSELECT=YES,LANGUAGE=\"{}\",URI=\"subs-{k}.m3u8\"",
+            p.subtitle_language(k).unwrap_or("und")
         );
     }
     let subs_attr = if subs { ",SUBTITLES=\"subs\"" } else { "" };

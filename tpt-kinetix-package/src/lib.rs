@@ -220,6 +220,7 @@ impl Packager {
             .map(|(i, s)| subtitles::SubtitleTrack {
                 source_index: i,
                 timescale: s.timescale,
+                language: s.language.clone(),
             })
             .collect();
         Ok(Self {
@@ -369,6 +370,11 @@ impl Packager {
     /// Number of WebVTT subtitle tracks packaged (0 when the source has none).
     pub fn subtitle_count(&self) -> usize {
         self.subtitles.len()
+    }
+
+    /// The language of subtitle track `k`, when the source states one.
+    pub(crate) fn subtitle_language(&self, k: usize) -> Option<&str> {
+        self.subtitles.get(k)?.language.as_deref()
     }
 
     /// Average bits per second of subtitle track `k` (0 when there is none).

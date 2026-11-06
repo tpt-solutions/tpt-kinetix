@@ -51,8 +51,9 @@ fn make_source(av: &Path, dir: &Path) -> std::path::PathBuf {
         packets.push(p);
     }
 
-    for cues in [&CUES[..], &CUES_FR[..]] {
+    for (cues, lang) in [(&CUES[..], "eng"), (&CUES_FR[..], "fra")] {
         let mut sub = StreamInfo::new(streams.len() as u32, CodecId::WebVtt, 1000);
+        sub.language = Some(lang.into());
         sub.extradata = b"WEBVTT
 "
         .to_vec();
@@ -158,6 +159,16 @@ fn package_writes_the_subtitle_group_and_segments() {
         master.contains("NAME=\"subtitles-1\"") && master.contains("URI=\"subs-1.m3u8\""),
         "{master}"
     );
+    // Each rendition names its language from the source's mdhd.
+    let rendition = |k: usize| {
+        master
+            .lines()
+            .find(|l| l.contains(&format!("NAME=\"subtitles-{k}\"")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(rendition(0).contains("LANGUAGE=\"eng\""), "{master}");
+    assert!(rendition(1).contains("LANGUAGE=\"fra\""), "{master}");
     assert!(
         master.contains("NAME=\"subtitles-0\"") && master.contains("DEFAULT=YES"),
         "{master}"

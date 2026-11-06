@@ -10,6 +10,12 @@ fn iso_duration(seconds: f64) -> String {
     format!("PT{seconds:.3}S")
 }
 
+/// An ` lang="..."` attribute, or nothing when the language is unknown.
+fn lang_attr(lang: Option<&str>) -> String {
+    lang.map(|l| format!(" lang=\"{}\"", escape(l)))
+        .unwrap_or_default()
+}
+
 /// A key ID in the 8-4-4-4-12 UUID form that `cenc:default_KID` uses.
 fn uuid(id: &[u8; 16]) -> String {
     let h = tpt_kinetix_mux::cenc::hex(id);
@@ -47,7 +53,8 @@ pub(crate) fn mpd(p: &Packager) -> String {
         };
         let _ = writeln!(
             out,
-            "    <AdaptationSet id=\"{i}\" contentType=\"{kind}\" segmentAlignment=\"true\" startWithSAP=\"1\" mimeType=\"{kind}/mp4\">"
+            "    <AdaptationSet id=\"{i}\" contentType=\"{kind}\" segmentAlignment=\"true\" startWithSAP=\"1\" mimeType=\"{kind}/mp4\"{}>",
+            lang_attr(s.language.as_deref())
         );
         if let Some(enc) = p.encryption() {
             // CENC (`cenc` scheme) with the ClearKey system, which names the key ID.
@@ -161,7 +168,8 @@ fn subtitle_set(p: &Packager, k: usize, id: usize, out: &mut String) {
     }
     let _ = writeln!(
         out,
-        "    <AdaptationSet id=\"{id}\" contentType=\"text\" mimeType=\"text/vtt\">"
+        "    <AdaptationSet id=\"{id}\" contentType=\"text\" mimeType=\"text/vtt\"{}>",
+        lang_attr(p.subtitle_language(k))
     );
     let _ = writeln!(
         out,

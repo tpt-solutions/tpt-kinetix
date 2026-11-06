@@ -17,6 +17,8 @@ pub(crate) struct SubtitleTrack {
     pub source_index: usize,
     /// Ticks per second of the track's timestamps.
     pub timescale: u32,
+    /// ISO 639-2/T language code, when the source states one.
+    pub language: Option<String>,
 }
 
 /// `hh:mm:ss.mmm`, the WebVTT timestamp form.
