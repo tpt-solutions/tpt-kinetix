@@ -3,8 +3,6 @@
 mod doctor;
 mod package;
 mod png;
-mod probe_json;
-mod remux;
 mod thumbnails;
 
 use std::path::PathBuf;
@@ -352,7 +350,17 @@ fn parse_key_limit(arg: &str) -> Result<(String, tpt_kinetix_stream::KeyLimits),
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // The remux and package summaries come from tpt-kinetix-ops at info; show them by
+    // default, as the CLI always has. RUST_LOG still overrides the filter.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,tpt_kinetix_ops=info")
+            }),
+        )
+        .without_time()
+        .with_target(false)
+        .init();
 
     let cli = Cli::parse();
 
@@ -365,10 +373,10 @@ async fn main() -> Result<()> {
             max_packet_bytes,
             max_packets,
             max_total_mb,
-        } => remux::sanitize(
+        } => tpt_kinetix_ops::remux::sanitize(
             &input,
             &output,
-            remux::Limits {
+            tpt_kinetix_ops::remux::Limits {
                 max_packet_bytes,
                 max_packets,
                 max_total_bytes: max_total_mb * 1024 * 1024,
@@ -517,7 +525,7 @@ async fn main() -> Result<()> {
             faststart,
             fragmented,
             fragment_ms,
-        } => remux::remux(
+        } => tpt_kinetix_ops::remux::remux(
             &input,
             &output,
             faststart,
@@ -579,12 +587,12 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
         if json {
             print!(
                 "{}",
-                probe_json::document(
+                tpt_kinetix_ops::probe_json::document(
                     "mov,mp4,m4a,3gp,3g2,mj2",
                     "QuickTime / MOV",
-                    probe_json::duration_of(&streams),
+                    tpt_kinetix_ops::probe_json::duration_of(&streams),
                     src,
-                    &probe_json::streams(&streams, &counts),
+                    &tpt_kinetix_ops::probe_json::streams(&streams, &counts),
                 )
             );
         } else {
@@ -627,12 +635,12 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
                 .collect();
             print!(
                 "{}",
-                probe_json::document(
+                tpt_kinetix_ops::probe_json::document(
                     "matroska,webm",
                     "Matroska / WebM",
                     Some(reader.duration_ms() as f64 / 1000.0),
                     len,
-                    &probe_json::streams(&streams, &counts),
+                    &tpt_kinetix_ops::probe_json::streams(&streams, &counts),
                 )
             );
         } else {
@@ -661,12 +669,12 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
             .collect();
         print!(
             "{}",
-            probe_json::document(
+            tpt_kinetix_ops::probe_json::document(
                 "mov,mp4,m4a,3gp,3g2,mj2",
                 "QuickTime / MOV",
-                probe_json::duration_of(&streams),
+                tpt_kinetix_ops::probe_json::duration_of(&streams),
                 len,
-                &probe_json::streams(&streams, &counts),
+                &tpt_kinetix_ops::probe_json::streams(&streams, &counts),
             )
         );
     } else {
@@ -887,12 +895,12 @@ fn probe_ts(input: &std::path::Path, json: bool) -> Result<()> {
             .map(|ms| ms as f64 / 1000.0);
         print!(
             "{}",
-            probe_json::document(
+            tpt_kinetix_ops::probe_json::document(
                 "mpegts",
                 "MPEG-TS",
                 duration,
                 std::fs::metadata(input).map(|m| m.len()).unwrap_or(0),
-                &probe_json::streams(&infos, &counts),
+                &tpt_kinetix_ops::probe_json::streams(&infos, &counts),
             )
         );
     }
@@ -909,12 +917,12 @@ fn probe_ivf(data: &[u8], json: bool) -> Result<()> {
     if json {
         print!(
             "{}",
-            probe_json::document(
+            tpt_kinetix_ops::probe_json::document(
                 "ivf",
                 "IVF (raw AV1/VP9)",
-                probe_json::duration_of(std::slice::from_ref(&info)),
+                tpt_kinetix_ops::probe_json::duration_of(std::slice::from_ref(&info)),
                 data.len() as u64,
-                &probe_json::streams(std::slice::from_ref(&info), &[Some(frames)]),
+                &tpt_kinetix_ops::probe_json::streams(std::slice::from_ref(&info), &[Some(frames)]),
             )
         );
         return Ok(());

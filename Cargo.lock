@@ -2616,6 +2616,7 @@ dependencies = [
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
  "tpt-kinetix-mux",
+ "tpt-kinetix-ops",
  "tpt-kinetix-package",
  "tpt-kinetix-pipeline",
  "tpt-kinetix-stream",
@@ -2669,6 +2670,7 @@ dependencies = [
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
  "tpt-kinetix-mux",
+ "tpt-kinetix-ops",
 ]
 
 [[package]]
@@ -2718,6 +2720,18 @@ dependencies = [
  "thiserror",
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
+]
+
+[[package]]
+name = "tpt-kinetix-ops"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "tpt-kinetix-core",
+ "tpt-kinetix-demux",
+ "tpt-kinetix-mux",
+ "tpt-kinetix-package",
+ "tracing",
 ]
 
 [[package]]

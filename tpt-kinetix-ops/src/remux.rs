@@ -316,7 +316,7 @@ fn guard<'a>(
             keep.push(Some(kept.len() as u32));
             kept.push(s);
         } else {
-            eprintln!(
+            tracing::warn!(
                 "dropping stream {} ({}): sanitized output keeps only AV1, VP9 and Opus",
                 s.index,
                 s.codec.name()
@@ -372,7 +372,7 @@ fn select_streams(
             map.push(Some(kept.len() as u32));
             kept.push(s);
         } else {
-            eprintln!(
+            tracing::warn!(
                 "skipping stream {} ({:?}, {}): not supported by the output container",
                 s.index,
                 s.media_type,
@@ -464,7 +464,7 @@ fn write_ivf(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> R
         .map_err(|e| anyhow::anyhow!("failed to flush {}: {e}", output.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync {}", output.display()))?;
-    println!(
+    tracing::info!(
         "remuxed 1 video track, {frames} frames, {:.1} MiB of media in {:.2}s (IVF) -> {}",
         bytes as f64 / (1 << 20) as f64,
         started.elapsed().as_secs_f64(),
@@ -506,7 +506,7 @@ fn write_ogg(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> R
         .map_err(|e| anyhow::anyhow!("failed to flush {}: {e}", output.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync {}", output.display()))?;
-    println!(
+    tracing::info!(
         "remuxed 1 audio track, {packets} packets, {:.1} MiB of media in {:.2}s (Ogg) -> {}",
         bytes as f64 / (1 << 20) as f64,
         started.elapsed().as_secs_f64(),
@@ -539,7 +539,7 @@ fn write_webm(
             writer.write_packet_ms_discarding(&p, Some(dur_ms), discard)?;
         }
         writer.finish()?;
-        eprintln!(
+        tracing::info!(
             "remuxed {packets} packets, {:.1} MiB as a live WebM stream in {:.2}s",
             bytes as f64 / (1 << 20) as f64,
             started.elapsed().as_secs_f64()
@@ -567,7 +567,7 @@ fn write_webm(
         .map_err(|e| anyhow::anyhow!("failed to flush {}: {e}", output.display()))?
         .sync_all()
         .with_context(|| format!("failed to sync {}", output.display()))?;
-    println!(
+    tracing::info!(
         "remuxed {} track(s), {packets} packets, {:.1} MiB of media in {:.2}s (seekable WebM with Cues) -> {}",
         kept.len(),
         bytes as f64 / (1 << 20) as f64,
@@ -619,7 +619,7 @@ fn copy_progressive(
         moov_note = format!(", moov moved to front ({} bytes)", report.moov_bytes);
     }
     let secs = started.elapsed().as_secs_f64();
-    println!(
+    tracing::info!(
         "remuxed {} stream(s), {packets} packets, {:.1} MiB of media in {secs:.2}s{moov_note} -> {}",
         kept.len(),
         bytes as f64 / (1 << 20) as f64,
@@ -681,12 +681,24 @@ fn copy_fragmented(
     }
     out.flush()?;
     drop(out);
-    eprintln!(
+    tracing::info!(
         "remuxed {} stream(s), {packets} packets, {:.1} MiB of media into {fragments} fragment(s) in {:.2}s -> {}",
         kept.len(),
         bytes as f64 / (1 << 20) as f64,
         started.elapsed().as_secs_f64(),
         output.display()
     );
+    Ok(())
+}
+
+/// Writes a copy of `input` to `output` with the MP4 index moved to the front.
+pub fn faststart_file(input: &Path, output: &Path) -> Result<()> {
+    let mut src =
+        std::fs::File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let dst =
+        std::fs::File::create(output).with_context(|| format!("create {}", output.display()))?;
+    let mut dst = BufWriter::new(dst);
+    faststart(&mut src, &mut dst)?;
+    dst.flush()?;
     Ok(())
 }
