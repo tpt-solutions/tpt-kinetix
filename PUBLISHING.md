@@ -3,7 +3,7 @@
 Tracks which workspace crates are published to crates.io. Tick a box once the crate is live
 on crates.io, and fill in the version and date.
 
-- Shared version across all crates: `0.2.0` in every workspace member (aligned 2026-11-08; fuzz sub-crates are not members and keep their own versions). Only `tpt-kinetix-core`, `-demux`, `-mux` and `-package` are live at 0.2.0 on crates.io; the rest are still at 0.1.2.
+- Shared version across all crates: `0.2.0` in every workspace member (aligned 2026-11-08; fuzz sub-crates are not members and keep their own versions). Live at 0.2.0 on crates.io: `core`, `demux`, and (as of 2026-11-08) the 12 crates published in the batch run. Still to publish: `mux`, `package`, then `ops`, `stream`, `cli` (ops/cli depend on mux and package). Earlier text wrongly listed mux and package as live.
 - Publish list is defined by `publish = ...` in `release-plz.toml` and each crate's `Cargo.toml`.
 - Checked against crates.io 2026-11-08 (`https://crates.io/api/v1/crates/<name>`, with a User-Agent header; without one the API returns 404 for live crates). Re-check with the API above before each publish.
   `cargo search` only lists a few results, so use the API.
@@ -23,31 +23,31 @@ Grouped by dependency wave: publish a wave only after every crate in the earlier
 | Done | Crate | Depends on | Version | Published on |
 |:---:|---|---|---|---|
 | [x] | `tpt-kinetix-core` | — | 0.2.0 | live on crates.io (checked 2026-11-08) |
-| [ ] | `tpt-kinetix-kg` | — | 0.2.0 | not yet published at 0.2.0 |
+| [x] | `tpt-kinetix-kg` | — | 0.2.0 | live on crates.io (published 2026-11-08) |
 
 ### Wave 2 — depend on `core`
 
 | Done | Crate | Depends on | Version | Published on |
 |:---:|---|---|---|---|
 | [x] | `tpt-kinetix-demux` | core | 0.2.0 | live on crates.io (checked 2026-11-08) |
-| [x] | `tpt-kinetix-mux` | core | 0.2.0 | live on crates.io (checked 2026-11-08) |
-| [ ] | `tpt-kinetix-av1` | core | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-vp9` | core | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-bitstream` | core | 0.2.0 | not yet published at 0.2.0 |
+| [ ] | `tpt-kinetix-mux` | core | 0.2.0 | not yet published at 0.2.0 (registry still at 0.1.2; not yet attempted) |
+| [x] | `tpt-kinetix-av1` | core | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-vp9` | core | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-bitstream` | core | 0.2.0 | live on crates.io (published 2026-11-08) |
 
 ### Wave 3 — depend on wave 2
 
 | Done | Crate | Depends on | Version | Published on |
 |:---:|---|---|---|---|
-| [ ] | `tpt-kinetix-lean` | core, bitstream | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-lossless` | core, bitstream | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-realtime` | core, bitstream | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-screen` | core, bitstream | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-vision` | core, bitstream | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-face` | core, bitstream | 0.2.0 | not yet published at 0.2.0 |
-| [ ] | `tpt-kinetix-volumetric` | core, bitstream | 0.2.0 | not yet published at 0.2.0 |
-| [x] | `tpt-kinetix-package` | core, demux, mux | 0.2.0 | live on crates.io (checked 2026-11-08) |
-| [ ] | `tpt-kinetix-pipeline` | core, demux, vp9, av1 | 0.2.0 | not yet published at 0.2.0 |
+| [x] | `tpt-kinetix-lean` | core, bitstream | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-lossless` | core, bitstream | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-realtime` | core, bitstream | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-screen` | core, bitstream | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-vision` | core, bitstream | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-face` | core, bitstream | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [x] | `tpt-kinetix-volumetric` | core, bitstream | 0.2.0 | live on crates.io (published 2026-11-08) |
+| [ ] | `tpt-kinetix-package` | core, demux, mux | 0.2.0 | not yet published at 0.2.0 (registry still at 0.1.2; not yet attempted) |
+| [x] | `tpt-kinetix-pipeline` | core, demux, vp9, av1 | 0.2.0 | live on crates.io (published 2026-11-08) |
 
 ### Wave 4 — depends on wave 3
 
