@@ -76,6 +76,8 @@ fn live_webm_subtitles_are_served_as_webvtt_segments() {
             "8",
             "-b:v",
             "200k",
+            "-g",
+            "25",
         ])
         .args(["-c:a", "libopus"])
         .arg(&av)
@@ -150,9 +152,61 @@ fn live_webm_subtitles_are_served_as_webvtt_segments() {
         first.contains("00:00:00.500 --> 00:00:02.000\nHello subtitles"),
         "{first}"
     );
+
+    // The segment in progress lists its subtitle parts, and each one is WebVTT.
+    let mut with_parts = None;
+    let mut last = String::new();
+    for _ in 0..150 {
+        if let Some(p) = get(port, "/cam/subs-0.m3u8") {
+            if p.contains("#EXT-X-PART:") {
+                with_parts = Some(p);
+                break;
+            }
+            last = p;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let with_parts = with_parts.unwrap_or_else(|| {
+        panic!(
+            "no part of the segment in progress was listed; last playlist:
+{last}"
+        )
+    });
+    assert!(with_parts.contains("#EXT-X-VERSION:9"), "{with_parts}");
     assert!(
-        first.contains("00:00:03.000 --> 00:00:04.500\nSecond cue"),
-        "{first}"
+        with_parts.contains("#EXT-X-PART-INF:PART-TARGET="),
+        "{with_parts}"
+    );
+    let part_uris: Vec<&str> = with_parts
+        .lines()
+        .filter(|l| l.starts_with("#EXT-X-PART:"))
+        .filter_map(|l| l.split("URI=\"").nth(1)?.split('"').next())
+        .collect();
+    assert!(!part_uris.is_empty(), "{with_parts}");
+    for uri in &part_uris {
+        assert!(uri.starts_with("sub-0-") && uri.ends_with(".vtt"), "{uri}");
+        assert!(with_parts.contains("INDEPENDENT=YES"), "{with_parts}");
+        let body =
+            get(port, &format!("/cam/{uri}")).unwrap_or_else(|| panic!("{uri} is not served"));
+        assert!(body.starts_with("WEBVTT"), "{uri}: {body}");
+    }
+
+    // The second cue starts in the second segment, which is listed once it completes.
+    let mut second = None;
+    for _ in 0..150 {
+        if let Some(s) = get(port, "/cam/sub-0-2.vtt") {
+            second = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let second = second.expect("the second subtitle segment");
+    assert!(
+        second.contains(
+            "00:00:03.000 --> 00:00:04.500
+Second cue"
+        ),
+        "{second}"
     );
 
     let mpd = get(port, "/cam/manifest.mpd").expect("the live MPD");

@@ -474,17 +474,32 @@ impl LiveServer {
                 .subtitle_playlist(k)
                 .map_or_else(not_ready, |p| Reply::playlist(p.into_bytes()));
         }
+        // `sub-{k}-{n}.vtt` is a whole segment; `sub-{k}-{n}-{i}.vtt` is part `i` of the
+        // segment in progress.
         if let Some(rest) = name
             .strip_prefix("sub-")
             .and_then(|s| s.strip_suffix(".vtt"))
         {
-            if let Some((k, n)) = rest.split_once('-') {
-                if let (Some(k), Ok(n)) = (num(k), n.parse::<u64>()) {
-                    return live.lock_recover().subtitle_segment(k, n).map_or_else(
-                        || Reply::text(404, "no such subtitle segment"),
-                        |b| Reply::media("text/vtt", b),
-                    );
-                }
+            let parsed = match rest.split('-').collect::<Vec<_>>().as_slice() {
+                [k, n] => num(k).zip(n.parse::<u64>().ok()).map(|(k, n)| (k, n, None)),
+                [k, n, i] => num(k)
+                    .zip(n.parse::<u64>().ok())
+                    .zip(i.parse::<usize>().ok())
+                    .map(|((k, n), i)| (k, n, Some(i))),
+                _ => None,
+            };
+            if let Some((k, n, part)) = parsed {
+                let bytes = {
+                    let live = live.lock_recover();
+                    match part {
+                        None => live.subtitle_segment(k, n),
+                        Some(i) => live.subtitle_part(k, n, i),
+                    }
+                };
+                return bytes.map_or_else(
+                    || Reply::text(404, "no such subtitle segment"),
+                    |b| Reply::media("text/vtt", b),
+                );
             }
         }
         if let Some(t) = name

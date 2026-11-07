@@ -209,7 +209,15 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 - [~] Worker, 2026-11-07: Cache API layer (`caches.default`) for init, segment, trick-play and WebVTT responses, checked before any origin read; `Range` (206/416) on binary responses; trick-play and subtitle routes added (the handler was missing them, so `just edge-worker-test` had been failing on the trick-play output). `tools/edge-worker-test.sh` passes with all 12 native files byte-identical. Open: real Cloudflare/R2 deployment test, CPU/memory limits under load, Deno/Fastly smoke tests.
 - [ ] Live variant at the edge (Durable Object / stateful worker holding the `LivePackager`).
 - [ ] Encryption: CENC/CBCS + ClearKey/Widevine key hooks (AV1/VP9/Opus).
-- [ ] Subtitles/WebVTT passthrough, multi-audio-language tracks and `EXT-X-MEDIA` metadata, trick-play.
+- [x] **LL-HLS subtitle parts** DONE 2026-11-08: the live subtitle playlist lists the parts of the segment in progress
+      (`#EXT-X-PART`, `INDEPENDENT=YES`, `EXT-X-VERSION:9`, `PART-INF`), one WebVTT file per A/V part (`sub-{k}-{n}-{i}.vtt`)
+      holding the cues that start in that part's window, so cues show up as they are known rather than a whole segment
+      later. The windows are the video's part windows (`LivePackager::sub_parts`). Test: `tpt-kinetix-cli/tests/live_subtitles.rs`
+      (real-time ffmpeg publisher, parts fetched as WebVTT). Not checked in a browser yet (hls.js live subtitles).
+- [-] **Subtitles on RTMP and WHIP ingest**: closed as not applicable. Neither carries a text track: RTMP/FLV has no
+      standard caption or text track in Enhanced RTMP, and WebRTC has no text media. Subtitles reach a live presentation
+      through WebM ingest (a subtitle track, `live_subtitles.rs`), which is the carriage that exists.
+- [ ] Multi-audio-language tracks and `EXT-X-MEDIA` metadata, trick-play.
 - [x] `styp` + `sidx` on VOD media segments DONE 2026-10-07 (`FragmentWriter::with_segment_index`; single-track segments get a v1 one-reference `sidx`, used by `Packager::media_segment`; test in `package.rs`). Still open: `sidx` for live segments (parts stay bare `moof`+`mdat`) and a whole-file `sidx` for `remux --fragmented`; verify with the DASH-IF validator.
 
 ### C. Containers (demux / mux)

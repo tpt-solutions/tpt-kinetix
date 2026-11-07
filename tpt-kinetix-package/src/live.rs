@@ -217,6 +217,10 @@ pub struct LivePackager {
     /// Samples already published as parts but not yet folded into a segment, per
     /// track. Retained so the segment's own fragment contains every sample.
     part_samples: Vec<Vec<Sample>>,
+    /// The `(start, end)` window in ms of each part published for the segment in
+    /// progress. Subtitle parts use the same windows: part `i` of the segment is
+    /// `sub_parts[i]`.
+    sub_parts: Vec<(i64, i64)>,
     /// A publisher resumed and no segment since has carried the discontinuity.
     pending_discontinuity: bool,
     /// Discontinuity-flagged segments that have left the retained window
@@ -233,6 +237,23 @@ pub struct LivePackager {
 /// Whether `info` is an audio or video track (the ones a live packager carries).
 fn is_av(info: &StreamInfo) -> bool {
     matches!(info.media_type, MediaType::Video | MediaType::Audio)
+}
+
+/// The WebVTT file of the cues of `sub` that `keep` accepts, with their times in seconds.
+fn vtt_of(sub: &LiveSub, keep: impl Fn(&LiveCue) -> bool) -> Vec<u8> {
+    let cues: Vec<(crate::subtitles::Cue, f64, f64)> = sub
+        .cues
+        .iter()
+        .filter(|c| keep(c))
+        .map(|c| {
+            (
+                c.cue.clone(),
+                c.start_ms as f64 / 1000.0,
+                c.end_ms as f64 / 1000.0,
+            )
+        })
+        .collect();
+    crate::subtitles::segment_file(&cues).into_bytes()
 }
 
 /// Whether `info` is a WebVTT subtitle track.
@@ -311,6 +332,7 @@ impl LivePackager {
             part_start_ms: None,
             part_index: 0,
             part_samples: Vec::new(),
+            sub_parts: Vec::new(),
             pending_discontinuity: false,
             discontinuities_dropped: 0,
             resume_base_ms: None,
@@ -373,6 +395,7 @@ impl LivePackager {
         }
         self.part_index = 0;
         self.part_start_ms = None;
+        self.sub_parts.clear();
         if let Some(end) = self.seg_start_ms.take() {
             // Something was published: continue after it.
             self.resume_base_ms = Some(end);
@@ -677,6 +700,7 @@ impl LivePackager {
             // Nothing since the last part: keep waiting.
             return Ok(());
         }
+        self.sub_parts.push((start_ms, end_ms));
         self.part_index += 1;
         self.part_start_ms = Some(end_ms);
         Ok(())
@@ -795,6 +819,7 @@ impl LivePackager {
         self.part_samples = (0..self.tracks.len()).map(|_| Vec::new()).collect();
         self.part_index = 0;
         self.part_start_ms = Some(end_ms);
+        self.sub_parts.clear();
         self.segments.push_back(Segment {
             number,
             start_ms,
@@ -1180,25 +1205,66 @@ impl LivePackager {
 
     /// The media playlist of subtitle rendition `k` (`subs-{k}.m3u8`): a sliding
     /// window that follows the audio and video segments, one WebVTT file per
-    /// segment. `None` until the first segment exists.
+    /// segment. With parts, the segment in progress lists its parts (one WebVTT
+    /// file per A/V part, `sub-{k}-{n}-{i}.vtt`), so cues show up as they are
+    /// known rather than a whole segment later. `None` until the first segment exists.
     pub fn subtitle_playlist(&self, k: usize) -> Option<String> {
         self.subs.get(k)?;
         let first = self.window().next()?;
         let secs = |s: &Segment| (s.end_ms - s.start_ms) as f64 / 1000.0;
+        let part_secs = |&(s, e): &(i64, i64)| (e - s) as f64 / 1000.0;
         let max = self
             .window()
             .map(secs)
             .fold(self.opts.segment_seconds, f64::max);
+        let parts = self.parts_enabled();
         let mut out = format!(
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n",
+            "#EXTM3U
+#EXT-X-VERSION:{}
+#EXT-X-TARGETDURATION:{}
+#EXT-X-MEDIA-SEQUENCE:{}
+",
+            if parts { 9 } else { 7 },
             max.ceil() as u64,
             first.number
         );
+        if parts {
+            // The part target is the longest part, as for the A/V playlists.
+            let longest = self
+                .sub_parts
+                .iter()
+                .map(part_secs)
+                .fold(self.opts.part_seconds.unwrap_or(0.0), f64::max);
+            let _ = writeln!(
+                out,
+                "#EXT-X-PART-INF:PART-TARGET={:.3}",
+                (longest * 1000.0).ceil() / 1000.0
+            );
+        }
         for s in self.window() {
-            let _ = writeln!(out, "#EXTINF:{:.6},\nsub-{k}-{}.vtt", secs(s), s.number);
+            let _ = writeln!(
+                out,
+                "#EXTINF:{:.6},
+sub-{k}-{}.vtt",
+                secs(s),
+                s.number
+            );
+        }
+        if parts {
+            for (i, p) in self.sub_parts.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "#EXT-X-PART:DURATION={:.6},INDEPENDENT=YES,URI=\"sub-{k}-{}-{i}.vtt\"",
+                    part_secs(p),
+                    self.next_number
+                );
+            }
         }
         if self.finished {
-            out.push_str("#EXT-X-ENDLIST\n");
+            out.push_str(
+                "#EXT-X-ENDLIST
+",
+            );
         }
         Some(out)
     }
@@ -1209,19 +1275,21 @@ impl LivePackager {
     pub fn subtitle_segment(&self, k: usize, n: u64) -> Option<Vec<u8>> {
         let sub = self.subs.get(k)?;
         let seg = self.segments.iter().find(|s| s.number == n)?;
-        let cues: Vec<(crate::subtitles::Cue, f64, f64)> = sub
-            .cues
-            .iter()
-            .filter(|c| c.start_ms < seg.end_ms && c.end_ms > seg.start_ms)
-            .map(|c| {
-                (
-                    c.cue.clone(),
-                    c.start_ms as f64 / 1000.0,
-                    c.end_ms as f64 / 1000.0,
-                )
-            })
-            .collect();
-        Some(crate::subtitles::segment_file(&cues).into_bytes())
+        Some(vtt_of(sub, |c| {
+            c.start_ms < seg.end_ms && c.end_ms > seg.start_ms
+        }))
+    }
+
+    /// Part `i` of segment `n` of subtitle rendition `k` (`sub-{k}-{n}-{i}.vtt`): the
+    /// cues that start in that part's window. Only the segment in progress has parts;
+    /// `None` for any other segment or part.
+    pub fn subtitle_part(&self, k: usize, n: u64, i: usize) -> Option<Vec<u8>> {
+        let sub = self.subs.get(k)?;
+        if n != self.next_number {
+            return None;
+        }
+        let &(start, end) = self.sub_parts.get(i)?;
+        Some(vtt_of(sub, |c| c.start_ms >= start && c.start_ms < end))
     }
 
     /// The master playlist.
