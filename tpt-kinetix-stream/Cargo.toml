@@ -32,7 +32,7 @@ tokio = { version = "1.38", features = ["full"] }
 bytes = "1.5"
 nom = { workspace = true }
 tokio-rustls = { version = "0.26", optional = true }
-str0m = { version = "0.24", default-features = false, features = ["rust-crypto"], optional = true }
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"], optional = true }
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-package = { workspace = true }
