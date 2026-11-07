@@ -51,13 +51,22 @@ without decoding them, as ffmpeg's `-c copy` does, but it cannot decode them.
 H.264 and AAC are not published from this repository (see `PATENTS.md`), so
 there is no encoder or decoder for them here.
 
+## Available now (were on the roadmap)
+
+These used to be listed as missing and now work:
+
+- keyframe stills and contact sheets: `tpt-kinetix thumbnails` (`ffmpeg -ss ... -frames:v 1`);
+- WebVTT subtitles in MP4 and WebM, with HLS and DASH subtitle renditions;
+- CENC (`cenc`, `cbcs`, `cbcs-pattern`) encryption with ClearKey, for VOD and live;
+- streaming MPEG-TS demux (`probe` and `doctor` read the file without loading it);
+- Ogg/Opus output (`remux` to `.ogg` / `.opus`) and IVF output.
+
 ## Not available yet
 
-These ffmpeg features are on the roadmap (`todo.md`) and do not work yet:
+These ffmpeg features do not work here:
 
-- thumbnails and keyframe extraction (`ffmpeg -ss ... -frames:v 1`);
-- WebVTT subtitles, subtitle groups and multiple audio renditions;
-- CENC or CBCS encryption;
-- streaming MPEG-TS demux (the TS demuxer reads the whole input);
-- Ogg and Opus muxing;
-- metadata editing (chapters, cover art).
+- any decoding or encoding of H.264, H.265 or AAC (see `PATENTS.md`);
+- filter graphs (`-vf`, `-af`, `-filter_complex`) and server-side transcoding beyond VP9 to AV1;
+- seeking in MPEG-TS input;
+- metadata editing (chapters, cover art, tags). Reading and carrying them through `remux` works;
+  editing them does not.

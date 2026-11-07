@@ -24,7 +24,9 @@ tpt-kinetix remux https://host/in.mp4 out.mp4          # remote input, range req
 - The output format follows the extension: `.webm` and `.mkv` write WebM, `.ivf`
   writes one video track as IVF, anything else writes MP4.
 - `--fragment-ms` sets the fragment length; fragments end at the next video key frame.
-- Metadata, chapters and cover art are not carried across (this is a known gap).
+- Text metadata (title, artist, album and similar tags) and chapters carry across. MP4 to MP4 copies the
+  raw `udta` box, so cover art comes along. Cover art is dropped for WebM output, and editing metadata is
+  not supported.
 
 ### sanitize: re-mux untrusted uploads
 
