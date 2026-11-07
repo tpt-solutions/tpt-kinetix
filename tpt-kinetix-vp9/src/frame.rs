@@ -333,7 +333,9 @@ impl FrameState {
     }
 
     pub fn new(hdr: &FrameHeader) -> Self {
-        let cols = hdr.mi_cols;
+        // Whole superblocks: a block at the right edge writes its context up to the
+        // superblock boundary, past `mi_cols` (found by fuzz_vp9_frame).
+        let cols = (hdr.mi_cols + 7) & !7;
         let frame = FrameData::new(hdr.width, hdr.height);
         let n_sb = frame.sb64_cols * frame.sb64_rows();
         Self {

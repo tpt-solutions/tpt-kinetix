@@ -155,6 +155,11 @@ fn generate_grain_uv(
 }
 
 fn generate_scaling(bit_depth: u32, points: &[(u8, u8)]) -> Vec<u8> {
+    // Positions must strictly increase, or the walk below underflows. The parser
+    // rejects such a header; this keeps the function total for any caller.
+    if points.windows(2).any(|w| w[1].0 <= w[0].0) {
+        return vec![0u8; 1usize << bit_depth];
+    }
     let shift_x = bit_depth - 8;
     let size = 1usize << bit_depth;
     let mut scaling = vec![0u8; size];
@@ -534,5 +539,17 @@ mod tests {
         assert!(a.0.iter().all(|&s| s < 1024));
         // No chroma scaling points and no chroma_scaling_from_luma: untouched.
         assert!(a.1.iter().all(|&s| s == 512));
+    }
+
+    /// Non-increasing scaling points are malformed (the parser rejects them); the
+    /// table builder must not underflow on them (found by fuzz_av1_frame).
+    #[test]
+    fn non_increasing_scaling_points_give_a_zero_table() {
+        assert!(generate_scaling(8, &[(10, 5), (10, 6)])
+            .iter()
+            .all(|&v| v == 0));
+        assert!(generate_scaling(10, &[(200, 5), (100, 6)])
+            .iter()
+            .all(|&v| v == 0));
     }
 }
