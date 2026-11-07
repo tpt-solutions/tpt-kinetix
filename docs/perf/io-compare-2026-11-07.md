@@ -29,3 +29,19 @@ malformed file. Neither tool crashed or hung on any variant.
 - ffprobe is run with its defaults, not tuned (`-probesize`, `-analyzeduration`).
 - Local disk, no network: the remote-probe round trips are not measured here.
 - Peak RSS is measured on Windows only.
+
+## Remote probe (`--remote`)
+
+An MP4 with `moov` at the end, served over HTTP by the harness with an added
+round-trip delay. Each tool makes three requests (the box headers, the index, and
+the tail), and the table shows the time and the bytes moved.
+
+| added RTT | tpt-kinetix probe | ffprobe | bytes moved (tpt / ffprobe) |
+|---:|---:|---:|---:|
+| 0 ms | 18 ms | 59 ms | 199 KiB / 28.2 MiB |
+| 20 ms | 100 ms | 168 ms | 199 KiB / 29.9 MiB |
+| 50 ms | 221 ms | 349 ms | 199 KiB / 24.8 MiB |
+| 100 ms | 422 ms | 648 ms | 199 KiB / 36.0 MiB |
+
+The delay is simulated on localhost, so this measures round trips and bytes, not a
+real network. The file is 18.0 MiB, and the probe reads about 1% of it.
