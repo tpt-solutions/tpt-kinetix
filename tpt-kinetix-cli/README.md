@@ -25,7 +25,9 @@ in `live`), `tls` (HTTPS / `wss://` / RTMPS in `live`).
 
 Worked examples for each task, with the ffmpeg command it replaces, are in
 [docs/user-guide.md](../docs/user-guide.md), [docs/migrating-from-ffmpeg.md](../docs/migrating-from-ffmpeg.md)
-and [examples/tasks](../examples/tasks/README.md).
+and [examples/tasks](../examples/tasks/README.md). To see which containers and codecs each command takes
+(H.264 and AAC are copied, never decoded), read [what works with my files](../docs/what-works-with-my-files.md).
+The player and browser checks are in [docs/compatibility.md](../docs/compatibility.md).
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
