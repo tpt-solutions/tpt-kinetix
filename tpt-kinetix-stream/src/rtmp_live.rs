@@ -22,7 +22,8 @@ use crate::sync::LockRecover;
 use tpt_kinetix_core::codec::CodecId;
 use tpt_kinetix_core::stream::StreamInfo;
 use tpt_kinetix_demux::rfconfig::{
-    av1_dimensions, opus_head_to_dops, vp9_config_from_frame, vpcc_record,
+    av1_dimensions, av1c_from_sequence_header, opus_head_to_dops, vp9_config_from_frame,
+    vpcc_record,
 };
 
 use crate::live::{LiveServer, Shared};
@@ -319,14 +320,16 @@ impl RtmpLiveSession {
     }
 
     fn video_config(&mut self, track_id: u8, codec: CodecId, record: &[u8]) {
-        let mut needs_frame = false;
         let mut info = StreamInfo::new(0, codec, 90_000);
-        match codec {
+        let needs_frame = match codec {
             CodecId::Av1 => {
+                // An empty record (WHIP) leaves the `av1C` to be built from the first
+                // key frame's sequence header.
                 info.extradata = record.to_vec();
                 if let Some((w, h)) = av1_dimensions(record) {
                     (info.width, info.height) = (w, h);
                 }
+                record.is_empty()
             }
             _ => {
                 // The record is a `vpcC` payload, with or without its version/flags word.
@@ -339,9 +342,9 @@ impl RtmpLiveSession {
                 } else {
                     [&[1u8, 0, 0, 0][..], record].concat()
                 };
-                needs_frame = true;
+                true
             }
-        }
+        };
         self.videos.insert(
             track_id,
             VideoTrack {
@@ -365,7 +368,18 @@ impl RtmpLiveSession {
 
     fn video_frame(&mut self, track_id: u8, codec: CodecId, ts: u32, key: bool, data: &[u8]) {
         if let Some(t) = self.videos.get_mut(&track_id) {
-            if t.needs_frame && key {
+            if t.needs_frame && key && codec == CodecId::Av1 {
+                if let Some(record) = av1c_from_sequence_header(data) {
+                    let info = t
+                        .info
+                        .get_or_insert_with(|| StreamInfo::new(0, codec, 90_000));
+                    if let Some((w, h)) = av1_dimensions(&record) {
+                        (info.width, info.height) = (w, h);
+                    }
+                    info.extradata = record;
+                    t.needs_frame = false;
+                }
+            } else if t.needs_frame && key {
                 if let Some(cfg) = vp9_config_from_frame(data, 0, 0) {
                     let info = t
                         .info

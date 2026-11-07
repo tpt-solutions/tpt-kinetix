@@ -125,8 +125,12 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       an error on the *next* `recv_from` (ignored now), str0m needs the true local address of each datagram (one UDP
       socket per advertised address, not one on 0.0.0.0), a WebRTC encoder sends a key frame only at the start and
       on request (so the server sends a PLI every segment duration, or no segment is ever cut), and the VP9
-      configuration must come from the first key frame. OPEN: AV1 over WebRTC (needs `av1C` built from the sequence
-      header), trickle ICE / `PATCH`, A/V alignment from RTCP sender reports (str0m already surfaces the NTP<->RTP
+      configuration must come from the first key frame. **AV1 over WebRTC DONE 2026-11-08**: negotiated alongside VP9
+      (`enable_av1`); the `av1C` is built from the first key frame's sequence header (`av1c_from_sequence_header`), the
+      same as VP9's config-from-key-frame; the keyframe flag comes from str0m's AV1 depacketizer. Verified in headless
+      Chrome: `TRANSPORT=whip-av1 tools/browser-publish-test.sh` publishes AV1 over WHIP, 3 segments, 303 frames decode
+      in ffmpeg. OPEN (found 2026-11-08): the VP9 WHIP browser run (`TRANSPORT=whip`) fails on this machine, also on the
+      pre-change tree: the page never POSTs `/whip`, so it is the browser side and not yet isolated (AV1 passes). Trickle ICE / `PATCH`, A/V alignment from RTCP sender reports (str0m already surfaces the NTP<->RTP
       mapping; today each track is aligned by the arrival time of its first packet), TURN/STUN for publishers
       behind NAT (`--whip-candidate-ip` advertises a public address), an OBS WHIP pass, a session metric.
 - [x] **Browser publish** DONE 2026-10-06: chose **WebSocket ingest** over streaming `fetch` (Chrome's upload streaming

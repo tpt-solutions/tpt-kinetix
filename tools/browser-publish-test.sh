@@ -16,9 +16,9 @@ if [ -z "$chrome" ]; then
 fi
 [ -n "$chrome" ] || { echo "set CHROME to a Chrome/Chromium binary" >&2; exit 2; }
 export FFMPEG="${FFMPEG:-$(command -v ffmpeg)}"
-transport="${TRANSPORT:-ws}"   # ws (WebSocket + MediaRecorder) or whip (WebRTC)
+transport="${TRANSPORT:-ws}"   # ws (WebSocket + MediaRecorder) or whip / whip-av1 (WebRTC, VP9 / AV1)
 features=()
-[ "$transport" = whip ] && features=(--features whip)
+[[ "$transport" == whip* ]] && features=(--features whip)
 cargo build -q -p tpt-kinetix-stream ${features[@]+"${features[@]}"} --example live_server
 port="${PORT:-8899}"
 target/debug/examples/live_server "$port" >"${TMPDIR:-/tmp}/tpt-publish-server.log" 2>&1 &
