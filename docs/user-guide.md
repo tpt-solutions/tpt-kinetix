@@ -54,7 +54,8 @@ become HLS renditions in one group. WebVTT subtitle tracks become `subs.m3u8` an
 tpt-kinetix package in.mp4 out/ \
   --cenc-key-id 00112233445566778899aabbccddeeff \
   --cenc-key    0f0e0d0c0b0a09080706050403020100
-# or the cbcs scheme (AES-CBC, no pattern):
+# or the cbcs scheme (AES-CBC, every block), or cbcs-pattern (AES-CBC with the
+# 1:9 pattern, which HLS and most players expect for video):
 tpt-kinetix package in.mp4 out/ --cenc-key-id ... --cenc-key ... --cenc-scheme cbcs
 ```
 

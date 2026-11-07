@@ -145,7 +145,7 @@ fn live_cenc_and_cbcs_decrypt_to_the_clear_frames() {
     assert_eq!(clear_frames.len(), packets.len(), "one frame per packet");
 
     let key_hex = hex(&key());
-    for scheme in [Scheme::Cenc, Scheme::Cbcs] {
+    for scheme in [Scheme::Cenc, Scheme::Cbcs, Scheme::CbcsPattern] {
         let enc = Encryption {
             key_id: key_id(),
             key: key(),

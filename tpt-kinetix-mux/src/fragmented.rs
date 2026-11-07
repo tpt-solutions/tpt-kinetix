@@ -327,14 +327,23 @@ impl FragmentWriter {
         self.sequence += 1;
         // Pass 1 with zero data offsets to learn the moof size, pass 2 for real.
         let zeros = vec![0i32; taken.len()];
-        let moof_len = build_moof(seq, &taken, &zeros).len();
+        let subsamples: Vec<bool> = self
+            .tracks
+            .iter()
+            .map(|t| {
+                t.enc
+                    .as_ref()
+                    .is_some_and(|e| e.scheme == crate::cenc::Scheme::CbcsPattern)
+            })
+            .collect();
+        let moof_len = build_moof(seq, &taken, &zeros, &subsamples).len();
         let mut offsets = Vec::with_capacity(taken.len());
         let mut running = moof_len as u64 + 8;
         for samples in &taken {
             offsets.push(running as i32);
             running += samples.iter().map(|s| s.data.len() as u64).sum::<u64>();
         }
-        let moof = build_moof(seq, &taken, &offsets);
+        let moof = build_moof(seq, &taken, &offsets, &subsamples);
         debug_assert_eq!(moof.len(), moof_len);
 
         let data_len: usize = taken.iter().flatten().map(|s| s.data.len()).sum();
@@ -483,7 +492,12 @@ fn init_trak(t: &Track, track_id: u32) -> Vec<u8> {
     )
 }
 
-fn build_moof(sequence: u32, tracks: &[Vec<Sample>], data_offsets: &[i32]) -> Vec<u8> {
+fn build_moof(
+    sequence: u32,
+    tracks: &[Vec<Sample>],
+    data_offsets: &[i32],
+    subsamples: &[bool],
+) -> Vec<u8> {
     let mut moof = full_box(b"mfhd", 0, 0, &sequence.to_be_bytes());
     for (i, samples) in tracks.iter().enumerate() {
         if samples.is_empty() {
@@ -508,7 +522,12 @@ fn build_moof(sequence: u32, tracks: &[Vec<Sample>], data_offsets: &[i32]) -> Ve
         let mut parts = vec![tfhd, tfdt, trun];
         if samples[0].iv.is_some() {
             let ivs: Vec<Vec<u8>> = samples.iter().filter_map(|s| s.iv.clone()).collect();
-            parts.push(cenc::senc(&ivs));
+            let sizes: Vec<usize> = samples.iter().map(|s| s.data.len()).collect();
+            if subsamples.get(i) == Some(&true) {
+                parts.push(cenc::senc_with_subsamples(&ivs, &sizes));
+            } else {
+                parts.push(cenc::senc(&ivs));
+            }
         }
         moof.extend(boxed(b"traf", &parts.concat()));
     }

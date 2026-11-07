@@ -143,7 +143,8 @@ enum Commands {
         /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
         #[arg(long, requires = "cenc_key_id")]
         cenc_key: Option<String>,
-        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        /// CENC scheme: `cenc` (AES-CTR), `cbcs` (AES-CBC, every block) or
+        /// `cbcs-pattern` (AES-CBC, 1 block in 10, as HLS and most players expect).
         #[arg(long, default_value = "cenc")]
         cenc_scheme: String,
     },
@@ -174,7 +175,8 @@ enum Commands {
         /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
         #[arg(long, requires = "cenc_key_id")]
         cenc_key: Option<String>,
-        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        /// CENC scheme: `cenc` (AES-CTR), `cbcs` (AES-CBC, every block) or
+        /// `cbcs-pattern` (AES-CBC, 1 block in 10, as HLS and most players expect).
         #[arg(long, default_value = "cenc")]
         cenc_scheme: String,
         /// Listen on all interfaces instead of localhost only.
@@ -252,7 +254,8 @@ enum Commands {
         /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
         #[arg(long, requires = "cenc_key_id")]
         cenc_key: Option<String>,
-        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        /// CENC scheme: `cenc` (AES-CTR), `cbcs` (AES-CBC, every block) or
+        /// `cbcs-pattern` (AES-CBC, 1 block in 10, as HLS and most players expect).
         #[arg(long, default_value = "cenc")]
         cenc_scheme: String,
     },

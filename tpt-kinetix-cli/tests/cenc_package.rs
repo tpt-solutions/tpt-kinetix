@@ -125,7 +125,7 @@ fn cenc_and_cbcs_tracks_decrypt_to_the_clear_frames() {
     ]);
 
     let clear = dir.join("clear");
-    for scheme in ["cenc", "cbcs"] {
+    for scheme in ["cenc", "cbcs", "cbcs-pattern"] {
         let enc = dir.join(format!("enc-{scheme}"));
         tpt(&[
             "package",
@@ -152,10 +152,9 @@ fn cenc_and_cbcs_tracks_decrypt_to_the_clear_frames() {
         let init = std::fs::read(enc.join("init-0.mp4")).unwrap();
         assert!(init.windows(4).any(|w| w == b"encv"), "encv sample entry");
         assert!(init.windows(4).any(|w| w == b"tenc"), "tenc box");
-        assert!(
-            init.windows(4).any(|w| w == scheme.as_bytes()),
-            "schm names {scheme}"
-        );
+        // The scheme type is the fourcc: `cbcs-pattern` is cbcs with a 1:9 pattern.
+        let fourcc: &[u8] = if scheme == "cenc" { b"cenc" } else { b"cbcs" };
+        assert!(init.windows(4).any(|w| w == fourcc), "schm names {scheme}");
         let mpd = std::fs::read_to_string(enc.join("manifest.mpd")).unwrap();
         assert!(
             mpd.contains("cenc:default_KID=\"00112233-4455-6677-8899-aabbccddeeff\""),
