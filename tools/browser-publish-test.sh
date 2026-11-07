@@ -21,7 +21,7 @@ features=()
 [[ "$transport" == whip* ]] && features=(--features whip)
 cargo build -q -p tpt-kinetix-stream ${features[@]+"${features[@]}"} --example live_server
 port="${PORT:-8899}"
-target/debug/examples/live_server "$port" >"${TMPDIR:-/tmp}/tpt-publish-server.log" 2>&1 &
+"${CARGO_TARGET_DIR:-target}/debug/examples/live_server" "$port" >"${TMPDIR:-/tmp}/tpt-publish-server.log" 2>&1 &
 server=$!
 trap 'kill $server 2>/dev/null || true' EXIT
 sleep 1

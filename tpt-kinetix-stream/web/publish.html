@@ -55,13 +55,13 @@ async function startWhip(key, token) {
   pc = new RTCPeerConnection({ iceServers: [] });
   // WHIP publishes only: the offer is `sendonly`.
   stream.getTracks().forEach((t) => pc.addTransceiver(t, { direction: "sendonly", streams: [stream] }));
-  // The server ingests VP9 or AV1 (the transport picks) + Opus: put that codec first.
+  // The server ingests the codec the transport names (VP9 or AV1) + Opus. Offer only
+  // that codec (and its retransmission), so the answer cannot pick another one.
   const want = $("transport").value === "whip-av1" ? "video/AV1" : "video/VP9";
   const caps = RTCRtpSender.getCapabilities("video").codecs;
   pc.getTransceivers().forEach((tr) => {
     if (tr.sender.track && tr.sender.track.kind === "video") {
-      const preferred = caps.filter((c) => c.mimeType === want);
-      tr.setCodecPreferences([...preferred, ...caps.filter((c) => c.mimeType !== want)]);
+      tr.setCodecPreferences(caps.filter((c) => c.mimeType === want || c.mimeType === "video/rtx"));
     }
   });
   await pc.setLocalDescription(await pc.createOffer());

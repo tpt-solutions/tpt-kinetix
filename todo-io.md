@@ -127,10 +127,13 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       on request (so the server sends a PLI every segment duration, or no segment is ever cut), and the VP9
       configuration must come from the first key frame. **AV1 over WebRTC DONE 2026-11-08**: negotiated alongside VP9
       (`enable_av1`); the `av1C` is built from the first key frame's sequence header (`av1c_from_sequence_header`), the
-      same as VP9's config-from-key-frame; the keyframe flag comes from str0m's AV1 depacketizer. Verified in headless
-      Chrome: `TRANSPORT=whip-av1 tools/browser-publish-test.sh` publishes AV1 over WHIP, 3 segments, 303 frames decode
-      in ffmpeg. OPEN (found 2026-11-08): the VP9 WHIP browser run (`TRANSPORT=whip`) fails on this machine, also on the
-      pre-change tree: the page never POSTs `/whip`, so it is the browser side and not yet isolated (AV1 passes). Trickle ICE / `PATCH`, A/V alignment from RTCP sender reports (str0m already surfaces the NTP<->RTP
+      same as VP9's config-from-key-frame; the keyframe flag comes from str0m's AV1 depacketizer. The publish page offers
+      only the codec the transport names (VP9 or AV1, plus RTX); with VP9 also offered, the answer picked VP9 and the
+      first "AV1" run was really VP9. Verified in headless Chrome: `TRANSPORT=whip-av1 tools/browser-publish-test.sh`
+      publishes `av01.0.01M.08` over WHIP, 3 segments decode in ffmpeg, and the harness now fails unless the master
+      playlist names the codec it asked for. The VP9 WHIP browser failure seen earlier was the harness running a stale
+      `target/debug/examples/live_server` instead of the one it had just built (`CARGO_TARGET_DIR`); fixed in the
+      script. Trickle ICE / `PATCH`, A/V alignment from RTCP sender reports (str0m already surfaces the NTP<->RTP
       mapping; today each track is aligned by the arrival time of its first packet), TURN/STUN for publishers
       behind NAT (`--whip-candidate-ip` advertises a public address), an OBS WHIP pass, a session metric.
 - [x] **Browser publish** DONE 2026-10-06: chose **WebSocket ingest** over streaming `fetch` (Chrome's upload streaming
