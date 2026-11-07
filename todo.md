@@ -12,6 +12,7 @@ worked in order; `[x]` means done in the tree, `[ ]` means still open, with the 
 - [ ] **crates.io is half-released.** OPEN, needs the maintainer's go-ahead: `cargo publish --dry-run -p tpt-kinetix-core` passes (2026-11-08); the rest cannot be dry-run until their dependencies are live. Publishing is irreversible (yank only), so nothing has been uploaded.
       crates are at 0.1.2, so `cargo install tpt-kinetix-cli` installs a build without the documented 0.2.0 features.
       Publish all 18 crates at 0.2.0 in dependency order. **Needs the maintainer's go-ahead** (irreversible; yank only).
+- [x] **`tpt-kinetix-ops` made publishable** (2026-11-08): the CLI depends on it, so publishing the CLI was blocked. `publish = true`; added to `release-plz.toml`, wave 4 in `PUBLISHING.md` and the README publish order. `cargo package --list --no-verify` lists the expected files. A full dry run waits for `core`/`demux`/`mux`/`package` 0.2.0 to be live, as with every crate in waves 3-5.
 - [x] `PUBLISHING.md` updated to the 0.2.0 state (2026-11-08): aligned version, crates.io status checked with a User-Agent header.
 
 ### B. Bugs and stale docs
@@ -38,6 +39,7 @@ worked in order; `[x]` means done in the tree, `[ ]` means still open, with the 
 - [x] Windows fuzzing path documented in CONTRIBUTING.md (WSL for libFuzzer; the native proptests still run on Windows).
 
 ### D. Found while doing the above (2026-11-08)
+- [x] READMEs and CHANGELOGs updated (2026-11-08): root CHANGELOG `[Unreleased]` covers the session; each published crate's CHANGELOG has a 0.2.0 version entry (crates already at 0.2.0 unchanged); stale "never published" notes fixed in ops, py and node; PyPI and npm status stated in their READMEs; quickstart commands checked against the CLI.
 - [x] Remux error for WebM output named no codec. Now names the codecs in the input and the ones WebM carries (`tpt-kinetix-ops/src/remux.rs`); checked 2026-11-08.
 - [ ] Safari / iOS native playback of fMP4 HLS (VP9 and AV1 especially): needs a device; not checked.
 - [ ] hls.js I-frame trick-play in a browser: not checked.

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Every workspace member is now at version 0.2.0, and internal dependency requirements match. Before this,
+  the versions were mixed (0.1.2, 0.1.3 and 0.2.0). Python (`pyproject.toml`) and Node (`package.json`)
+  packages are also 0.2.0. `Cargo.lock` changed only in version fields.
+- `tpt-kinetix-ops` is publishable (`publish = true`). The CLI depends on it, so the CLI could not be
+  published while it was private. It is in wave 4 of the publish order.
+- `remux` to WebM with no WebM-capable track now names the codecs in the input and the ones WebM
+  carries.
+- The Python package name `tpt-kinetix` and the npm name are approved. Neither is published yet.
+  PyPI needs a trusted publisher configured first. The npm package stays private until prebuilt
+  addons exist for each platform.
+
+### Added
+
+- A README quickstart with a sample command set and the expected `probe` output.
+- [What works with my files](docs/what-works-with-my-files.md): which containers and codecs each command
+  takes, checked on an H.264 + AAC MP4 (passthrough only, no decode).
+- [Player and browser compatibility](docs/compatibility.md): what each client was checked against, and
+  what was not (Safari, iOS and TV players are not checked).
+- `.github/workflows/pypi.yml`: a manual release workflow for the Python wheels and sdist, with
+  trusted publishing and an approval gate.
+- CONTRIBUTING.md: a Windows note on running fuzz targets under WSL.
+
+### Fixed
+
+- `docs/migrating-from-ffmpeg.md` listed thumbnails, WebVTT, CENC and Ogg output as missing. They are
+  available, so they moved to "Available now".
+- `docs/user-guide.md` said metadata and chapters were not carried across. Text tags and chapters carry to
+  WebM, and cover art carries only from MP4 to MP4.
+- `PUBLISHING.md` tracked 0.1.2 and gave an outdated crates.io status.
+
 ## [0.2.0](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.2.0) - 2026-11-07
 
 ### Added
