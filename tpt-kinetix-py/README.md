@@ -31,5 +31,7 @@ python -m unittest discover -s tests
 `tools/py-binding-test.sh` at the repository root builds a wheel, installs it into a
 fresh virtualenv, and runs the tests against ffmpeg-made media.
 
-This crate is not published to PyPI (`publish = false` in the workspace); the
-package name is reserved for the maintainer to decide.
+The PyPI name `tpt-kinetix` is approved, but the package is not published yet. The release workflow
+(`.github/workflows/pypi.yml`) builds wheels for Linux, macOS and Windows and publishes them with PyPI
+trusted publishing, once a trusted publisher is configured on PyPI and the workflow is run.
+Until then, build a wheel from this checkout with `maturin build --release -m tpt-kinetix-py/Cargo.toml`.

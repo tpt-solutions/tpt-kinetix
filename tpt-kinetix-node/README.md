@@ -32,4 +32,6 @@ The addon is a Cargo cdylib, built from the repository root with
 `index.js`, `index.d.ts`, `package.json` and the addon (as `native/tpt_kinetix_node.node`), packs the
 npm tarball, installs it into a clean project, and runs `test/test.cjs` against ffmpeg-made media.
 
-The package is `private` in `package.json` until the maintainer approves an npm name.
+The npm name is approved, but the package stays `private` in `package.json` until prebuilt addons are
+built in CI for each platform. A build from one machine would break installs on the others. Once that
+exists, remove the `private` field and publish.

@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Version set to 0.2.0 (`package.json`) with the rest of the workspace (2026-11-08).
+- The npm name is approved, but the package stays `private` until prebuilt addons are built for every platform in CI. Publishing one machine's build would break installs elsewhere.
+- Packed tarball installed into a clean project and the 7 binding tests run (`tools/node-binding-test.sh`).
+
 ### Added
 
 - Node.js bindings (napi-rs): `probe`, `faststart`, `remux` (with `fragmentMs`), `package` (returns a
