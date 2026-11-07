@@ -73,6 +73,10 @@ fn check_against_ffprobe(path: &Path) {
                 for key in ["width", "height"] {
                     assert_eq!(text(&a[key]), text(&b[key]), "{}: {key}", path.display());
                 }
+                // Where ffprobe names the sample format, ours must say the same.
+                if let Some(pf) = b.get("pix_fmt") {
+                    assert_eq!(text(&a["pix_fmt"]), text(pf), "{}: pix_fmt", path.display());
+                }
             }
             Some("audio") => {
                 for key in ["channels", "sample_rate"] {
