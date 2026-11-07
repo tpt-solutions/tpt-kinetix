@@ -493,9 +493,13 @@ fn write_output(
 ) -> Result<()> {
     match target {
         Target::Webm => {
+            let found: Vec<String> = streams.iter().map(|s| format!("{:?}", s.codec)).collect();
             let (kept, map) = select_streams(streams, webm_can_carry);
             if kept.is_empty() {
-                bail!("no AV1, VP9 or Opus track in the input");
+                bail!(
+                    "no track in the input can go into WebM (WebM carries AV1, VP9 and Opus; the input has: {})",
+                    found.join(", ")
+                );
             }
             let options = webm_options(&layout.meta);
             write_webm(&kept, &map, next, output, options)
