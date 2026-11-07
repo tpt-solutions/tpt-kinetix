@@ -24,9 +24,11 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | MKV / WebM demux | 🟡 Basic (whole buffer) + ✅ live | Whole-buffer reader is a subset; `MkvStream` is a streaming parser for **AV1 / VP9 / Opus** WebM (unknown-size clusters, any chunking, `av1C`/`vpcC`/`dOps` built for MP4) used by live ingest |
 | IVF demux | ✅ Works | Raw AV1/VP9 elementary streams (`.ivf`, `DKIF`): fourcc, geometry, per-frame ranges, key-frame-free seeking, truncated-tail tolerant. `probe` reads it, values match `ffprobe` |
 | MPEG-TS demux | ✅ Works | ⚖️ Royalty-free. PAT/PMT parsing, PES depacketization with PTS/DTS, PCR tracking; unlocks HLS/broadcast input. H.264 comes out Annex-B framed; round-trips through the HLS `TsMuxer` and matches `ffprobe` on real clips (`tpt-kinetix-demux`) |
-| MP4 mux / remux | ✅ Works | Multi-track passthrough writer (AV1, VP9, Opus, AAC, H.264/H.265, FLAC, AC-3...), faststart, fragmented MP4 / CMAF writer; `tpt-kinetix remux` (`tpt-kinetix-mux`). The old single-track `Mp4Muxer` remains |
-| HLS / DASH packaging | ✅ Works | `tpt-kinetix-package`: just-in-time HLS (fMP4) + DASH from an MP4 index over ranged reads (file, HTTP, or WASM `fetch`); `package` and `serve` commands; Worker example in `examples/edge-worker`. Verified frame-exact in ffmpeg and playing in hls.js/dash.js |
-| Live (AV1/VP9 + Opus) | ✅ Works | `tpt-kinetix live`: ingest by HTTP POST, WebSocket (browser `MediaRecorder`, page at `/publish`), WHIP (WebRTC, `--features whip`) or Enhanced RTMP (`--rtmp-port`, incl. multitrack video/audio, HDR `colorInfo`, v2 capability exchange); plays as live fMP4 HLS (low-latency parts, blocking reload) and dynamic DASH. Ingest hardening (tokens, per-key limits, idle/size/bitrate cut-offs, `/metrics`), DVR recording, HTTPS / `wss://` / RTMPS (`--tls-cert`, build with `--features tls`). See [tpt-kinetix-stream](tpt-kinetix-stream/README.md) and [todo-io.md](todo-io.md) |
+| MP4 mux / remux | ✅ Works | Multi-track passthrough writer (AV1, VP9, Opus, AAC, H.264/H.265, FLAC, AC-3...), faststart, fragmented MP4 / CMAF writer, CENC (`cenc` and `cbcs`, ClearKey); `tpt-kinetix remux` to MP4, WebM, IVF (one AV1/VP9 track) or Ogg/Opus (`tpt-kinetix-mux`). The old single-track `Mp4Muxer` remains |
+| WebM / MP4 metadata and subtitles | ✅ Works | WebVTT subtitle tracks through demux, mux and remux (MP4 `wvtt`, WebM `S_TEXT/WEBVTT`); track language and default/forced disposition in `probe`; MP4 text metadata, chapters and Matroska tags carry into WebM output |
+| HLS / DASH packaging | ✅ Works | `tpt-kinetix-package`: just-in-time HLS (fMP4) + DASH from an MP4 or WebM index over ranged reads (file, HTTP, or WASM `fetch`); WebVTT subtitle renditions, I-frame trick-play playlists, CENC ClearKey (`cenc`/`cbcs`), `LANGUAGE` on renditions; `package` and `serve` commands; Worker example in `examples/edge-worker`. Verified frame-exact in ffmpeg and playing in hls.js/dash.js, and CENC ClearKey plays in headless Chrome |
+| Live (AV1/VP9 + Opus) | ✅ Works | `tpt-kinetix live`: ingest by HTTP POST, WebSocket (browser `MediaRecorder`, page at `/publish`), WHIP (WebRTC, AV1 or VP9, `--features whip`) or Enhanced RTMP (`--rtmp-port`, incl. multitrack video/audio, HDR `colorInfo`, v2 capability exchange); plays as live fMP4 HLS (low-latency parts, LL-HLS subtitle parts, blocking reload) and dynamic DASH, with WebVTT subtitles from WebM ingest and optional CENC. Ingest hardening (tokens, per-key limits, idle/size/bitrate cut-offs, `/metrics`), DVR recording, HTTPS / `wss://` / RTMPS (`--tls-cert`, build with `--features tls`). See [tpt-kinetix-stream](tpt-kinetix-stream/README.md) and [todo-io.md](todo-io.md) |
+| Language bindings | ✅ Works | C ABI (`tpt-kinetix-ffi`, header `include/tpt_kinetix.h`), Python (`tpt-kinetix-py`, maturin) and Node.js (`tpt-kinetix-node`, napi-rs) for probe, faststart, remux and package, all calling the shared `tpt-kinetix-ops` crate. Tested in CI. None is published yet; the WASM packager's npm package is `private` |
 | H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 34 curated clips decode byte-exact vs the standard's reference YUV (0 failures; see [docs/CONFORMANCE.md](docs/CONFORMANCE.md)); remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, some hierarchical-B GOPs, 4:2:2/4:4:4) are tracked, not yet fixed. **Not published** — kept in-repo for reference only (`out-kinetix-h264`, `publish = false`; see [PATENTS.md](PATENTS.md)) |
 | AV1 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Intra and inter reconstruction, all transforms, deblock/CDEF/loop restoration, film grain, 4:2:0/4:2:2/4:4:4 and 8/10/12-bit. The official FFmpeg FATE AV1 set decodes 204/204 frames byte-exact vs libdav1d (`cargo run --release -p tpt-kinetix-av1 --example av1_fate_score`), and a libaom-encode → Kinetix-vs-dav1d crosscheck (`tpt-kinetix-av1/tests/libaom_crosscheck.rs`) covers far more than FATE does. `capabilities().pixel_exact == true`; results are tabulated in [docs/CONFORMANCE.md](docs/CONFORMANCE.md). Frames above the AV1 level 6.3 picture-size limit are refused before any plane is allocated (found by fuzzing). |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
@@ -35,7 +37,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization; **Enhanced RTMP** AV1/VP9 + Opus straight into live HLS (`live --rtmp-port`) |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
 | Original codecs | 🟡 Experimental | `lean`, `screen`, `realtime`, `vision`, `face`, `volumetric` and `lossless`: Kinetix-designed formats with no external reference decoder, pinned by golden vectors instead (see the note below). `lossless` is bit-exact and round-trips; `face` is synthesized by design; `volumetric` is not yet validated against the TMC13 oracle |
-| CLI | ✅ Works / 🟡 Partial | `probe` (MP4, MPEG-TS, Matroska/WebM, IVF; `--json` is ffprobe-shaped), `remux`, `package`, `serve`, `live`, and `stream` (older RTMP → TS HLS server) all work. `transcode --vcodec av1` runs the full demux → decode → encode pipeline, but VP9 is the only supported input (royalty-free `codec-vp9` path). `vision` decodes Vision bitstreams. See [tpt-kinetix-cli](tpt-kinetix-cli/README.md) |
+| CLI | ✅ Works / 🟡 Partial | `probe` (MP4, MPEG-TS, Matroska/WebM, IVF; `--json` is ffprobe-shaped), `remux`, `sanitize` (keeps only royalty-free streams from untrusted files), `doctor` (will it play in a browser?), `thumbnails` (keyframe PNGs and a contact sheet), `package`, `serve`, `live`, and `stream` (older RTMP → TS HLS server) all work. `transcode --vcodec av1` runs the full demux → decode → encode pipeline, but VP9 is the only supported input (royalty-free `codec-vp9` path). `vision` decodes Vision bitstreams. See [tpt-kinetix-cli](tpt-kinetix-cli/README.md) |
 
 > ⚠️ **Decode correctness:** The H.264, VP9 and AV1 decoders report
 > `pixel_exact: true` for their supported subsets (H.264: CAVLC/CABAC
@@ -121,7 +123,14 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-pipeline    — lock-free multi-stage processing pipeline
 │
-├── tpt-kinetix-cli         — `tpt-kinetix` binary: probe / remux / package / serve / live / transcode / stream
+├── tpt-kinetix-cli         — `tpt-kinetix` binary: probe / remux / sanitize / doctor / thumbnails / package /
+│                             serve / live / transcode / stream
+│
+├── tpt-kinetix-ops         — the container operations (probe JSON, remux, package) as a library, shared by
+│                             the CLI and the bindings (unpublished)
+│
+├── Language bindings       — tpt-kinetix-ffi (C ABI), tpt-kinetix-py (Python), tpt-kinetix-node (Node.js);
+│                             all unpublished for now
 │
 ├── Original codecs         — tpt-kinetix-lean, -screen, -realtime, -vision, -face, -volumetric, -lossless,
 │                             sharing tpt-kinetix-bitstream (BitReader, rANS)
@@ -215,6 +224,8 @@ cargo run -p tpt-kinetix-cli -- --help
 cargo run -p tpt-kinetix-cli -- remux in.mp4 out.mp4 --faststart
 cargo run -p tpt-kinetix-cli -- serve in.mp4          # HLS + DASH on http://127.0.0.1:8080
 cargo run -p tpt-kinetix-cli -- live --help           # live ingest -> HLS/DASH
+cargo run -p tpt-kinetix-cli -- doctor clip.webm      # will it play in a browser?
+cargo run -p tpt-kinetix-cli -- thumbnails clip.webm stills/ --count 6 --sprite-columns 3
 ```
 
 ### See it work: a 30-second demo
@@ -248,6 +259,7 @@ Every functional crate ships at least one runnable, self-contained example under
 | `cargo run -p tpt-kinetix-stream --example hls_segment` | Generate an HLS TS segment + `.m3u8` playlist |
 | `cargo run -p tpt-kinetix-stream --example live_server` | Run a live server: publish AV1/VP9 + Opus WebM, play as live HLS |
 | `cargo run -p tpt-kinetix-kg --example ingest_ffmpeg_h264 -- path/to/h264dec.c` | Ingest C source into a knowledge graph |
+| `bash examples/tasks/run-all.sh` | Six ffmpeg-replacement tasks: probe, remote probe, remux, package, sanitize an upload, live ingest ([examples/tasks](examples/tasks/README.md)) |
 
 ### Try it in your browser
 
@@ -269,7 +281,7 @@ All crates in this workspace share the same version number (monorepo style). Whe
 is made to any public API, **all** crates are bumped together. This keeps the dependency graph
 coherent and avoids mixed-version combinations.
 
-The current release is `v0.1.2`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). API stability is **not guaranteed** until `v1.0.0`.
+The current release is `v0.2.0`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). API stability is **not guaranteed** until `v1.0.0`.
 
 ### Publish order
 
@@ -284,7 +296,8 @@ dependency graph. In outline:
 4. `tpt-kinetix-stream` *(depends on `tpt-kinetix-package`)*
 5. `tpt-kinetix-cli` *(depends on pipeline, stream, package and the rest)*
 
-`out-kinetix-h264` and `tpt-kinetix-test-utils` are never published.
+`out-kinetix-h264` and `tpt-kinetix-test-utils` are never published. `tpt-kinetix-ops`, `tpt-kinetix-ffi`,
+`tpt-kinetix-py` and `tpt-kinetix-node` are `publish = false` for now.
 
 ### crates.io name reservation
 
