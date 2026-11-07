@@ -121,7 +121,12 @@ pub(crate) fn master(p: &Packager) -> String {
 /// (`cenc`, AES-CTR) with the ClearKey system, whose license is `key.json`.
 /// Empty for clear output, and for `cbcs`, which is not signalled in HLS yet.
 pub(crate) fn key_line(p: &Packager) -> String {
-    match p.encryption() {
+    key_line_for(p.encryption())
+}
+
+/// [`key_line`] for any packager: the static and the live one share it.
+pub(crate) fn key_line_for(enc: Option<&tpt_kinetix_mux::Encryption>) -> String {
+    match enc {
         Some(enc) if enc.scheme == tpt_kinetix_mux::cenc::Scheme::Cenc => {
             "#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,KEYFORMAT=\"org.w3.clearkey\",KEYFORMATVERSIONS=\"1\",URI=\"key.json\"\n".to_string()
         }

@@ -155,5 +155,12 @@ fn live_webm_subtitles_are_served_as_webvtt_segments() {
         "{first}"
     );
 
+    let mpd = get(port, "/cam/manifest.mpd").expect("the live MPD");
+    assert!(
+        mpd.contains("contentType=\"text\" mimeType=\"text/vtt\""),
+        "{mpd}"
+    );
+    assert!(mpd.contains("media=\"sub-0-$Number$.vtt\""), "{mpd}");
+    assert!(mpd.contains("<S t=\""), "{mpd}");
     let _ = std::fs::remove_dir_all(&dir);
 }

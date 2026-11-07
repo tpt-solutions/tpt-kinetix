@@ -108,6 +108,7 @@ fn case(name: &str, vcodec: &[&str], codec_prefix: &str) {
             segment_seconds: 2.0,
             window: 100,
             part_seconds: None,
+            encryption: None,
         },
     );
     assert!(all.is_finished() && all.is_ready());
@@ -161,6 +162,7 @@ fn case(name: &str, vcodec: &[&str], codec_prefix: &str) {
             segment_seconds: 1.0,
             window: 3,
             part_seconds: None,
+            encryption: None,
         },
     );
     let wsegs = win.latest_segment();
@@ -299,6 +301,7 @@ fn parts_publish_before_their_segment_and_reassemble() {
             segment_seconds: 2.0,
             window: 100,
             part_seconds: Some(1.0 / 3.0),
+            encryption: None,
         },
     );
     let pl = live.media_playlist(0).unwrap();
@@ -388,6 +391,7 @@ fn parts_of_the_segment_in_progress_are_visible() {
         segment_seconds: 2.0,
         window: 10,
         part_seconds: Some(1.0 / 3.0),
+        encryption: None,
     });
     let dir = std::env::temp_dir().join(format!("tpt_ll2_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -444,6 +448,7 @@ fn parts_fill_the_segment_evenly_and_completed_audio_segments_drop_their_tags() 
         segment_seconds: 2.0,
         window: 10,
         part_seconds: Some(1.0 / 3.0),
+        encryption: None,
     });
     feed(&webm, &mut live);
     let done = live.latest_segment();
@@ -499,6 +504,7 @@ fn live_latency_estimate_tracks_the_segment_in_progress() {
         segment_seconds: 2.0,
         window: 6,
         part_seconds: Some(1.0 / 3.0),
+        encryption: None,
     });
     assert_eq!(live.live_latency_secs(), None);
     let mut v = StreamInfo::new(0, CodecId::Av1, 90_000);
@@ -540,6 +546,7 @@ fn low_latency_dash_serves_cmaf_chunks_before_completion() {
             segment_seconds: 2.0,
             window: 100,
             part_seconds: Some(1.0 / 3.0),
+            encryption: None,
         },
     );
     let mpd = live.dash_mpd().unwrap();
@@ -556,6 +563,7 @@ fn low_latency_dash_serves_cmaf_chunks_before_completion() {
             segment_seconds: 2.0,
             window: 100,
             part_seconds: None,
+            encryption: None,
         },
     );
     let mpd = plain.dash_mpd().unwrap();
@@ -691,6 +699,7 @@ fn a_reconnecting_publisher_resumes_with_a_discontinuity() {
         segment_seconds: 2.0,
         window: 100,
         part_seconds: None,
+        encryption: None,
     };
 
     let mut live = LivePackager::new(opts);
@@ -754,6 +763,7 @@ fn a_reconnecting_publisher_resumes_with_a_discontinuity() {
         segment_seconds: 2.0,
         window: 2,
         part_seconds: None,
+        encryption: None,
     });
     feed(&webm, &mut small);
     small.finish().unwrap();
@@ -830,6 +840,7 @@ fn ll_playlist_tags_follow_the_spec() {
         segment_seconds: 1.0,
         window: 20,
         part_seconds: Some(1.0 / 3.0),
+        encryption: None,
     });
     let mut parser = MkvStream::new();
     for chunk in webm.chunks(4096) {
@@ -988,6 +999,7 @@ fn a_multi_rendition_ladder_is_packaged_per_rendition() {
             segment_seconds: 2.0,
             window: 100,
             part_seconds: None,
+            encryption: None,
         },
     );
     assert_eq!(

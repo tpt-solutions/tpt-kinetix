@@ -58,6 +58,9 @@ pub struct LiveOptions {
     /// Target partial-segment (`EXT-X-PART`) length in seconds. `None`
     /// disables parts and reverts to plain segment-latency HLS.
     pub part_seconds: Option<f64>,
+    /// CENC protection of the fMP4 fragments (`cenc` or `cbcs`, ClearKey). The
+    /// playlists then carry the key line and `key.json` serves the license.
+    pub encryption: Option<tpt_kinetix_mux::Encryption>,
 }
 
 impl Default for LiveOptions {
@@ -66,6 +69,7 @@ impl Default for LiveOptions {
             segment_seconds: 2.0,
             window: 6,
             part_seconds: Some(1.0 / 3.0),
+            encryption: None,
         }
     }
 }
@@ -89,6 +93,11 @@ struct Sample {
     key: bool,
     duration: Option<u32>,
     data: Vec<u8>,
+    /// The CENC IV: the track number in the top 16 bits and the sample's index in
+    /// its track below, so every sample of every fragment has its own IV. A sample
+    /// that lands in a part and again in its segment keeps the same IV, which is
+    /// safe because its plaintext is identical.
+    iv: u64,
 }
 
 struct Track {
@@ -96,6 +105,17 @@ struct Track {
     pending: Vec<Sample>,
     /// Next synthesised decode time (audio).
     next_dts: Option<u64>,
+    /// Samples accepted so far, for the CENC IV.
+    accepted: u64,
+}
+
+impl Track {
+    /// The CENC IV of the next accepted sample of track `number`.
+    fn next_iv(&mut self, number: usize) -> u64 {
+        let iv = ((number as u64) << 48) | self.accepted;
+        self.accepted += 1;
+        iv
+    }
 }
 
 /// A partial segment: an independently loadable fragment of the segment in
@@ -244,15 +264,17 @@ fn build_fragment(
     info: &StreamInfo,
     samples: &[Sample],
     sequence: u64,
+    encryption: Option<&tpt_kinetix_mux::Encryption>,
 ) -> Result<Vec<u8>, LiveError> {
     let mut info = info.clone();
     info.index = 0;
     let scale = info.timescale;
-    let mut w =
-        FragmentWriter::new(&[info])?.starting_sequence(sequence.min(u64::from(u32::MAX)) as u32);
+    let mut w = FragmentWriter::new(&[info])?
+        .with_encryption(encryption.cloned())?
+        .starting_sequence(sequence.min(u64::from(u32::MAX)) as u32);
     for s in samples {
         let tb = (1, scale);
-        w.push(
+        w.push_with_iv(
             &Packet {
                 pts: Timestamp::new(s.dts as i64 + i64::from(s.cts), tb),
                 dts: Timestamp::new(s.dts as i64, tb),
@@ -261,6 +283,7 @@ fn build_fragment(
                 is_key_frame: s.key,
             },
             s.duration,
+            s.iv,
         )?;
     }
     w.flush(true)?
@@ -409,6 +432,7 @@ impl LivePackager {
                 info,
                 pending: Vec::new(),
                 next_dts: None,
+                accepted: 0,
             });
         }
         if tracks.is_empty() {
@@ -544,12 +568,14 @@ impl LivePackager {
             return Ok(());
         }
         self.tracks[stream].next_dts = Some(dts);
+        let iv = self.tracks[stream].next_iv(stream);
         self.tracks[stream].pending.push(Sample {
             dts,
             cts: 0,
             key,
             duration: duration_ms.map(|d| d * 90),
             data,
+            iv,
         });
         Ok(())
     }
@@ -583,12 +609,14 @@ impl LivePackager {
         } else if t.pending.len() >= 512 {
             t.pending.remove(0);
         }
+        let iv = t.next_iv(stream);
         t.pending.push(Sample {
             dts,
             cts: 0,
             key: true,
             duration: Some(dur),
             data,
+            iv,
         });
     }
 
@@ -635,6 +663,7 @@ impl LivePackager {
                 &t.info,
                 &taken,
                 part_sequence(number, self.part_index),
+                self.opts.encryption.as_ref(),
             )?);
             self.part_samples[i].extend(taken);
             self.parts[i].push(Part {
@@ -730,11 +759,21 @@ impl LivePackager {
             if tail_only {
                 let mut bytes = part_bytes;
                 if !tail.is_empty() {
-                    bytes.extend(build_fragment(&t.info, &tail, part_sequence(number, 999))?);
+                    bytes.extend(build_fragment(
+                        &t.info,
+                        &tail,
+                        part_sequence(number, 999),
+                        self.opts.encryption.as_ref(),
+                    )?);
                 }
                 data.push(Some(Arc::new(bytes)));
             } else {
-                data.push(Some(Arc::new(build_fragment(&t.info, &current, number)?)));
+                data.push(Some(Arc::new(build_fragment(
+                    &t.info,
+                    &current,
+                    number,
+                    self.opts.encryption.as_ref(),
+                )?)));
             }
         }
         let discontinuity = std::mem::take(&mut self.pending_discontinuity);
@@ -836,6 +875,12 @@ impl LivePackager {
         self.tracks.len()
     }
 
+    /// The ClearKey license (`key.json`) for the protected tracks, or `None` for
+    /// clear output. The same key set [`crate::Packager::clearkey_license`] serves.
+    pub fn clearkey_license(&self) -> Option<String> {
+        self.opts.encryption.as_ref().map(crate::clearkey_json)
+    }
+
     /// The init segment of `track`, available as soon as the first segment is.
     pub fn init_segment(&self, track: usize) -> Option<Vec<u8>> {
         if !self.is_ready() {
@@ -843,7 +888,11 @@ impl LivePackager {
         }
         let mut info = self.tracks.get(track)?.info.clone();
         info.index = 0;
-        FragmentWriter::new(&[info]).ok().map(|w| w.init_segment())
+        FragmentWriter::new(&[info])
+            .ok()?
+            .with_encryption(self.opts.encryption.clone())
+            .ok()
+            .map(|w| w.init_segment())
     }
 
     /// Segment `number` of `track`, if still in the retained window.
@@ -998,8 +1047,9 @@ impl LivePackager {
             }
             start = keep_from;
         }
+        let key = crate::hls::key_line_for(self.opts.encryption.as_ref());
         let mut out = format!(
-            "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
+            "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXT-X-INDEPENDENT-SEGMENTS\n{key}#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
             max.ceil() as u64,
             first.number,
         );
@@ -1422,6 +1472,9 @@ impl LivePackager {
                 "    <AdaptationSet id=\"0\" contentType=\"video\" segmentAlignment=\"true\" \
                  startWithSAP=\"1\" mimeType=\"video/mp4\">"
             );
+            out.push_str(&crate::dash::content_protection(
+                self.opts.encryption.as_ref(),
+            ));
             for &i in &videos {
                 representation(&mut out, i)?;
             }
@@ -1437,9 +1490,63 @@ impl LivePackager {
                 "    <AdaptationSet id=\"{set_id}\" contentType=\"audio\" segmentAlignment=\"true\" \
                  startWithSAP=\"1\" mimeType=\"audio/mp4\">"
             );
+            out.push_str(&crate::dash::content_protection(
+                self.opts.encryption.as_ref(),
+            ));
             set_id += 1;
             representation(&mut out, i)?;
             let _ = writeln!(out, "    </AdaptationSet>");
+        }
+        // WebVTT text sets: one AdaptationSet per subtitle track, on the same
+        // segment grid as the A/V sets (a millisecond timeline) and with the same
+        // numbers as the HLS `sub-{k}-{n}.vtt` segments.
+        let window: Vec<&Segment> = self.window().collect();
+        if let Some(first) = window.first() {
+            for k in 0..self.subs.len() {
+                let lang = self.subs[k]
+                    .language
+                    .as_deref()
+                    .map(|l| format!(" lang=\"{}\"", escape_xml(l)))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    out,
+                    "    <AdaptationSet id=\"{set_id}\" contentType=\"text\" mimeType=\"text/vtt\"{lang}>"
+                );
+                let (mut bytes, mut secs) = (0usize, 0.0f64);
+                for s in &window {
+                    bytes += self.subtitle_segment(k, s.number).map_or(0, |b| b.len());
+                    secs += (s.end_ms - s.start_ms).max(0) as f64 / 1000.0;
+                }
+                let bandwidth = if secs > 0.0 {
+                    (bytes as f64 * 8.0 / secs) as u64
+                } else {
+                    0
+                };
+                let _ = writeln!(
+                    out,
+                    "      <Representation id=\"sub-{k}\" codecs=\"wvtt\" bandwidth=\"{}\">",
+                    bandwidth.max(1)
+                );
+                let _ = writeln!(
+                    out,
+                    "        <SegmentTemplate timescale=\"1000\" media=\"sub-{k}-$Number$.vtt\" startNumber=\"{}\">",
+                    first.number
+                );
+                let _ = writeln!(out, "          <SegmentTimeline>");
+                for s in &window {
+                    let _ = writeln!(
+                        out,
+                        "            <S t=\"{}\" d=\"{}\"/>",
+                        s.start_ms.max(0),
+                        (s.end_ms - s.start_ms).max(0)
+                    );
+                }
+                let _ = writeln!(out, "          </SegmentTimeline>");
+                let _ = writeln!(out, "        </SegmentTemplate>");
+                let _ = writeln!(out, "      </Representation>");
+                let _ = writeln!(out, "    </AdaptationSet>");
+                set_id += 1;
+            }
         }
         out.push_str("  </Period>\n</MPD>\n");
         Some(out)

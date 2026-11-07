@@ -16,6 +16,21 @@ fn lang_attr(lang: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// The `ContentProtection` elements of one AdaptationSet: CENC (`cenc` or `cbcs`)
+/// with the ClearKey system, which names the key ID. Empty for clear output.
+pub(crate) fn content_protection(enc: Option<&tpt_kinetix_mux::Encryption>) -> String {
+    let Some(enc) = enc else {
+        return String::new();
+    };
+    let fourcc = enc.scheme.fourcc();
+    let scheme = std::str::from_utf8(&fourcc).unwrap_or("cenc");
+    format!(
+        "      <ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" value=\"{scheme}\" xmlns:cenc=\"urn:mpeg:cenc:2013\" cenc:default_KID=\"{}\"/>\n\
+         \x20     <ContentProtection schemeIdUri=\"urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e\" value=\"ClearKey1.0\"/>\n",
+        uuid(&enc.key_id)
+    )
+}
+
 /// A key ID in the 8-4-4-4-12 UUID form that `cenc:default_KID` uses.
 fn uuid(id: &[u8; 16]) -> String {
     let h = tpt_kinetix_mux::cenc::hex(id);
@@ -56,20 +71,7 @@ pub(crate) fn mpd(p: &Packager) -> String {
             "    <AdaptationSet id=\"{i}\" contentType=\"{kind}\" segmentAlignment=\"true\" startWithSAP=\"1\" mimeType=\"{kind}/mp4\"{}>",
             lang_attr(s.language.as_deref())
         );
-        if let Some(enc) = p.encryption() {
-            // CENC (`cenc` scheme) with the ClearKey system, which names the key ID.
-            let fourcc = enc.scheme.fourcc();
-            let scheme = std::str::from_utf8(&fourcc).unwrap_or("cenc");
-            let _ = writeln!(
-                out,
-                "      <ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" value=\"{scheme}\" xmlns:cenc=\"urn:mpeg:cenc:2013\" cenc:default_KID=\"{}\"/>",
-                uuid(&enc.key_id)
-            );
-            let _ = writeln!(
-                out,
-                "      <ContentProtection schemeIdUri=\"urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e\" value=\"ClearKey1.0\"/>"
-            );
-        }
+        out.push_str(&content_protection(p.encryption()));
         let (mut bytes, mut secs) = (0u64, 0.0f64);
         for seg in &p.plan().segments {
             bytes += p.range_bytes(i, &seg.samples[i]);

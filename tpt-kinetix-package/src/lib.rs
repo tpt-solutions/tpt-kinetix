@@ -111,6 +111,16 @@ impl From<tpt_kinetix_core::error::KinetixError> for PackageError {
     }
 }
 
+/// The ClearKey JSON Web Key set for `enc`: the key ID and the key, each base64url
+/// without padding. Shared by the static and the live packager.
+pub(crate) fn clearkey_json(enc: &tpt_kinetix_mux::Encryption) -> String {
+    format!(
+        "{{\"keys\":[{{\"kty\":\"oct\",\"kid\":\"{}\",\"k\":\"{}\"}}]}}",
+        base64url(&enc.key_id),
+        base64url(&enc.key)
+    )
+}
+
 /// Base64url (RFC 4648 section 5) without padding.
 fn base64url(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -287,12 +297,7 @@ impl Packager {
     /// clear output. It is the JSON Web Key set that ClearKey players expect: the
     /// key ID and the key, each base64url without padding.
     pub fn clearkey_license(&self) -> Option<String> {
-        let enc = self.opts.encryption.as_ref()?;
-        Some(format!(
-            "{{\"keys\":[{{\"kty\":\"oct\",\"kid\":\"{}\",\"k\":\"{}\"}}]}}",
-            base64url(&enc.key_id),
-            base64url(&enc.key)
-        ))
+        self.opts.encryption.as_ref().map(clearkey_json)
     }
 
     /// RFC 6381 codec string of packaged track `track`.

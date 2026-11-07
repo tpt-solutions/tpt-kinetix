@@ -166,6 +166,17 @@ enum Commands {
         /// (`EXT-X-PART` + blocking playlist reload); 0 disables parts.
         #[arg(long, default_value_t = 0.333)]
         part_seconds: f64,
+        /// CENC key ID (32 hex digits) to protect the fMP4 segments with ClearKey.
+        /// Needs `--cenc-key`. The playlists carry the key line and `/<key>/key.json`
+        /// serves the license.
+        #[arg(long, requires = "cenc_key")]
+        cenc_key_id: Option<String>,
+        /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
+        #[arg(long, requires = "cenc_key_id")]
+        cenc_key: Option<String>,
+        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        #[arg(long, default_value = "cenc")]
+        cenc_scheme: String,
         /// Listen on all interfaces instead of localhost only.
         #[arg(long)]
         public: bool,
@@ -402,6 +413,9 @@ async fn main() -> Result<()> {
             segment_seconds,
             window,
             part_seconds,
+            cenc_key_id,
+            cenc_key,
+            cenc_scheme,
             public,
             rtmp_port,
             publish_token,
@@ -424,10 +438,16 @@ async fn main() -> Result<()> {
             println!(
                 "live server on {scheme}://{host}:{port}\n  publish: POST a WebM (AV1/VP9 + Opus) to /ingest/<key>\n  play   : {scheme}://{host}:{port}/<key>/master.m3u8"
             );
+            let encryption = tpt_kinetix_ops::encryption_from_hex(
+                cenc_key_id.as_deref(),
+                cenc_key.as_deref(),
+                &cenc_scheme,
+            )?;
             let server = tpt_kinetix_stream::LiveServer::new(tpt_kinetix_package::LiveOptions {
                 segment_seconds,
                 window,
                 part_seconds: (part_seconds > 0.0).then_some(part_seconds),
+                encryption,
             })
             .with_policy(tpt_kinetix_stream::IngestPolicy {
                 token: publish_token,

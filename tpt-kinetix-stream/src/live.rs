@@ -360,6 +360,14 @@ impl LiveServer {
                 }
                 respond(r.get_mut(), reply, method == "HEAD").await
             }
+            "POST" if path.ends_with("/key.json") => {
+                // The license request a ClearKey player sends (hls.js POSTs it).
+                let reply = match path.trim_start_matches('/').strip_suffix("/key.json") {
+                    Some(key) if valid_key(key) => self.license(key),
+                    _ => Reply::text(404, "expected /<key>/key.json"),
+                };
+                respond_drained(&mut r, &headers, reply).await
+            }
             "POST" | "PUT" => {
                 let Some(key) = path.strip_prefix("/ingest/").filter(|k| valid_key(k)) else {
                     return respond_drained(
@@ -383,6 +391,19 @@ impl LiveServer {
             }
             "OPTIONS" => respond(r.get_mut(), Reply::text(204, ""), false).await,
             _ => respond(r.get_mut(), Reply::text(405, "method not allowed"), false).await,
+        }
+    }
+
+    /// The ClearKey license of stream `key` (`key.json`): the same key set for GET
+    /// and POST, because players request it either way. A clear stream has none.
+    fn license(&self, key: &str) -> Reply {
+        let Some(live) = self.streams.lock_recover().get(key).cloned() else {
+            return Reply::text(404, "no such stream");
+        };
+        let license = live.lock_recover().clearkey_license();
+        match license {
+            Some(body) => Reply::json(body.into_bytes()),
+            None => Reply::text(404, "this stream is not protected"),
         }
     }
 
@@ -425,6 +446,9 @@ impl LiveServer {
         };
         let num = |s: &str| s.parse::<usize>().ok();
         let not_ready = || Reply::text(404, "the stream is not ready yet; retry shortly");
+        if name == "key.json" {
+            return self.license(key);
+        }
         if name == "master.m3u8" {
             return live
                 .lock_recover()
