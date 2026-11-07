@@ -16,6 +16,10 @@ const init = pk.initSegment(0);            // init-0.mp4
 const seg = await pk.mediaSegment(0, 1);   // seg-0-1.m4s
 ```
 
+Subtitles and trick-play are included: `pk.subtitleCount`, `pk.subtitleMediaPlaylist(k)` and
+`await pk.subtitleSegment(k, n)` for WebVTT tracks, and `await pk.iframePlaylist(v)` and
+`await pk.iframeFile(v)` for the I-frame playlist and file of video track `v`.
+
 `probe_mp4(bytes)` returns the track list of an in-memory MP4 as a JSON string.
 
 Not included: WebM input (use the native packager), encryption, and remux. Remux is

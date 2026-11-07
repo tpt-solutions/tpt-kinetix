@@ -4,7 +4,12 @@ Shared types that flow between all Kinetix crates. Pure Rust, no OS or threading
 dependencies, so it also builds for `wasm32-unknown-unknown`.
 
 - `VideoFrame`, `PointCloud` — decoded media (`frame`)
-- `Packet`, `StreamInfo` — encoded data and per-track description (`packet`, `stream`)
+- `Packet`, `StreamInfo` — encoded data and per-track description (`packet`, `stream`).
+  `StreamInfo` carries the track's `language`, its `Disposition` (default and forced
+  flags) and, for video, the colour description (`VideoColor`, `Nclx`, `MasteringDisplay`)
+- `webvtt` — WebVTT cue conversion shared by the containers: MP4 `vttc` cue boxes and
+  Matroska text blocks
+
 - `Timestamp` — rational media timestamps
 - `CodecId`, `MediaType`, `PixelFormat` — codec and format identifiers
 - `EncodeConfig`, `RateControl`, `SpeedPreset` — codec-agnostic encoder settings

@@ -18,8 +18,10 @@ quickstart guide.
 - **Live server** (`LiveServer`) — turns publishers into live HLS (fMP4, with
   low-latency parts and blocking playlist reload) and dynamic DASH. Ingest by
   HTTP `POST`/`PUT /ingest/<key>`, WebSocket (a browser publishes
-  `MediaRecorder` chunks; ready-made page at `/publish`), WHIP (`whip` feature)
-  or RTMP (`LiveServer::rtmp_server`). Optional DVR recording, and
+  `MediaRecorder` chunks; ready-made page at `/publish`), WHIP (`whip` feature,
+  AV1 or VP9 over WebRTC) or RTMP (`LiveServer::rtmp_server`). WebM ingest that carries
+  WebVTT subtitles becomes subtitle renditions, with LL-HLS subtitle parts. Optional CENC
+  (ClearKey) encryption of the output, DVR recording, and
   HTTPS / `wss://` with `LiveServer::with_tls` (`rtmps` feature).
 - **Ingest hardening** (`IngestPolicy`) — publish tokens (global and per key),
   idle / duration / byte / bitrate cut-offs (global, with per-key overrides in
@@ -48,8 +50,8 @@ low-latency mode is written up in [todo-io.md](../todo-io.md).
 
 ## Status & limitations
 
-- Codecs are the royalty-free set: AV1 and VP9 video, Opus audio. Other
-  codecs are logged and ignored.
+- Codecs are the royalty-free set: AV1 and VP9 video, Opus audio, and WebVTT
+  subtitles from WebM. Other codecs are logged and ignored.
 - Not implemented: `permessage-deflate` for WebSockets, publishing from
   browsers whose `MediaRecorder` cannot produce AV1/VP9 WebM, HDR
   `fullRange` signalling.

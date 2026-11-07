@@ -4,15 +4,18 @@ Container demuxers exposing a uniform packet-extraction API via the `Demuxer`
 trait.
 
 - **MP4 / ISO-BMFF** (`mp4`) — full box parser, track/codec identification,
-  sample-table timing, packet extraction.
-- **Matroska / WebM** (`mkv`, `mkv_reader`, `mkv_stream`) — `MkvDemuxer` is a basic
+  sample-table timing, packet extraction. Reads each track's language (`mdhd`) and
+  its default/forced disposition, and WebVTT subtitle tracks (`wvtt`/`vttc`).
+  Codec configuration records are rebuilt for MP4 and WebM inputs that lack them.
+- **Matroska / WebM** (`mkv`, `mkv_reader`, `mkv_stream`, `mkv_metadata`) — `MkvDemuxer` is a basic
   whole-buffer EBML reader (track enumeration, SimpleBlock/Block extraction, no advanced
   lacing). `MkvReader` is indexed and works over a `ReadAt` source, with the `Cues`
   index parsed. `MkvStream` is an incremental (sans-IO) parser for live AV1 / VP9 / Opus
   WebM: unknown-size segments and clusters, any chunk boundaries, and `av1C` / `vpcC` /
-  `dOps` records built for MP4.
+  `dOps` records built for MP4. WebVTT tracks (`S_TEXT/WEBVTT`) are read, and `mkv_metadata`
+  reads tags, the title and chapters.
 - **IVF** (`ivf`) — raw AV1/VP9 elementary streams (`DKIF`): fourcc, geometry,
-  per-frame ranges, seeking by key frame.
+  per-frame ranges, key frames read from the bitstream, seeking by key frame.
 - **MPEG-TS** (`ts`) — 188-byte packet sync/re-sync, PAT/PMT parsing
   (including multi-packet PSI sections), PES depacketization with PTS/DTS
   recovery, PCR tracking, and adaptation-field random-access indicators for
