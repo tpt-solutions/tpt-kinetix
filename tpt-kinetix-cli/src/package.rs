@@ -10,7 +10,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use tpt_kinetix_demux::{block_on, Blocking, ReadAt};
@@ -88,70 +87,24 @@ fn build_segment(p: &Packager, source: &dyn ReadAt, track: usize, n: usize) -> R
 }
 
 /// Writes `master.m3u8`, `track-*.m3u8`, `init-*.mp4`, `seg-*.m4s` and `manifest.mpd` into `out`.
+/// The work is done by `tpt-kinetix-ops`, which the bindings share; this prints the summary.
 pub fn package(
     input: &str,
     out: &Path,
     segment_seconds: f64,
     encryption: Option<tpt_kinetix_mux::Encryption>,
 ) -> Result<()> {
-    let started = Instant::now();
-    with_packager(input, segment_seconds, encryption, |p, source| {
-        std::fs::create_dir_all(out)
-            .with_context(|| format!("failed to create {}", out.display()))?;
-        std::fs::write(out.join("master.m3u8"), p.hls_master())?;
-        std::fs::write(out.join("manifest.mpd"), p.dash_mpd())?;
-        let (mut files, mut bytes) = (2usize, 0u64);
-        for t in 0..p.streams().len() {
-            std::fs::write(out.join(format!("track-{t}.m3u8")), p.hls_media(t)?)?;
-            let init = p.init_segment(t)?;
-            bytes += init.len() as u64;
-            std::fs::write(out.join(format!("init-{t}.mp4")), init)?;
-            files += 2;
-            for n in 1..=p.segment_count() {
-                if p.plan().segments[n - 1].samples[t].is_empty() {
-                    continue;
-                }
-                let seg = build_segment(&p, &*source, t, n)?;
-                bytes += seg.len() as u64;
-                std::fs::write(out.join(format!("seg-{t}-{n}.m4s")), seg)?;
-                files += 1;
-            }
-        }
-        // Trick-play: one I-frame rendition per video track.
-        for t in 0..p.streams().len() {
-            if p.streams()[t].media_type != tpt_kinetix_core::codec::MediaType::Video {
-                continue;
-            }
-            let rendition = block_on(p.iframe_rendition(&Blocking(&*source), t))?;
-            bytes += rendition.file.len() as u64;
-            std::fs::write(out.join(format!("iframes-{t}.m4s")), &rendition.file)?;
-            std::fs::write(
-                out.join(format!("iframes-{t}.m3u8")),
-                p.iframe_playlist(t, &rendition)?,
-            )?;
-            files += 2;
-        }
-        for k in 0..p.subtitle_count() {
-            let playlist = p.subtitle_media_playlist(k).unwrap_or_default();
-            std::fs::write(out.join(format!("subs-{k}.m3u8")), playlist)?;
-            files += 1;
-            for n in 1..=p.segment_count() {
-                let vtt = block_on(p.subtitle_segment(&Blocking(&*source), k, n))?;
-                bytes += vtt.len() as u64;
-                std::fs::write(out.join(format!("sub-{k}-{n}.vtt")), vtt)?;
-                files += 1;
-            }
-        }
-        println!(
-            "packaged {} track(s) into {} segment(s) each: {files} files, {:.1} MiB, {:.2}s -> {}",
-            p.streams().len(),
-            p.segment_count(),
-            bytes as f64 / (1 << 20) as f64,
-            started.elapsed().as_secs_f64(),
-            out.display()
-        );
-        Ok(())
-    })
+    let done = tpt_kinetix_ops::package::package(input, out, segment_seconds, encryption)?;
+    println!(
+        "packaged {} track(s) into {} segment(s) each: {} files, {:.1} MiB, {:.2}s -> {}",
+        done.tracks,
+        done.segments,
+        done.files,
+        done.bytes as f64 / (1 << 20) as f64,
+        done.elapsed.as_secs_f64(),
+        out.display()
+    );
+    Ok(())
 }
 
 /// Serves the stream just-in-time on `127.0.0.1:port` (or `0.0.0.0` with `public`).
@@ -184,10 +137,14 @@ pub fn serve(
     })
 }
 
+/// One track's trick-play rendition, once it has been built.
+type IFrameSlot = Mutex<Option<Arc<tpt_kinetix_package::IFrameRendition>>>;
+
 /// Trick-play renditions built so far, per video track. Shared by the serve
-/// threads, so each rendition is built once rather than on every request.
+/// threads: each track has a slot, so a rendition is built once, and only requests
+/// for that track wait while it is being built.
 #[derive(Default)]
-struct IFrameCache(Mutex<HashMap<usize, Arc<tpt_kinetix_package::IFrameRendition>>>);
+struct IFrameCache(Mutex<HashMap<usize, Arc<IFrameSlot>>>);
 
 /// The I-frame rendition of video track `t`, from the cache when it is there.
 fn iframe_rendition(
@@ -196,14 +153,16 @@ fn iframe_rendition(
     cache: &IFrameCache,
     t: usize,
 ) -> Result<Arc<tpt_kinetix_package::IFrameRendition>> {
-    let lock = || cache.0.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(r) = lock().get(&t) {
+    let slot = {
+        let mut slots = cache.0.lock().unwrap_or_else(|e| e.into_inner());
+        slots.entry(t).or_default().clone()
+    };
+    let mut built_for_track = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = built_for_track.as_ref() {
         return Ok(r.clone());
     }
-    // Two requests can race and both build it; the second insert wins, and the
-    // bytes are identical either way.
     let built = Arc::new(block_on(p.iframe_rendition(&Blocking(source), t))?);
-    lock().insert(t, built.clone());
+    *built_for_track = Some(built.clone());
     Ok(built)
 }
 
@@ -222,6 +181,11 @@ fn route(p: &Packager, source: &dyn ReadAt, cache: &IFrameCache, path: &str) -> 
                 "application/vnd.apple.mpegurl",
                 p.hls_master().into_bytes(),
             ));
+        }
+        if name == "key.json" {
+            if let Some(license) = p.clearkey_license() {
+                return Ok(Reply::Ok("application/json", license.into_bytes()));
+            }
         }
         if name == "manifest.mpd" {
             return Ok(Reply::Ok("application/dash+xml", p.dash_mpd().into_bytes()));
@@ -331,7 +295,10 @@ fn handle(
     let mut parts = request_line.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
     let path = target.split('?').next().unwrap_or("/");
-    let (status, ctype, body) = if method != "GET" && method != "HEAD" {
+    // A ClearKey player POSTs its license request to the license URL; the license
+    // is the same key set `key.json` serves on GET, so that path takes POST too.
+    let license_post = method == "POST" && path.trim_start_matches('/') == "key.json";
+    let (status, ctype, body) = if method != "GET" && method != "HEAD" && !license_post {
         (
             "405 Method Not Allowed",
             "text/plain",

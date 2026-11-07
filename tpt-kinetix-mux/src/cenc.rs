@@ -22,6 +22,10 @@ use crate::MuxError;
 
 type Aes128Ctr = ctr::Ctr64BE<Aes128>;
 
+/// The pattern of `cbcs-pattern`: encrypt 1 block, skip 9.
+const PATTERN_CRYPT: usize = 1;
+const PATTERN_SKIP: usize = 9;
+
 /// The CENC protection scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Scheme {
@@ -30,6 +34,10 @@ pub enum Scheme {
     Cenc,
     /// AES-128-CBC, 16-byte IVs (the `cbcs` scheme, no pattern).
     Cbcs,
+    /// The `cbcs` scheme with the 1:9 pattern: the first 16-byte block of every
+    /// ten is encrypted and nine are left clear, which is what HLS and most
+    /// players expect for video.
+    CbcsPattern,
 }
 
 impl Scheme {
@@ -38,6 +46,7 @@ impl Scheme {
         match s.to_ascii_lowercase().as_str() {
             "cenc" => Some(Scheme::Cenc),
             "cbcs" => Some(Scheme::Cbcs),
+            "cbcs-pattern" => Some(Scheme::CbcsPattern),
             _ => None,
         }
     }
@@ -46,7 +55,7 @@ impl Scheme {
     pub fn fourcc(self) -> [u8; 4] {
         match self {
             Scheme::Cenc => *b"cenc",
-            Scheme::Cbcs => *b"cbcs",
+            Scheme::Cbcs | Scheme::CbcsPattern => *b"cbcs",
         }
     }
 
@@ -54,7 +63,7 @@ impl Scheme {
     pub fn iv_len(self) -> usize {
         match self {
             Scheme::Cenc => 8,
-            Scheme::Cbcs => 16,
+            Scheme::Cbcs | Scheme::CbcsPattern => 16,
         }
     }
 }
@@ -122,6 +131,26 @@ pub fn apply_cbc_encrypt(key: &[u8; 16], iv: [u8; 16], data: &mut [u8]) {
     }
 }
 
+/// Encrypts the pattern blocks of `data` in place with AES-CBC: of every
+/// `crypt + skip` complete 16-byte blocks, the first `crypt` are encrypted and the
+/// rest are left clear. The chain runs over the encrypted blocks only, starting from
+/// `iv`, so a skipped block does not feed the next one.
+pub fn apply_cbc_pattern(key: &[u8; 16], iv: [u8; 16], data: &mut [u8], crypt: usize, skip: usize) {
+    let cipher = Aes128::new(key.into());
+    let mut prev = iv;
+    let period = crypt + skip;
+    for (i, block) in data.chunks_exact_mut(16).enumerate() {
+        if i % period >= crypt {
+            continue;
+        }
+        for (b, p) in block.iter_mut().zip(prev.iter()) {
+            *b ^= p;
+        }
+        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+        prev.copy_from_slice(block);
+    }
+}
+
 /// The per-sample CBC IV for a counter value: the AES encryption of the counter
 /// block, so the IV is unique for each sample and not predictable without the key.
 pub fn cbc_iv(key: &[u8; 16], counter: u64) -> [u8; 16] {
@@ -144,6 +173,11 @@ pub fn protect_sample(enc: &Encryption, counter: u64, data: &mut [u8]) -> Vec<u8
         Scheme::Cbcs => {
             let iv = cbc_iv(&enc.key, counter);
             apply_cbc_encrypt(&enc.key, iv, data);
+            iv.to_vec()
+        }
+        Scheme::CbcsPattern => {
+            let iv = cbc_iv(&enc.key, counter);
+            apply_cbc_pattern(&enc.key, iv, data, PATTERN_CRYPT, PATTERN_SKIP);
             iv.to_vec()
         }
     }
@@ -170,6 +204,13 @@ pub fn protect_entry(entry: &[u8], audio: bool, enc: &Encryption) -> Result<Vec<
             b.extend_from_slice(&enc.key_id);
             full_box(b"tenc", 1, 0, &b)
         }
+        Scheme::CbcsPattern => {
+            // The second byte is default_crypt_byte_block << 4 | default_skip_byte_block.
+            let pattern = ((PATTERN_CRYPT as u8) << 4) | PATTERN_SKIP as u8;
+            let mut b = vec![0u8, pattern, 1, enc.scheme.iv_len() as u8];
+            b.extend_from_slice(&enc.key_id);
+            full_box(b"tenc", 1, 0, &b)
+        }
     };
     let mut schm_body = enc.scheme.fourcc().to_vec();
     schm_body.extend_from_slice(&0x0001_0000u32.to_be_bytes());
@@ -188,8 +229,38 @@ pub fn protect_entry(entry: &[u8], audio: bool, enc: &Encryption) -> Result<Vec<
     Ok(boxed(kind, &body))
 }
 
+/// The ClearKey `pssh` box (system ID `1077efec-c0b2-4d02-ace3-3c1e52e2fb4b`,
+/// version 1) naming one key ID. Players fire their encrypted event for it: an
+/// HLS player (hls.js) only creates a key session when it sees a `pssh`.
+pub fn pssh_clearkey(key_id: &[u8; 16]) -> Vec<u8> {
+    let mut body = vec![
+        0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02, 0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2, 0xfb,
+        0x4b,
+    ];
+    body.extend_from_slice(&1u32.to_be_bytes()); // KID_count
+    body.extend_from_slice(key_id);
+    body.extend_from_slice(&0u32.to_be_bytes()); // Data_size
+    full_box(b"pssh", 1, 0, &body)
+}
+
 /// The `senc` box for one fragment's samples: one IV per sample (each of the
 /// scheme's IV length), no subsample map.
+/// `senc` with one subsample per sample, the whole sample protected (clear 0
+/// bytes, encrypted `size`). A pattern scheme is applied within the protected
+/// bytes of each subsample, so this is what makes the 1:9 pattern apply to a
+/// whole VP9 or AV1 sample. ffmpeg decrypts that form, and ignores the pattern
+/// for a sample with no subsample map.
+pub fn senc_with_subsamples(ivs: &[Vec<u8>], sizes: &[usize]) -> Vec<u8> {
+    let mut body = (ivs.len() as u32).to_be_bytes().to_vec();
+    for (iv, size) in ivs.iter().zip(sizes) {
+        body.extend_from_slice(iv);
+        body.extend_from_slice(&1u16.to_be_bytes()); // subsample_count
+        body.extend_from_slice(&0u16.to_be_bytes()); // bytes_of_clear_data
+        body.extend_from_slice(&(*size as u32).to_be_bytes()); // bytes_of_protected_data
+    }
+    full_box(b"senc", 0, 0x2, &body)
+}
+
 pub fn senc(ivs: &[Vec<u8>]) -> Vec<u8> {
     let mut body = (ivs.len() as u32).to_be_bytes().to_vec();
     for iv in ivs {
@@ -291,6 +362,25 @@ mod tests {
     }
 
     #[test]
+    fn clearkey_pssh_names_the_key_id() {
+        let kid = [0x42u8; 16];
+        let b = pssh_clearkey(&kid);
+        assert_eq!(&b[4..8], b"pssh");
+        assert_eq!(b[8], 1, "version 1 lists its key IDs");
+        assert_eq!(
+            &b[12..28],
+            &[
+                0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02, 0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2,
+                0xfb, 0x4b
+            ]
+        );
+        assert_eq!(&b[28..32], &1u32.to_be_bytes(), "one key ID");
+        assert_eq!(&b[32..48], &kid);
+        assert_eq!(&b[48..52], &0u32.to_be_bytes(), "no system data");
+        assert_eq!(b.len(), 52);
+    }
+
+    #[test]
     fn debug_never_prints_the_key() {
         let e = Encryption {
             key_id: [1; 16],
@@ -300,5 +390,26 @@ mod tests {
         let shown = format!("{e:?}");
         assert!(!shown.contains("ab"), "{shown}");
         assert!(shown.contains("redacted"));
+    }
+
+    #[test]
+    fn cbcs_pattern_encrypts_one_block_in_ten_and_chains_over_them() {
+        let key = [0x11u8; 16];
+        let iv = [0x22u8; 16];
+        let clear: Vec<u8> = (0..16 * 12).map(|i| i as u8).collect();
+        let mut got = clear.clone();
+        apply_cbc_pattern(&key, iv, &mut got, 1, 9);
+        // Block 0 is CBC-encrypted from the IV; blocks 1 to 9 stay clear.
+        let mut b0 = clear[..16].to_vec();
+        apply_cbc_encrypt(&key, iv, &mut b0);
+        assert_eq!(&got[..16], &b0[..]);
+        assert_eq!(&got[16..160], &clear[16..160]);
+        // Block 10 is encrypted, chained from block 0's ciphertext: a skipped block
+        // does not feed the chain.
+        let mut b10 = clear[160..176].to_vec();
+        apply_cbc_encrypt(&key, b0.as_slice().try_into().unwrap(), &mut b10);
+        assert_eq!(&got[160..176], &b10[..]);
+        // Block 11 is clear.
+        assert_eq!(&got[176..], &clear[176..]);
     }
 }

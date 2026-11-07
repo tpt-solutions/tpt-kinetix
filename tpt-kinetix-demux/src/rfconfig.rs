@@ -15,6 +15,9 @@ pub struct Vp9Config {
     pub chroma_subsampling: u8,
     /// Full-range video.
     pub full_range: bool,
+    /// RGB samples (`color_space` 7): the matrix is the identity, so ffprobe
+    /// calls a 4:4:4 stream `gbrp`.
+    pub rgb: bool,
     /// Coded width.
     pub width: u32,
     /// Coded height.
@@ -107,6 +110,11 @@ struct SeqInfo {
     ssx: u8,
     ssy: u8,
     chroma_sample_position: u8,
+    /// colour_primaries, transfer_characteristics, matrix_coefficients (2 = unspecified).
+    primaries: u8,
+    transfer: u8,
+    matrix: u8,
+    full_range: bool,
 }
 
 fn parse_sequence_header(payload: &[u8]) -> Option<SeqInfo> {
@@ -185,6 +193,10 @@ fn parse_sequence_header(payload: &[u8]) -> Option<SeqInfo> {
         ssx: 1,
         ssy: 1,
         chroma_sample_position: 0,
+        primaries: 2,
+        transfer: 2,
+        matrix: 2,
+        full_range: false,
     };
     // Everything after the size is only needed for `av1C`; a header that is cut
     // short there still yields its dimensions.
@@ -229,18 +241,22 @@ fn parse_color_config(r: &mut Bits, reduced: bool, info: &mut SeqInfo) -> Option
     } else {
         (2, 2, 2)
     };
+    info.primaries = cp as u8;
+    info.transfer = tc as u8;
+    info.matrix = mc as u8;
     if info.mono {
-        r.bit()?; // color_range
+        info.full_range = r.bit()? == 1; // color_range
         info.ssx = 1;
         info.ssy = 1;
         return Some(());
     }
     if cp == 1 && tc == 13 && mc == 0 {
+        info.full_range = true; // sRGB: the range is implied full
         info.ssx = 0;
         info.ssy = 0;
         return Some(());
     }
-    r.bit()?; // color_range
+    info.full_range = r.bit()? == 1; // color_range
     match info.profile {
         0 => {
             info.ssx = 1;
@@ -264,6 +280,15 @@ fn parse_color_config(r: &mut Bits, reduced: bool, info: &mut SeqInfo) -> Option
         info.chroma_sample_position = r.bits(2)? as u8;
     }
     Some(())
+}
+
+/// The colour of an AV1 stream from its `av1C` record (the sequence header in
+/// its configuration OBUs): the primaries, transfer and matrix codes, and whether
+/// the range is full. `None` when there is no sequence header.
+pub fn av1_colour(av1c: &[u8]) -> Option<(u8, u8, u8, bool)> {
+    let (_, _, payload) = find_sequence_obu(av1c)?;
+    let info = parse_sequence_header(payload)?;
+    Some((info.primaries, info.transfer, info.matrix, info.full_range))
 }
 
 /// Builds an `av1C` (AV1CodecConfigurationRecord) from a stream's sequence-header
@@ -375,6 +400,7 @@ pub fn vp9_config_from_frame(frame: &[u8], _hint_w: u32, _hint_h: u32) -> Option
         bit_depth,
         chroma_subsampling,
         full_range,
+        rgb: color_space == 7,
         width,
         height,
     })
@@ -406,7 +432,8 @@ pub fn vpcc_record(cfg: &Vp9Config) -> Vec<u8> {
     v.push(cfg.profile);
     v.push(vp9_level(cfg.width, cfg.height));
     v.push((cfg.bit_depth << 4) | (cfg.chroma_subsampling << 1) | u8::from(cfg.full_range));
-    v.extend_from_slice(&[2, 2, 2]); // colour primaries / transfer / matrix: unspecified
+    // Colour primaries and transfer are unspecified; the matrix is the identity for RGB.
+    v.extend_from_slice(&[2, 2, if cfg.rgb { 0 } else { 2 }]);
     v.extend_from_slice(&0u16.to_be_bytes()); // codecInitializationDataSize
     v
 }
@@ -463,6 +490,23 @@ pub fn opus_packet_samples(packet: &[u8]) -> Option<u32> {
         _ => u32::from(*packet.get(1)? & 0x3F),
     };
     (frames > 0).then_some(frame * frames)
+}
+
+/// The codec configuration record (`av1C` for AV1, `vpcC` for VP9) for a stream
+/// whose container omits it, built from one of its key frames: the AV1 sequence
+/// header or the VP9 key-frame header. `None` when the frame carries neither.
+pub fn config_from_key_frame(
+    codec: tpt_kinetix_core::codec::CodecId,
+    frame: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    use tpt_kinetix_core::codec::CodecId;
+    match codec {
+        CodecId::Av1 => av1c_from_sequence_header(frame),
+        CodecId::Vp9 => vp9_config_from_frame(frame, width, height).map(|cfg| vpcc_record(&cfg)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

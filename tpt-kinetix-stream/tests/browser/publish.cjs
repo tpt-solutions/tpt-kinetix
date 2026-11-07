@@ -43,13 +43,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   try {
     let playlist = "";
     let track = 0;
+    let masterText = "";
     const deadline = Date.now() + 40000;
     while (Date.now() < deadline) {
       // The master names the video playlist after its STREAM-INF; the browser
       // decides the track order, so do not assume the video is track 0.
       const master = await get(`/${key}/master.m3u8`).catch(() => ({ status: 0 }));
       if (master.status !== 200) { await sleep(500); continue; }
-      const lines = master.body.toString().split("\n");
+      masterText = master.body.toString();
+      const lines = masterText.split("\n");
       const inf = lines.findIndex((l) => l.startsWith("#EXT-X-STREAM-INF"));
       track = Number((lines[inf + 1] || "").match(/track-(\d+)/)?.[1] ?? 0);
       const r = await get(`/${key}/track-${track}.m3u8`).catch(() => ({ status: 0 }));
@@ -62,6 +64,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const segs = playlist.split("\n").filter((l) => l.startsWith("seg-"));
     if (segs.length < 3) throw new Error(`only ${segs.length} segments appeared:\n${playlist}`);
     if (playlist.includes("#EXT-X-ENDLIST")) throw new Error("playlist ended while the browser is still publishing");
+    // The WHIP transports must publish the codec they name, not whatever the answer picks.
+    const wantCodec = { whip: "vp09", "whip-av1": "av01" }[transport];
+    if (wantCodec && !masterText.includes(`CODECS="${wantCodec}`)) {
+      throw new Error(`expected ${wantCodec} over WHIP:\n${masterText}`);
+    }
     const m = (await get("/metrics")).body.toString();
     if (!/kinetix_publishers_active 1/.test(m)) throw new Error("server does not show an active publisher:\n" + m);
 

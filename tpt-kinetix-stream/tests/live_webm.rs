@@ -138,6 +138,7 @@ async fn decode_matches(name: &str, vcodec: &[&str]) {
         segment_seconds: 2.0,
         window: 100,
         part_seconds: None,
+        encryption: None,
     })
     .await;
 
@@ -245,6 +246,7 @@ async fn playlist_is_live_while_publishing_and_complete_afterwards() {
         segment_seconds: 1.0,
         window: 3,
         part_seconds: None,
+        encryption: None,
     })
     .await;
     let mut child = publish_cmd(&src, port, "rt", true).spawn().unwrap();
@@ -331,6 +333,7 @@ async fn ll_hls_parts_are_served_and_blocking_reload_resolves() {
         segment_seconds: 2.0,
         window: 6,
         part_seconds: Some(1.0 / 3.0),
+        encryption: None,
     })
     .await;
 
@@ -478,6 +481,7 @@ async fn reconnecting_publisher_continues_the_presentation() {
         segment_seconds: 2.0,
         window: 50,
         part_seconds: None,
+        encryption: None,
     })
     .await;
 
@@ -535,6 +539,7 @@ async fn recording_serves_a_vod_after_the_publish_ends() {
             segment_seconds: 2.0,
             window: 2, // the live window is tiny; the recording must keep everything
             part_seconds: None,
+            encryption: None,
         })
         .with_recording(&rec_dir)
         .serve(listener),
@@ -627,6 +632,7 @@ async fn recording_depth_and_generations_are_bounded() {
         segment_seconds: 2.0,
         window: 50,
         part_seconds: None,
+        encryption: None,
     };
     let limits = tpt_kinetix_stream::RecordingLimits {
         max_duration: Some(Duration::from_secs(5)),
@@ -704,6 +710,7 @@ async fn recording_byte_budget_trims_oldest_segments() {
             segment_seconds: 2.0,
             window: 50,
             part_seconds: None,
+            encryption: None,
         })
         .with_recording_limits(
             &rec_dir,
@@ -828,6 +835,7 @@ async fn ll_dash_segment_streams_while_it_is_published() {
         segment_seconds: 2.0,
         window: 20,
         part_seconds: Some(1.0 / 3.0),
+        encryption: None,
     })
     .await;
     let mut child = publish_cmd(&src, port, "ll", true).spawn().unwrap();

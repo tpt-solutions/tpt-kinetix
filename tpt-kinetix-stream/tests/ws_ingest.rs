@@ -23,6 +23,7 @@ fn opts() -> LiveOptions {
         segment_seconds: 2.0,
         window: 50,
         part_seconds: None,
+        encryption: None,
     }
 }
 

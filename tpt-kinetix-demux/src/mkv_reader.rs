@@ -22,7 +22,7 @@
 //! rejected, and the frame count is bounded by [`MAX_FRAMES`].
 
 use crate::mp4::SampleRef;
-use tpt_kinetix_core::codec::MediaType;
+use tpt_kinetix_core::codec::{CodecId, MediaType};
 use tpt_kinetix_core::error::KinetixError;
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
@@ -58,6 +58,8 @@ pub struct MkvSample {
     /// Samples to discard from the end of this frame's presentation
     /// (`DiscardPadding`, 48 kHz for Opus). `0` when the container states none.
     pub discard_padding: u64,
+    /// The block's own `BlockDuration` in milliseconds, when it states one.
+    pub duration_ms: Option<u32>,
 }
 
 /// A Matroska / WebM file indexed over a [`ReadAt`] source.
@@ -112,10 +114,18 @@ impl MkvIndex {
             for (i, f) in frames.iter().enumerate() {
                 // A frame's duration is its distance to the next one; Matroska
                 // states it per block and most muxers omit it.
-                let dur_ms = frames
-                    .get(i + 1)
-                    .map(|n| n.pts_ms - f.pts_ms)
+                // A block's own BlockDuration is authoritative (a WebVTT cue's end
+                // is only ever stated this way); otherwise use the gap to the next.
+                let dur_ms = f
+                    .duration_ms
+                    .map(i64::from)
                     .filter(|d| *d > 0)
+                    .or_else(|| {
+                        frames
+                            .get(i + 1)
+                            .map(|n| n.pts_ms - f.pts_ms)
+                            .filter(|d| *d > 0)
+                    })
                     .unwrap_or_else(|| nominal_frame_ms(info));
                 let mut duration = u64::try_from(dur_ms.max(0)).unwrap_or(0) * scale / 1000;
                 // `DiscardPadding` shortens the frame's presentation; honour it so
@@ -248,7 +258,17 @@ impl<S: ReadAt> MkvReader<S> {
             usize::try_from(s.size).map_err(|_| KinetixError::Parse("frame too large".into()))?;
         let mut data = vec![0u8; size];
         self.source.read_at(s.offset, &mut data)?;
+        // A WebVTT cue is text in the file; callers see the MP4 `vttc` form.
+        if self.streams.get(s.stream).map(|t| t.codec) == Some(CodecId::WebVtt) {
+            return Ok(tpt_kinetix_core::webvtt::to_cue_box(&data));
+        }
         Ok(data)
+    }
+
+    /// The underlying source, for reading what the index does not cover (tags and
+    /// chapters, see [`crate::mkv_metadata::read_metadata`]).
+    pub fn source(&self) -> &S {
+        &self.source
     }
 
     /// Consumes the reader and returns the underlying source.
@@ -298,6 +318,7 @@ fn sample_of(f: &MkvFrame) -> Result<MkvSample, KinetixError> {
         pts_ms: f.pts_ms,
         is_key: f.key,
         discard_padding: f.discard_padding,
+        duration_ms: f.duration_ms,
     })
 }
 

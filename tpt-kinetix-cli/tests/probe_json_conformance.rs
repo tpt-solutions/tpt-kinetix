@@ -68,10 +68,23 @@ fn check_against_ffprobe(path: &Path) {
         for key in ["codec_name", "codec_type"] {
             assert_eq!(text(&a[key]), text(&b[key]), "{}: {key}", path.display());
         }
+        // Every stream has a disposition object in ffprobe's output.
+        for key in ["default", "forced"] {
+            assert_eq!(
+                a["disposition"][key].as_u64(),
+                b["disposition"][key].as_u64(),
+                "{}: disposition.{key}",
+                path.display()
+            );
+        }
         match b["codec_type"].as_str() {
             Some("video") => {
                 for key in ["width", "height"] {
                     assert_eq!(text(&a[key]), text(&b[key]), "{}: {key}", path.display());
+                }
+                // Where ffprobe names the sample format, ours must say the same.
+                if let Some(pf) = b.get("pix_fmt") {
+                    assert_eq!(text(&a["pix_fmt"]), text(pf), "{}: pix_fmt", path.display());
                 }
             }
             Some("audio") => {

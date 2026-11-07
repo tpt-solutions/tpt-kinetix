@@ -152,6 +152,8 @@ pub fn parse_mvhd(input: &[u8]) -> IResult<&[u8], MvhdBox> {
 #[derive(Debug, Clone)]
 pub struct TkhdBox {
     pub version: u8,
+    /// Track enabled (`tkhd` flag 0x1): the track's default-track disposition.
+    pub enabled: bool,
     pub track_id: u32,
     pub duration: u64,
     pub width: u32,
@@ -161,7 +163,8 @@ pub struct TkhdBox {
 /// Parses the payload of a `tkhd` box.
 pub fn parse_tkhd(input: &[u8]) -> IResult<&[u8], TkhdBox> {
     let (input, version) = be_u8(input)?;
-    let (input, _flags) = take(3usize)(input)?;
+    let (input, flags) = take(3usize)(input)?;
+    let enabled = flags[2] & 1 == 1;
 
     let (input, track_id, duration) = if version == 1 {
         // creation_time u64, modification_time u64, track_id u32, reserved u32, duration u64
@@ -193,6 +196,7 @@ pub fn parse_tkhd(input: &[u8]) -> IResult<&[u8], TkhdBox> {
         input,
         TkhdBox {
             version,
+            enabled,
             track_id,
             duration,
             width: width_fp >> 16,

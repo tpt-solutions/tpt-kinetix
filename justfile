@@ -54,7 +54,7 @@ coverage:
 
 # Compile all fuzz targets (requires nightly + cargo-fuzz).
 fuzz-build:
-    cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mp4_reader && cargo fuzz build fuzz_mkv_ebml && cargo fuzz build fuzz_mkv_stream && cargo fuzz build fuzz_moof && cargo fuzz build fuzz_ts
+    cd tpt-kinetix-demux && cargo fuzz build fuzz_mp4_box && cargo fuzz build fuzz_mp4_reader && cargo fuzz build fuzz_mkv_ebml && cargo fuzz build fuzz_mkv_stream && cargo fuzz build fuzz_mkv_metadata && cargo fuzz build fuzz_moof && cargo fuzz build fuzz_ts
     cd tpt-kinetix-mux && cargo fuzz build fuzz_faststart
     cd tpt-kinetix-av1 && cargo fuzz build fuzz_obu_parse && cargo fuzz build fuzz_av1_frame
     cd out-kinetix-h264 && cargo fuzz build fuzz_h264_nal
@@ -73,6 +73,18 @@ perf-dashboard:
 # Regenerate the C header for tpt-kinetix-ffi (needs cbindgen).
 ffi-header:
     cd tpt-kinetix-ffi && cbindgen --lang c --crate tpt-kinetix-ffi --output include/tpt_kinetix.h
+
+# C ABI: the header is current, and a C program links the library and runs every call.
+ffi-smoke:
+    bash tools/ffi-smoke-test.sh
+
+# Python bindings: build the wheel with maturin, install it in a clean venv, run its tests.
+py-test:
+    bash tools/py-binding-test.sh
+
+# Node bindings: build the addon, pack the npm package, install the tarball, run its tests.
+node-test:
+    bash tools/node-binding-test.sh
 
 # Run a single fuzz target for N seconds: `just fuzz tpt-kinetix-demux fuzz_mp4_box 60`
 fuzz crate target seconds="60":

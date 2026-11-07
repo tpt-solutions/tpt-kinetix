@@ -3,14 +3,14 @@
 //! This crate writes encoded media back out into a container:
 //!
 //! - [`Mp4Writer`] — multi-track MP4 / ISO-BMFF writer for passthrough and
-//!   remux, with [`faststart`] to move `moov` ahead of `mdat` for progressive
+//!   remux, with [`fn@faststart`] to move `moov` ahead of `mdat` for progressive
 //!   HTTP playback.
 //! - [`FragmentWriter`] — fragmented MP4 (`moof`/`mdat`, CMAF-style) output.
 //! - [`WebmWriter`] — WebM output.
 //! - [`Mp4Muxer`] — the original single-track H.264 (`avc1`) writer, kept for
 //!   existing callers. New code should use [`Mp4Writer`].
 //!
-//! [`faststart`] works on any MP4 it is given, not only files written here.
+//! [`fn@faststart`] works on any MP4 it is given, not only files written here.
 //! Muxers take already-encoded samples; they do not decode or encode media.
 //!
 //! # Examples

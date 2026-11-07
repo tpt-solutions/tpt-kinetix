@@ -1,0 +1,22 @@
+[package]
+name = "tpt-kinetix-node"
+version = "0.1.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Node.js bindings for the TPT Kinetix container tools (probe, remux, package)"
+publish = false
+
+[lib]
+# Loaded by Node as a native addon; see index.js and tools/node-binding-test.sh.
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", features = ["napi4"] }
+napi-derive = "3"
+tpt-kinetix-ops = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
