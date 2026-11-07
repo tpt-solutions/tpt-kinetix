@@ -64,7 +64,8 @@ tpt-kinetix package in.mp4 out/ --cenc-key-id ... --cenc-key ... --cenc-scheme c
   encryption, which is not implemented, so they are refused.
 - The DASH manifest gets the ClearKey `ContentProtection` elements. The HLS media
   playlists get `EXT-X-KEY` for `cenc`; `key.json` is the ClearKey license. `cbcs` is
-  not signalled in HLS.
+  not signalled in HLS. `cbcs-pattern` is signalled as `SAMPLE-AES` with the same license,
+and plays in hls.js and dash.js (checked in headless Chrome).
 
 ## serve: play an MP4 over HTTP without writing files
 

@@ -130,6 +130,10 @@ pub(crate) fn key_line_for(enc: Option<&tpt_kinetix_mux::Encryption>) -> String 
         Some(enc) if enc.scheme == tpt_kinetix_mux::cenc::Scheme::Cenc => {
             "#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,KEYFORMAT=\"org.w3.clearkey\",KEYFORMATVERSIONS=\"1\",URI=\"key.json\"\n".to_string()
         }
+        Some(enc) if enc.scheme == tpt_kinetix_mux::cenc::Scheme::CbcsPattern => {
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,KEYFORMAT=\"org.w3.clearkey\",KEYFORMATVERSIONS=\"1\",URI=\"key.json\"
+".to_string()
+        }
         _ => String::new(),
     }
 }

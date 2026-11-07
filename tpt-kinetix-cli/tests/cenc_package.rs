@@ -166,7 +166,7 @@ fn cenc_and_cbcs_tracks_decrypt_to_the_clear_frames() {
         // HLS: the protected media playlists name the ClearKey system and the license,
         // which carries the key ID and key as base64url JWK fields. Clear output has
         // neither.
-        // `cbcs` is not signalled in HLS yet, so only `cenc` has the key line.
+        // `cenc` and `cbcs-pattern` have a key line; plain `cbcs` does not.
         let track = std::fs::read_to_string(enc.join("track-0.m3u8")).unwrap();
         if scheme == "cenc" {
             assert!(
@@ -178,6 +178,14 @@ fn cenc_and_cbcs_tracks_decrypt_to_the_clear_frames() {
         license,
         "{\"keys\":[{\"kty\":\"oct\",\"kid\":\"ABEiM0RVZneImaq7zN3u_w\",\"k\":\"Dw4NDAsKCQgHBgUEAwIBAA\"}]}"
     );
+        }
+        // cbcs-pattern is signalled as SAMPLE-AES with the same ClearKey license (the
+        // browser test plays it with hls.js); plain cbcs is not signalled.
+        if scheme == "cbcs-pattern" {
+            assert!(
+                track.contains("#EXT-X-KEY:METHOD=SAMPLE-AES,KEYFORMAT=\"org.w3.clearkey\""),
+                "{track}"
+            );
         }
         let clear_track = std::fs::read_to_string(clear.join("track-0.m3u8")).unwrap();
         assert!(!clear_track.contains("EXT-X-KEY"), "{clear_track}");
