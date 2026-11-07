@@ -29,6 +29,8 @@
 *.mov
 *.avi
 *.ts
+# TypeScript declaration files are source, not MPEG-TS media.
+!*.d.ts
 *.flv
 *.yuv
 *.h264
