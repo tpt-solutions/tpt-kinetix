@@ -53,7 +53,7 @@ function runOne(kind, url) {
       proc = spawn(chrome, [
         "--headless=new", "--disable-gpu", "--no-sandbox", "--mute-audio",
         "--autoplay-policy=no-user-gesture-required",
-        `--user-data-dir=${profile}`, page,
+        `--user-data-dir=${profile}`, ...(process.env.CDP_PORT ? [`--remote-debugging-port=${process.env.CDP_PORT}`] : []), page,
       ], { stdio: "ignore" });
       setTimeout(() => { cleanup(); resolve({ ok: false, errors: ["harness timeout"] }); }, 60000);
     });
