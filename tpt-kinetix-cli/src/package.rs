@@ -137,10 +137,14 @@ pub fn serve(
     })
 }
 
+/// One track's trick-play rendition, once it has been built.
+type IFrameSlot = Mutex<Option<Arc<tpt_kinetix_package::IFrameRendition>>>;
+
 /// Trick-play renditions built so far, per video track. Shared by the serve
-/// threads, so each rendition is built once rather than on every request.
+/// threads: each track has a slot, so a rendition is built once, and only requests
+/// for that track wait while it is being built.
 #[derive(Default)]
-struct IFrameCache(Mutex<HashMap<usize, Arc<tpt_kinetix_package::IFrameRendition>>>);
+struct IFrameCache(Mutex<HashMap<usize, Arc<IFrameSlot>>>);
 
 /// The I-frame rendition of video track `t`, from the cache when it is there.
 fn iframe_rendition(
@@ -149,14 +153,16 @@ fn iframe_rendition(
     cache: &IFrameCache,
     t: usize,
 ) -> Result<Arc<tpt_kinetix_package::IFrameRendition>> {
-    let lock = || cache.0.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(r) = lock().get(&t) {
+    let slot = {
+        let mut slots = cache.0.lock().unwrap_or_else(|e| e.into_inner());
+        slots.entry(t).or_default().clone()
+    };
+    let mut built_for_track = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = built_for_track.as_ref() {
         return Ok(r.clone());
     }
-    // Two requests can race and both build it; the second insert wins, and the
-    // bytes are identical either way.
     let built = Arc::new(block_on(p.iframe_rendition(&Blocking(source), t))?);
-    lock().insert(t, built.clone());
+    *built_for_track = Some(built.clone());
     Ok(built)
 }
 
