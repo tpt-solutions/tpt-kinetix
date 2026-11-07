@@ -377,6 +377,7 @@ async fn start_with(policy: tpt_kinetix_stream::IngestPolicy) -> (u16, u16) {
         segment_seconds: 2.0,
         window: 100,
         part_seconds: None,
+        encryption: None,
     })
     .with_policy(policy);
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();

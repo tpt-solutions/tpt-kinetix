@@ -290,6 +290,7 @@ mod tests {
             use super::super::boxes::{CttsBox, StscBox, StszBox, SttsBox};
             use tpt_kinetix_core::codec::MediaType;
             Self(Some(Mp4Track {
+                enabled: true,
                 language: None,
                 track_id: id,
                 timescale: 1000,

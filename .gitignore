@@ -13,7 +13,10 @@
 # e.g. out-kinetix-h264/fuzz/ — a mid-path slash would otherwise anchor the
 # pattern to the repo root and silently miss them)
 **/fuzz/target/
-**/fuzz/corpus/
+**/fuzz/corpus/*/*
+# Crash reproducers are regression cases (CLAUDE.md): they stay tracked. The
+# generated corpus next to them stays ignored.
+!**/fuzz/corpus/*/crash-*
 **/fuzz/artifacts/
 **/fuzz/coverage/
 
@@ -84,3 +87,6 @@ dav1d_grid*.dump
 
 # AV1 FATE fixtures (fetched with `just fetch-av1-fate`)
 /fixtures/av1-fate/
+
+# Local kilo tool state (untracked, 2026-11-07)
+.kilo/

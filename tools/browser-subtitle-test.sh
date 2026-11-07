@@ -28,9 +28,9 @@ ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=320x240:rate=25 -t 12 \
   -c:v libx264 -bf 2 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 "$work/av.mp4"
 cargo build --release -q -p tpt-kinetix-cli --example make_webvtt_sample
 cargo build --release -q -p tpt-kinetix-cli
-target/release/examples/make_webvtt_sample "$work/av.mp4" "$work/clip.mp4"
+${CARGO_TARGET_DIR:-target}/release/examples/make_webvtt_sample "$work/av.mp4" "$work/clip.mp4"
 port=8862
-target/release/tpt-kinetix serve "$work/clip.mp4" --port "$port" --segment-seconds 3 >"$work/serve.log" 2>&1 &
+${CARGO_TARGET_DIR:-target}/release/tpt-kinetix serve "$work/clip.mp4" --port "$port" --segment-seconds 3 >"$work/serve.log" 2>&1 &
 server=$!
 trap 'kill $server 2>/dev/null || true' EXIT
 sleep 2

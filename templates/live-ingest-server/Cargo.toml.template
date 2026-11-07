@@ -1,0 +1,11 @@
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+
+[dependencies]
+# Live WebM ingest and HLS output. Versions match the TPT Kinetix release.
+tpt-kinetix-package = "0.1.2"
+tpt-kinetix-stream = "0.1.2"
+tokio = { version = "1", features = ["full"] }

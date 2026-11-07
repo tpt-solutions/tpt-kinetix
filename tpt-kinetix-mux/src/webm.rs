@@ -73,6 +73,21 @@ const ID_CUE_TIME: u32 = 0xB3;
 const ID_CUE_TRACK_POSITIONS: u32 = 0xB7;
 const ID_CUE_TRACK: u32 = 0xF7;
 const ID_CUE_CLUSTER_POSITION: u32 = 0xF1;
+const ID_TAGS: u32 = 0x1254_C367;
+const ID_CHAPTERS: u32 = 0x1043_A770;
+const ID_EDITION_ENTRY: u32 = 0x45B9;
+const ID_EDITION_UID: u32 = 0x45BC;
+const ID_CHAPTER_ATOM: u32 = 0xB6;
+const ID_CHAPTER_UID: u32 = 0x73C4;
+const ID_CHAPTER_TIME_START: u32 = 0x91;
+const ID_CHAPTER_DISPLAY: u32 = 0x80;
+const ID_CHAP_STRING: u32 = 0x85;
+const ID_CHAP_LANGUAGE: u32 = 0x437C;
+const ID_TAG: u32 = 0x7373;
+const ID_TARGETS: u32 = 0x63C0;
+const ID_SIMPLE_TAG: u32 = 0x67C8;
+const ID_TAG_NAME: u32 = 0x45A3;
+const ID_TAG_STRING: u32 = 0x4487;
 
 /// Matroska timestamps are in milliseconds (`TimecodeScale` = 1 ms).
 const TIMECODE_SCALE_NS: u64 = 1_000_000;
@@ -88,6 +103,13 @@ pub struct WebmOptions {
     pub cluster_ms: i64,
     /// `WritingApp` string (also used as `MuxingApp`).
     pub writing_app: String,
+    /// Tags for the file, as `(Matroska tag name, value)` pairs (`TITLE`,
+    /// `ARTIST`, ...). Written as one `Tag` for the whole file, straight after
+    /// `Tracks`: players and ffmpeg read tags from the header, not from the end.
+    pub tags: Vec<(String, String)>,
+    /// Chapters as `(start in nanoseconds, title)`, in order. Written as one edition
+    /// straight after `Tracks`.
+    pub chapters: Vec<(u64, String)>,
 }
 
 impl Default for WebmOptions {
@@ -95,6 +117,8 @@ impl Default for WebmOptions {
         Self {
             cluster_ms: 2000,
             writing_app: "tpt-kinetix".to_string(),
+            tags: Vec::new(),
+            chapters: Vec::new(),
         }
     }
 }
@@ -174,6 +198,8 @@ fn codec_id(codec: CodecId) -> Option<&'static str> {
         CodecId::Av1 => Some("V_AV1"),
         CodecId::Vp9 => Some("V_VP9"),
         CodecId::Opus => Some("A_OPUS"),
+        // The official Matroska ID for WebVTT (see the demuxer for the older one).
+        CodecId::WebVtt => Some("D_WEBVTT/SUBTITLES"),
         _ => None,
     }
 }
@@ -195,6 +221,8 @@ fn codec_private(info: &StreamInfo) -> Result<Option<Vec<u8>>, KinetixError> {
             Ok(Some(info.extradata.clone()))
         }
         CodecId::Vp9 => Ok(None),
+        // WebVTT's CodecPrivate is the header, and it is optional.
+        CodecId::WebVtt => Ok((!info.extradata.is_empty()).then(|| info.extradata.clone())),
         CodecId::Opus => {
             let dops = info.extradata.as_slice();
             if dops.len() < 11 {
@@ -358,7 +386,10 @@ impl<W: Write> WebmWriter<W> {
         }
         let mut tracks = Vec::new();
         for (i, info) in infos.iter().enumerate() {
-            if matches!(info.media_type, MediaType::Audio | MediaType::Video) {
+            if matches!(
+                info.media_type,
+                MediaType::Audio | MediaType::Video | MediaType::Subtitle
+            ) {
                 if codec_id(info.codec).is_none() {
                     continue;
                 }
@@ -386,6 +417,8 @@ impl<W: Write> WebmWriter<W> {
         self.write_header(&mut buf)?;
         self.write_info(&mut buf)?;
         self.write_tracks(&mut buf)?;
+        self.write_tags(&mut buf)?;
+        self.write_chapters(&mut buf);
         self.flush(&buf)?;
         Ok(())
     }
@@ -452,9 +485,15 @@ impl<W: Write> WebmWriter<W> {
             return Ok(()); // a track we do not write
         };
         let timescale = track.info.timescale.max(1);
+        let is_subtitle = track.info.media_type == MediaType::Subtitle;
         let pts_ms = packet.pts.as_millis().unwrap_or(0);
         let key = packet.is_key_frame;
-        let data = packet.data.clone();
+        // A WebVTT cue is stored as text in Matroska, not as a `vttc` box.
+        let data = if is_subtitle {
+            tpt_kinetix_core::webvtt::matroska_from_cue_box(&packet.data)
+        } else {
+            packet.data.clone()
+        };
         let number = track.number;
         let is_lead = number == self.tracks[self.lead].number;
 
@@ -477,6 +516,13 @@ impl<W: Write> WebmWriter<W> {
             // applied, so the last frame would decode to a different length.
             let trim_ns = discard * 1_000_000_000 / 48_000;
             self.write_block_group(number, rel as i16, key, &data, None, trim_ns)?;
+        } else if is_subtitle && duration.is_some() {
+            // A WebVTT cue's end time is its block's duration, so a subtitle block
+            // is written as a BlockGroup that states it.
+            // BlockDuration counts TimestampScale units, which is milliseconds here.
+            let ticks = u64::from(duration.unwrap_or(0));
+            let ms = ticks * 1000 / u64::from(timescale);
+            self.write_block_group(number, rel as i16, key, &data, Some(ms), 0)?;
         } else {
             self.write_block(number, rel as i16, key, &data)?;
         }
@@ -688,8 +734,9 @@ impl<W: Write> WebmWriter<W> {
         self.flush(&buf)
     }
 
-    /// Writes a `BlockGroup` around the block, with a `BlockDuration` and a
-    /// `DiscardPadding` (both in nanoseconds, per the Matroska TimestampScale).
+    /// Writes a `BlockGroup` around the block, with an optional `BlockDuration`
+    /// (in TimestampScale units, milliseconds here) and a `DiscardPadding` (in
+    /// nanoseconds).
     ///
     /// A `SimpleBlock` cannot carry either, so this is how a trailing partial
     /// frame (the encoder's `DiscardPadding`) survives a remux: without it a
@@ -700,13 +747,13 @@ impl<W: Write> WebmWriter<W> {
         rel_ms: i16,
         key: bool,
         data: &[u8],
-        duration_ns: Option<u64>,
+        block_duration: Option<u64>,
         discard: u64,
     ) -> Result<(), KinetixError> {
         let mut group = Vec::new();
         elem(&mut group, ID_BLOCK, &block_body(track, rel_ms, key, data));
-        if let Some(ns) = duration_ns {
-            elem_uint(&mut group, ID_BLOCK_DURATION, ns);
+        if let Some(d) = block_duration {
+            elem_uint(&mut group, ID_BLOCK_DURATION, d);
         }
         elem_sint(&mut group, ID_DISCARD_PADDING, discard);
         let mut buf = Vec::new();
@@ -748,6 +795,49 @@ impl<W: Write> WebmWriter<W> {
         self.flush(&buf)
     }
 
+    /// Writes the file's tags as one `Tag` with an empty `Targets` (the whole
+    /// file), each pair as a `SimpleTag`.
+    /// Writes the chapters as one edition: a `ChapterAtom` per chapter, with a
+    /// `ChapterUID`, its start, and a display string in English.
+    fn write_chapters(&self, buf: &mut Vec<u8>) {
+        if self.opts.chapters.is_empty() {
+            return;
+        }
+        let mut edition = Vec::new();
+        elem_uint(&mut edition, ID_EDITION_UID, 1);
+        for (index, (start_ns, title)) in self.opts.chapters.iter().enumerate() {
+            let mut atom = Vec::new();
+            elem_uint(&mut atom, ID_CHAPTER_UID, index as u64 + 1);
+            elem_uint(&mut atom, ID_CHAPTER_TIME_START, *start_ns);
+            let mut display = Vec::new();
+            elem(&mut display, ID_CHAP_STRING, title.as_bytes());
+            elem(&mut display, ID_CHAP_LANGUAGE, b"und");
+            elem(&mut atom, ID_CHAPTER_DISPLAY, &display);
+            elem(&mut edition, ID_CHAPTER_ATOM, &atom);
+        }
+        let mut body = Vec::new();
+        elem(&mut body, ID_EDITION_ENTRY, &edition);
+        elem(buf, ID_CHAPTERS, &body);
+    }
+
+    fn write_tags(&self, buf: &mut Vec<u8>) -> Result<(), KinetixError> {
+        if self.opts.tags.is_empty() {
+            return Ok(());
+        }
+        let mut tag = Vec::new();
+        elem(&mut tag, ID_TARGETS, &[]);
+        for (name, value) in &self.opts.tags {
+            let mut simple = Vec::new();
+            elem(&mut simple, ID_TAG_NAME, name.as_bytes());
+            elem(&mut simple, ID_TAG_STRING, value.as_bytes());
+            elem(&mut tag, ID_SIMPLE_TAG, &simple);
+        }
+        let mut body = Vec::new();
+        elem(&mut body, ID_TAG, &tag);
+        elem(buf, ID_TAGS, &body);
+        Ok(())
+    }
+
     fn patch_segment_size(&mut self) -> Result<(), KinetixError> {
         if self.seekable.is_none() {
             return Ok(());
@@ -777,6 +867,14 @@ impl<W: Write> WebmWriter<W> {
 impl<W: Write + Seek> WebmWriter<W> {
     /// A writer in finite mode: cluster and segment sizes are patched after the
     /// fact and a `Cues` index is appended, so the file is seekable.
+    /// A seekable writer with `opts` (for example tags); see [`WebmWriter::new_seekable`].
+    pub fn new_seekable_with_options(out: W, opts: WebmOptions) -> Self {
+        Self {
+            opts,
+            ..Self::new_seekable(out)
+        }
+    }
+
     pub fn new_seekable(out: W) -> Self {
         Self {
             seekable: Some(Box::new(|out: &mut W, at: u64, bytes: &[u8]| {

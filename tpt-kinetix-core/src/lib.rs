@@ -22,6 +22,7 @@ pub mod packet;
 pub mod pixel_format;
 pub mod stream;
 pub mod timestamp;
+pub mod webvtt;
 
 // Convenience re-exports of the most commonly used types.
 pub use capabilities::DecoderCapabilities;

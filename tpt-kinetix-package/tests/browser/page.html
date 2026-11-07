@@ -12,6 +12,8 @@
   const want = Number(q.get("seconds") || 5);
   const v = document.getElementById("v");
   const errors = [];
+  // What the player did, for diagnosing a stall: key and fragment events.
+  const notes = [];
   let done = false;
 
   // WebVTT cues that hls.js has put on the video's text tracks (subtitle runs only).
@@ -50,12 +52,23 @@
         liveSyncPosition: liveEdge,
         subtitleCues: subs.length,
         subtitleText: subs.slice(0, 3),
+        notes: notes.slice(0, 40),
         ...extra,
       }),
     });
   }
 
   v.addEventListener("error", () => errors.push("video element error " + (v.error && v.error.message)));
+  // The media element's own EME and playback events, to see where decoding stops.
+  for (const ev of ["encrypted", "waitingforkey", "stalled", "playing", "loadeddata"]) {
+    v.addEventListener(ev, (e) => {
+      const init = e.initDataType ? " " + e.initDataType : "";
+      notes.push("media " + ev + init);
+    });
+  }
+  if (window.MediaKeys || navigator.requestMediaKeySystemAccess) {
+    notes.push("eme available");
+  }
   // Progress is measured from where playback first started: a live stream begins
   // near the live edge, not at 0.
   let origin = null;
@@ -65,14 +78,23 @@
   });
   setTimeout(() => report({ ok: false, timeout: true }), 40000);
 
-  if (kind === "hls" || kind === "hlssubs") {
+  if (kind === "hls" || kind === "hlssubs" || kind === "hlsenc") {
     if (!Hls.isSupported()) { errors.push("Hls.isSupported() is false"); report({ ok: false }); }
     else {
       // Low-latency mode: small back-buffer and `liveSyncDurationCount` of one
       // part-worth, so `hls.liveSyncPosition` tracks the live edge the
       // packager advertises. The harness records `latency` (live edge minus
       // playhead) alongside the usual progress fields.
-      const hls = new Hls({ lowLatencyMode: true, backBufferLength: 30, liveSyncDurationCount: 1 });
+      const config = { lowLatencyMode: true, backBufferLength: 30, liveSyncDurationCount: 1 };
+      if (kind === "hlsenc") {
+        // CENC (ClearKey) HLS: the EXT-X-KEY names the ClearKey system, and the
+        // license is the key.json the packager serves next to the playlist.
+        config.emeEnabled = true;
+        config.drmSystems = {
+          "org.w3.clearkey": { licenseUrl: new URL("key.json", url).href },
+        };
+      }
+      const hls = new Hls(config);
       window.__hls = hls;
       // A non-fatal bufferStalledError is expected when a live playhead sits at the
       // live edge on a slow runner (hls.js recovers by itself); progress is still
@@ -87,6 +109,10 @@
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
           if (hls.subtitleTracks.length > 0) hls.subtitleTrack = 0;
         });
+      }
+      for (const ev of ["keyLoaded", "keyLoading", "fragLoading", "fragLoaded", "manifestParsed", "levelLoaded"]) {
+        const name = Hls.Events[ev.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()];
+        if (name) hls.on(name, (_, d) => notes.push(ev + " " + JSON.stringify(d && (d.frag ? { sn: d.frag.sn } : d.key ? { keyId: d.key.keyId } : {})).slice(0, 120)));
       }
       hls.loadSource(url);
       hls.attachMedia(v);

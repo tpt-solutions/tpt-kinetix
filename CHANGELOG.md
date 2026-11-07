@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tpt-kinetix-ops`: the probe JSON, remux and package operations as a library, shared by the
+  CLI and the language bindings. The CLI's remux and package summaries still print by default.
+- C ABI (`tpt-kinetix-ffi`): `tk_remux` and `tk_package` (HLS + DASH to a directory, with optional
+  CENC), alongside `tk_probe_json` and `tk_faststart`. Header `include/tpt_kinetix.h`, README, and
+  `tools/ffi-smoke-test.sh`, which compiles and runs a C program against the library.
+- Python bindings (`tpt-kinetix-py`, maturin): `probe`, `faststart`, `remux`, `package`, `version`,
+  `KinetixError`. Tested by `tools/py-binding-test.sh` against an installed wheel.
+- Node.js bindings (`tpt-kinetix-node`, napi-rs): the same operations as promises, with `index.d.ts`.
+  Tested by `tools/node-binding-test.sh` against a packed npm tarball.
+- WebAssembly packager npm package: `tools/wasm-package-test.sh` now packs it and tests the installed
+  copy. The package is `private` until the maintainer approves the npm name.
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Fixed

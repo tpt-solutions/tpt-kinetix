@@ -36,6 +36,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_mkv_metadata"
+path = "fuzz_targets/fuzz_mkv_metadata.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_moof"
 path = "fuzz_targets/fuzz_moof.rs"
 test = false
