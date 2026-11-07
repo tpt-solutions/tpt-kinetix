@@ -271,7 +271,7 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 
 ### D. Evidence, quality, tooling
 
-- [~] **M6 `just bench-io`** (2026-11-07, `docs/perf/io-compare-2026-11-07.md`): probe startup 14.4 ms / 7.9 MiB vs ffprobe 35.8 ms / 19.2 MiB on a 480 KiB 720p VP9 MP4; a 1000-variant hostile corpus gives the same 799 clean / 201 rejected for both, with no crashes or hangs. Remote probe measured with simulated RTT (same file); still open: RSS per stream and streams/core, and a real network
+- [~] **M6 `just bench-io`** (2026-11-07, `docs/perf/io-compare-2026-11-07.md`): probe startup 14.4 ms / 7.9 MiB vs ffprobe 35.8 ms / 19.2 MiB on a 480 KiB 720p VP9 MP4; a 1000-variant hostile corpus gives the same 799 clean / 201 rejected for both, with no crashes or hangs. Remote probe measured with simulated RTT (same file). Live density (2026-11-07, `docs/perf/live-streams-2026-11-07.md`): about 5 MiB median RSS per 3 Mbit/s 720p copy-ingest stream, flat from 1 to 16 publishers, with CPU under about 0.004 cores per stream, at the counter's noise floor, so streams per core is not pinned down. Still open: a real network
       (RTMP/WebM -> HLS density), hostile-input corpus (ffmpeg crash/hang count vs Kinetix).
       **Started 2026-10-08** (`just bench-io`, `examples/io_compare.rs`): probe startup + peak RSS (Windows only) and a
       deterministic 300-variant mutated-MP4 corpus. First result, 64 KiB seed: probe 8.4 ms / 6.9 MiB vs ffprobe

@@ -68,6 +68,60 @@ def rss_kib(pid):
     return None
 
 
+def cpu_seconds(pid):
+    """Total CPU time (user + system) of `pid` in seconds, or None if unreadable."""
+    if platform.system() == "Windows":
+        out = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"[string]::Format([Globalization.CultureInfo]::InvariantCulture, '{{0}}', (Get-Process -Id {pid}).TotalProcessorTime.TotalSeconds)",
+            ],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        try:
+            return float(out)
+        except ValueError:
+            return None
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        ticks = int(fields[11]) + int(fields[12])  # utime, stime
+        return ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def start_cpu_probe(exe, seconds):
+    """Windows: a typeperf process sampling the server's processor-time counter
+    once a second. (TotalProcessorTime moves in 15.6 ms steps, too coarse for a
+    server that uses well under one core, so the counter is read instead.)"""
+    if platform.system() != "Windows":
+        return None
+    name = os.path.splitext(os.path.basename(exe))[0]
+    return subprocess.Popen(
+        ["typeperf", f"\\Process({name})\\% Processor Time", "-sc", str(seconds), "-si", "1"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+
+
+def read_cpu_probe(proc):
+    """Mean cores used over the samples, or None."""
+    if proc is None:
+        return None
+    out, _ = proc.communicate(timeout=120)
+    values = []
+    for line in out.splitlines():
+        parts = line.rsplit(",", 1)
+        if len(parts) != 2:
+            continue
+        text = parts[1].strip().strip('"')
+        try:
+            values.append(float(text))
+        except ValueError:
+            continue  # the header lines
+    return sum(values) / len(values) / 100.0 if values else None
+
+
 def percentile(sorted_values, p):
     if not sorted_values:
         return None
@@ -147,6 +201,7 @@ def main():
 
         # Give the publishers a moment to produce a first segment.
         time.sleep(3)
+        baseline_kib = rss_kib(server.pid)  # the server before any publisher
         deadline = time.monotonic() + args.seconds
         viewers = [Viewer(base, f"pub{i % max(1, args.publishers)}", deadline)
                    for i in range(args.viewers)]
@@ -161,13 +216,22 @@ def main():
 
         sampler = threading.Thread(target=sample, daemon=True)
         started = time.monotonic()
+        cpu_start = cpu_seconds(server.pid)
+        cpu_probe = start_cpu_probe(args.tpt, int(args.seconds) + 1)
         sampler.start()
         for v in viewers:
             v.start()
         for v in viewers:
             v.join()
+        # With no viewers the window still runs to its full length.
+        time.sleep(max(0.0, deadline - time.monotonic()))
         elapsed = time.monotonic() - started
+        cpu_end = cpu_seconds(server.pid)
         sampler.join(timeout=2)
+        cores = read_cpu_probe(cpu_probe)
+        if cores is None and cpu_start is not None and cpu_end is not None and elapsed:
+            cores = (cpu_end - cpu_start) / elapsed
+        median_kib = statistics.median(samples) if samples else None
 
         latencies = sorted(x for v in viewers for x in v.latencies)
         ok = sum(v.ok for v in viewers)
@@ -191,6 +255,18 @@ def main():
                 "min": round(min(samples) / 1024, 1) if samples else None,
                 "max": round(max(samples) / 1024, 1) if samples else None,
             },
+            "server_cpu_cores": round(cores, 4) if cores is not None else None,
+            # Per publisher: the RSS above the idle server, and the cores it used.
+            "rss_per_publisher_mib": (
+                round((median_kib - baseline_kib) / 1024 / args.publishers, 2)
+                if median_kib is not None and baseline_kib is not None and args.publishers
+                else None
+            ),
+            "cores_per_publisher": (
+                round(cores / args.publishers, 6)
+                if cores is not None and args.publishers
+                else None
+            ),
         }
         text = json.dumps(summary, indent=2)
         print(text)
