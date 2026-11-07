@@ -111,21 +111,27 @@ fn pix_fmt(s: &StreamInfo) -> Option<String> {
     })
 }
 
-/// ffprobe's colour fields for a VP9 stream, from its `vpcC` record: the colour
-/// primaries, transfer and matrix (ISO 23001-8 codes) and the range. Unspecified
-/// codes are `unknown`, as ffprobe prints them. `None` for other codecs, whose
-/// colour is not in their configuration record.
+/// ffprobe's colour fields for a VP9 or AV1 stream, from its configuration record:
+/// the colour primaries, transfer and matrix (ISO 23001-8 codes) and the range.
+/// VP9 keeps them in `vpcC`; AV1 keeps them in its sequence header, which is in
+/// `av1C`. Unspecified codes are `unknown`, as ffprobe prints them. `None` for other
+/// codecs, and for AV1 without a sequence header.
 fn colour(s: &StreamInfo) -> Option<[(&'static str, &'static str); 4]> {
     let e = &s.extradata;
-    if s.codec != CodecId::Vp9 || e.len() < 10 {
-        return None;
-    }
-    let range = if e[6] & 1 == 1 { "pc" } else { "tv" };
+    let (full, matrix, transfer, primaries) = match s.codec {
+        CodecId::Vp9 if e.len() >= 10 => (e[6] & 1 == 1, e[9], e[8], e[7]),
+        CodecId::Av1 => {
+            let (p, t, m, full) = tpt_kinetix_demux::rfconfig::av1_colour(e)?;
+            (full, m, t, p)
+        }
+        _ => return None,
+    };
+    let range = if full { "pc" } else { "tv" };
     Some([
         ("color_range", range),
-        ("color_space", matrix_name(e[9])),
-        ("color_transfer", transfer_name(e[8])),
-        ("color_primaries", primaries_name(e[7])),
+        ("color_space", matrix_name(matrix)),
+        ("color_transfer", transfer_name(transfer)),
+        ("color_primaries", primaries_name(primaries)),
     ])
 }
 
