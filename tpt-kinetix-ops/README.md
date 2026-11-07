@@ -6,7 +6,8 @@ run summaries they print. The C ABI (`tpt-kinetix-ffi`), the Python bindings (`t
 and the Node.js bindings (`tpt-kinetix-node`) call these same functions, so every front end
 produces the same output.
 
-Nothing here decodes media. The crate is `publish = false`; it is a workspace-internal library.
+Nothing here decodes media. The crate is published (`publish = true`) because the `tpt-kinetix` CLI
+depends on it. Use it directly if you want the same probe, remux and package logic in your own Rust program.
 
 | Module | What it does |
 | --- | --- |
