@@ -14,7 +14,7 @@ on crates.io, and fill in the version and date.
   strips on publish.
 - Git tags `v0.1.0`, `v0.1.1` and `v0.1.2` exist; `v0.1.2` matches the published crates.
 
-## Will be published (20 workspace members → 18 published)
+## Will be published (20 workspace members → 19 published)
 
 Grouped by dependency wave: publish a wave only after every crate in the earlier waves is live.
 
@@ -53,6 +53,7 @@ Grouped by dependency wave: publish a wave only after every crate in the earlier
 
 | Done | Crate | Depends on | Version | Published on |
 |:---:|---|---|---|---|
+| [ ] | `tpt-kinetix-ops` | core, demux, mux, package | 0.2.0 | not yet published at 0.2.0 (made publishable 2026-11-08; the CLI depends on it) |
 | [ ] | `tpt-kinetix-stream` | core, demux, package | 0.2.0 | not yet published at 0.2.0 |
 
 ### Wave 5 — final
@@ -91,10 +92,11 @@ the name is claimed on crates.io (a real release also counts).
 - [x] `tpt-kinetix-pipeline`
 - [x] `tpt-kinetix-stream`
 - [x] `tpt-kinetix-cli`
+- [ ] `tpt-kinetix-ops` (not yet on crates.io; the 0.2.0 publish claims the name)
 
 ## Notes / known gaps
 
-- README "Publish order" and "name reservation" now list all 18 publishable crates, so the
+- README "Publish order" and "name reservation" now list all 19 publishable crates, so the
   original codec crates are covered. `release-plz.toml` marks them `publish = true` to match.
 - `tpt-kinetix-stream` has `tpt-kinetix-test-utils` as a path-only `[dev-dependencies]` entry
   (no `version`), so it is stripped on publish. Still verify with
