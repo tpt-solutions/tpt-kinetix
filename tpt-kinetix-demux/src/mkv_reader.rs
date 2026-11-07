@@ -265,6 +265,12 @@ impl<S: ReadAt> MkvReader<S> {
         Ok(data)
     }
 
+    /// The underlying source, for reading what the index does not cover (tags and
+    /// chapters, see [`crate::mkv_metadata::read_metadata`]).
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
     /// Consumes the reader and returns the underlying source.
     pub fn into_source(self) -> S {
         self.source

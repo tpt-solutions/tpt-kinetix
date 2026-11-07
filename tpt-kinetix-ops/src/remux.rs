@@ -73,6 +73,16 @@ struct Layout {
     /// The `udta` metadata of an MP4 input, carried into a progressive MP4 output.
     /// Never set by `sanitize`: metadata of an untrusted upload is not copied.
     user_data: Option<Vec<u8>>,
+    /// Tags and chapters for a WebM output, from an MP4 or Matroska input. Never set
+    /// by `sanitize`.
+    meta: Metadata,
+}
+
+/// The file-level metadata copied into a WebM output.
+#[derive(Clone, Default)]
+struct Metadata {
+    tags: Vec<(String, String)>,
+    chapters: Vec<(u64, String)>,
 }
 
 /// Bounds for untrusted input. Input beyond one of them is refused, never truncated.
@@ -128,6 +138,7 @@ pub fn remux(
         fragment_ms,
         sanitize: None,
         user_data: None,
+        meta: Metadata::default(),
     };
     remux_with(input, output, layout)
 }
@@ -140,6 +151,7 @@ pub fn sanitize(input: &str, output: &Path, limits: Limits) -> Result<()> {
         fragment_ms: None,
         sanitize: Some(limits),
         user_data: None,
+        meta: Metadata::default(),
     };
     let result = remux_with(input, output, layout);
     if result.is_err() {
@@ -260,8 +272,14 @@ fn remux_from_mp4<S: ReadAt>(
     } else {
         reader.user_data().map(<[u8]>::to_vec)
     };
+    let meta = if layout.sanitize.is_some() {
+        Metadata::default()
+    } else {
+        reader.user_data().map(metadata_of_udta).unwrap_or_default()
+    };
     let layout = Layout {
         user_data,
+        meta,
         ..layout
     };
     let next: Box<NextFrame> = Box::new(move || -> Result<Option<Frame>> {
@@ -306,6 +324,21 @@ fn remux_from_mkv<S: ReadAt>(
     target: Target,
     layout: Layout,
 ) -> Result<()> {
+    let meta = if layout.sanitize.is_some() {
+        Metadata::default()
+    } else {
+        match tpt_kinetix_demux::mkv_metadata::read_metadata(reader.source()) {
+            Ok(m) => Metadata {
+                tags: m.tags,
+                chapters: m.chapters,
+            },
+            Err(e) => {
+                tracing::warn!("tags and chapters not copied: {e}");
+                Metadata::default()
+            }
+        }
+    };
+    let layout = Layout { meta, ..layout };
     let streams: Vec<StreamInfo> = reader.streams().to_vec();
     let timings = frame_timings(&reader);
     let mut i = 0usize;
@@ -464,7 +497,7 @@ fn write_output(
             if kept.is_empty() {
                 bail!("no AV1, VP9 or Opus track in the input");
             }
-            let options = webm_options(layout.user_data.as_deref());
+            let options = webm_options(&layout.meta);
             write_webm(&kept, &map, next, output, options)
         }
         Target::Ivf => write_ivf(streams, next, output),
@@ -573,17 +606,24 @@ fn write_ogg(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> R
     Ok(())
 }
 
-/// The WebM options an MP4 input's metadata gives: its text tags and its chapters.
-fn webm_options(user_data: Option<&[u8]>) -> WebmOptions {
-    let mut options = WebmOptions::default();
-    if let Some(udta) = user_data {
-        options.tags = tpt_kinetix_demux::mp4::metadata::text_tags(udta)
+/// The metadata of an MP4 `udta` box: its text tags and chapters.
+fn metadata_of_udta(udta: &[u8]) -> Metadata {
+    Metadata {
+        tags: tpt_kinetix_demux::mp4::metadata::text_tags(udta)
             .into_iter()
             .map(|(name, value)| (name.to_string(), value))
-            .collect();
-        options.chapters = tpt_kinetix_demux::mp4::metadata::chapters(udta);
+            .collect(),
+        chapters: tpt_kinetix_demux::mp4::metadata::chapters(udta),
     }
-    options
+}
+
+/// The WebM options for an output's metadata.
+fn webm_options(meta: &Metadata) -> WebmOptions {
+    WebmOptions {
+        tags: meta.tags.clone(),
+        chapters: meta.chapters.clone(),
+        ..WebmOptions::default()
+    }
 }
 
 /// Writes frames to a WebM file (or a live stream to stdout when `output` is `-`).

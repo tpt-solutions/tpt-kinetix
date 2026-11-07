@@ -170,6 +170,48 @@ title=Main part
         "WebM output keeps the chapters"
     );
 
+    // Matroska input: the tags and chapters of an MKV carry over to WebM output too.
+    let mkv = dir.join("with-meta.mkv");
+    ffmpeg(&[
+        "-i",
+        src.to_str().unwrap(),
+        "-i",
+        chapter_text.to_str().unwrap(),
+        "-map_metadata",
+        "0",
+        "-map_chapters",
+        "1",
+        "-c",
+        "copy",
+        mkv.to_str().unwrap(),
+    ]);
+    let from_mkv = dir.join("from-mkv.webm");
+    tpt(&["remux", mkv.to_str().unwrap(), from_mkv.to_str().unwrap()]);
+    assert_eq!(
+        title_of(&from_mkv).as_deref(),
+        Some("Kinetix metadata check"),
+        "a Matroska input's title carries over to WebM"
+    );
+    let mkv_titles = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "chapter_tags=title",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&from_mkv)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&mkv_titles.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["Intro", "Main part"],
+        "a Matroska input's chapters carry over to WebM"
+    );
+
     let clean = dir.join("clean.mp4");
     tpt(&["sanitize", src.to_str().unwrap(), clean.to_str().unwrap()]);
     assert_eq!(title_of(&clean), None, "sanitize does not copy metadata");
