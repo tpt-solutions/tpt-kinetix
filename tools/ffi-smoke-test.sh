@@ -25,7 +25,7 @@ lib_dir="$work/lib"
 mkdir -p "$lib_dir"
 for f in libtpt_kinetix_ffi.so libtpt_kinetix_ffi.dylib tpt_kinetix_ffi.dll \
          tpt_kinetix_ffi.dll.lib libtpt_kinetix_ffi.a; do
-  if [ -f "target/release/$f" ]; then cp "target/release/$f" "$lib_dir/"; fi
+  if [ -f "${CARGO_TARGET_DIR:-target}/release/$f" ]; then cp "${CARGO_TARGET_DIR:-target}/release/$f" "$lib_dir/"; fi
 done
 if [ -f "$lib_dir/tpt_kinetix_ffi.dll.lib" ]; then
   cp "$lib_dir/tpt_kinetix_ffi.dll.lib" "$lib_dir/tpt_kinetix_ffi.lib"

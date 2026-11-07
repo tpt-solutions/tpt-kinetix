@@ -32,7 +32,7 @@ for cfg in $configs; do
   IFS=: read -r seg part ll codec <<<"$cfg"
   mime="video/webm;codecs=$codec,opus"
   port=$((port + 1))
-  SEGMENT_SECONDS=$seg PART_SECONDS=$part target/debug/examples/live_server "$port" >/dev/null 2>&1 &
+  SEGMENT_SECONDS=$seg PART_SECONDS=$part ${CARGO_TARGET_DIR:-target}/debug/examples/live_server "$port" >/dev/null 2>&1 &
   server=$!
   sleep 1
   echo "--- segment ${seg}s, parts ${part}s, hls.js lowLatencyMode=${ll}, ${codec}"

@@ -13,9 +13,9 @@ cargo build --release -q -p tpt-kinetix-node
 
 # The addon is the cdylib under its platform's name, loaded as a .node file.
 case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*) lib="target/release/tpt_kinetix_node.dll" ;;
-  Darwin) lib="target/release/libtpt_kinetix_node.dylib" ;;
-  *) lib="target/release/libtpt_kinetix_node.so" ;;
+  MINGW*|MSYS*|CYGWIN*) lib="${CARGO_TARGET_DIR:-target}/release/tpt_kinetix_node.dll" ;;
+  Darwin) lib="${CARGO_TARGET_DIR:-target}/release/libtpt_kinetix_node.dylib" ;;
+  *) lib="${CARGO_TARGET_DIR:-target}/release/libtpt_kinetix_node.so" ;;
 esac
 
 stage="$work/stage"

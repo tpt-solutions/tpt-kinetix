@@ -216,7 +216,11 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       (`#EXT-X-PART`, `INDEPENDENT=YES`, `EXT-X-VERSION:9`, `PART-INF`), one WebVTT file per A/V part (`sub-{k}-{n}-{i}.vtt`)
       holding the cues that start in that part's window, so cues show up as they are known rather than a whole segment
       later. The windows are the video's part windows (`LivePackager::sub_parts`). Test: `tpt-kinetix-cli/tests/live_subtitles.rs`
-      (real-time ffmpeg publisher, parts fetched as WebVTT). Not checked in a browser yet (hls.js live subtitles).
+      (real-time ffmpeg publisher, parts fetched as WebVTT). Browser (2026-11-08, `tools/live-subtitle-browser-test.sh`): hls.js
+      shows the live cues on the video's text track (6-7 cues while publishing). OPEN, found there: with a subtitle track in
+      the live stream, hls.js reports `levelLoadTimeOut` / `audioTrackLoadTimeOut` in headless Chrome, though playback
+      continues. The same happens before the subtitle-parts commit, and video-only live streams do not show it. The cause is
+      not the subtitle parts (turning their listing off does not change it); the script stays failing until it is found.
 - [-] **Subtitles on RTMP and WHIP ingest**: closed as not applicable. Neither carries a text track: RTMP/FLV has no
       standard caption or text track in Enhanced RTMP, and WebRTC has no text media. Subtitles reach a live presentation
       through WebM ingest (a subtitle track, `live_subtitles.rs`), which is the carriage that exists.
