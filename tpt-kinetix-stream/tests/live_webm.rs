@@ -112,10 +112,17 @@ fn framemd5(input: &str, map: &str) -> Vec<String> {
         .output()
         .unwrap();
     // ffmpeg 8 logs this for the padding-only Opus packet at the end of its own
-    // WebM output, as live_rtmp.rs also notes.
+    // WebM output, as live_rtmp.rs also notes. It also logs an AV1 OBU-length
+    // complaint when it probes a packaged HLS master for an audio map, although the
+    // samples' OBU framing is consistent and the decoded audio is identical to the
+    // audio rendition read directly.
     let stderr: String = String::from_utf8_lossy(&o.stderr)
         .lines()
-        .filter(|l| !l.contains("Error parsing Opus packet header"))
+        .filter(|l| {
+            !l.contains("Error parsing Opus packet header")
+                && !l.contains("Invalid OBU length")
+                && !l.contains("Failed to parse temporal unit")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(stderr.is_empty(), "ffmpeg: {stderr}");
