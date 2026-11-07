@@ -27,7 +27,7 @@ malformed file. Neither tool crashed or hung on any variant.
 - One seed file, probe only. The hostile run does not cover `remux`, `package` or
   `sanitize`, which parse the same containers more deeply.
 - ffprobe is run with its defaults, not tuned (`-probesize`, `-analyzeduration`).
-- Local disk, no network: the remote-probe round trips are not measured here.
+- The startup and hostile runs use local disk. The remote section adds its delay on localhost (see below).
 - Peak RSS is measured on Windows only.
 
 ## Remote probe (`--remote`)
