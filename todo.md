@@ -1,5 +1,48 @@
 # TPT Kinetix — Task Index
 
+## Open tasks — adoption review (2026-11-08)
+
+Source: read-only review of bugs, inconsistencies and adoption blockers (session of 2026-11-08). Items are
+worked in order; `[x]` means done in the tree, `[ ]` means still open, with the reason in the line.
+
+### A. Release consistency (blocks everything else)
+- [x] **Version drift.** DONE 2026-11-08: every non-fuzz workspace member and internal dep requirement is 0.2.0; Cargo.lock refreshed (version fields only); `cargo check --workspace --all-targets` passes; Python (`pyproject.toml`) and Node (`package.json`) bumped too.
+      codecs 0.1.3; bindings, ffi, ops 0.1.2). Align every workspace member to one version (0.2.0), including
+      internal path-dependency version requirements. Fuzz sub-crates keep their own versions (not workspace members).
+- [ ] **crates.io is half-released.** OPEN, needs the maintainer's go-ahead: `cargo publish --dry-run -p tpt-kinetix-core` passes (2026-11-08); the rest cannot be dry-run until their dependencies are live. Publishing is irreversible (yank only), so nothing has been uploaded.
+      crates are at 0.1.2, so `cargo install tpt-kinetix-cli` installs a build without the documented 0.2.0 features.
+      Publish all 18 crates at 0.2.0 in dependency order. **Needs the maintainer's go-ahead** (irreversible; yank only).
+- [x] `PUBLISHING.md` updated to the 0.2.0 state (2026-11-08): aligned version, crates.io status checked with a User-Agent header.
+
+### B. Bugs and stale docs
+- [x] `docs/migrating-from-ffmpeg.md` fixed (2026-11-08): shipped features moved to "Available now"; the missing list now names what really is missing.
+      muxing). Remove them and list what is still missing.
+- [x] `docs/user-guide.md` fixed (2026-11-08) against the code: tags and chapters carry to WebM; cover art carries only MP4 to MP4 (raw `udta`).
+      chapters and the 0.2.0 CHANGELOG says metadata carries. Reconcile against the code and fix the wrong one.
+- [x] `todo-io.md` checkboxes fixed (2026-11-08): "Ingest hardening" and "styp + sidx" are `[~]` because open items remain; the rest already matched.
+      items carry OPEN notes). One pass to make each checkbox match its text.
+- [ ] Repo-root directory named " " (a single space) exists and is empty and untracked (git ignores it). Its creator is unknown (created 2026-11-08 01:36). Left in place; delete it once confirmed unused.
+
+### C. Adoption
+- [x] README quickstart added (2026-11-08): four commands, plus a sample made with ffmpeg. The expected `probe` output is checked against a real H.264/AAC sample.
+      `remux`, `package` and `live`.
+- [x] "What works with my files" added: `docs/what-works-with-my-files.md`. H.264/AAC MP4 checked through probe, remux (mp4), doctor and package; the outputs decode with 150 frames each in ffmpeg. WebM output refuses H.264 as expected.
+      real file (ffmpeg-generated), and document what `sanitize` and `transcode` drop or refuse.
+- [x] Compatibility matrix added: `docs/compatibility.md`, using only the checks the repo already runs. Safari, iOS, TV and I-frame trick-play are marked not checked.
+      hardware players are unverified here; mark them as such rather than claiming support.
+- [~] Python wheels: built with maturin and tested 2026-11-08 (`tools/py-binding-test.sh`, 7 tests pass on Windows, from a clean venv). Manual PyPI workflow added at `.github/workflows/pypi.yml` (dispatch only, `pypi` environment with approval, trusted publishing). OPEN: the name `tpt-kinetix` on PyPI needs the maintainer's approval, and the first run needs a configured trusted publisher. Nothing has been published.
+      to PyPI needs the name approved and is **not done** until the maintainer agrees.
+- [~] Node package: `tools/node-binding-test.sh` passes (7 tests, from the packed tarball, 2026-11-08). OPEN: `private` stays until the npm name is approved; then flip it and publish.
+- [ ] CI e2e jobs (`wasm-package-test`, `edge-worker-test`, `browser-*`, `live-browser-test`) have never run green on a hosted runner. OPEN: needs a GitHub run; this Windows machine cannot close it.
+      on a hosted runner. Needs a GitHub run to close; cannot be verified from this Windows machine.
+- [x] Windows fuzzing path documented in CONTRIBUTING.md (WSL for libFuzzer; the native proptests still run on Windows).
+
+### D. Found while doing the above (2026-11-08)
+- [x] Remux error for WebM output named no codec. Now names the codecs in the input and the ones WebM carries (`tpt-kinetix-ops/src/remux.rs`); checked 2026-11-08.
+- [ ] Safari / iOS native playback of fMP4 HLS (VP9 and AV1 especially): needs a device; not checked.
+- [ ] hls.js I-frame trick-play in a browser: not checked.
+- [ ] `docs/what-works-with-my-files.md`: verify IVF to MP4 passthrough with a real IVF sample (only the code path is trusted, not a file test).
+
 ## Open tasks — platform review (2026-11-06)
 
 Source: read-only review of bugs, gaps, innovation and adoption. Direction stays the I/O layer with royalty-free codecs first (no new codecs, no audio codecs here). Full plan: `~/.claude/plans/pasted-content-id-fcd9-review-platform-crispy-stonebraker.md`.

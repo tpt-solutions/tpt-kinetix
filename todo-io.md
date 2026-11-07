@@ -148,7 +148,7 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       decode in ffmpeg (303 frames from the first 3). Rust-level tests in `tests/ws_ingest.rs`. Server ping keep-alive DONE 2026-10-07 (`IngestPolicy::ws_ping_interval`, default 15 s: a quiet publisher is pinged, one silent for a second interval is dropped; `silent_websocket_publishers_are_pinged_and_dead_ones_dropped`). `wss://` / HTTPS DONE 2026-10-07 (`LiveServer::with_tls`, feature `rtmps`; CLI `live --tls-cert/--tls-key`, build with `--features tls`, which also gives RTMPS; `tests/tls_ingest.rs` with a throwaway openssl cert; verified through the CLI with curl). OPEN: compressed
       frames (permessage-deflate is not offered), publishing from non-Chromium browsers (Firefox/Safari
       MediaRecorder does not produce AV1/VP9 WebM everywhere).
-- [ ] **Ingest hardening** — HTTP/WebSocket/RTMP ingest DONE 2026-10-06 (`IngestPolicy`, `LiveServer::with_policy`, `policy.rs`; CLI
+- [~] **Ingest hardening** — HTTP/WebSocket/RTMP ingest DONE 2026-10-06 (`IngestPolicy`, `LiveServer::with_policy`, `policy.rs`; CLI
       `live --publish-token/--idle-timeout/--max-streams/--max-bitrate-kbps/--reject-concurrent`): bearer/`?token=`
       auth (global + per-key, constant-time compare) -> 401; idle timeout -> 408; max duration -> 408; max bytes ->
       413; sustained-bitrate cap (after a 2 s grace) -> 429; max live streams -> 503; optional 409 on a second
@@ -228,7 +228,7 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       standard caption or text track in Enhanced RTMP, and WebRTC has no text media. Subtitles reach a live presentation
       through WebM ingest (a subtitle track, `live_subtitles.rs`), which is the carriage that exists.
 - [ ] Multi-audio-language tracks and `EXT-X-MEDIA` metadata, trick-play.
-- [x] `styp` + `sidx` on VOD media segments DONE 2026-10-07 (`FragmentWriter::with_segment_index`; single-track segments get a v1 one-reference `sidx`, used by `Packager::media_segment`; test in `package.rs`). Still open: `sidx` for live segments (parts stay bare `moof`+`mdat`) and a whole-file `sidx` for `remux --fragmented`; verify with the DASH-IF validator.
+- [~] `styp` + `sidx` on VOD media segments DONE 2026-10-07 (`FragmentWriter::with_segment_index`; single-track segments get a v1 one-reference `sidx`, used by `Packager::media_segment`; test in `package.rs`). Still open: `sidx` for live segments (parts stay bare `moof`+`mdat`) and a whole-file `sidx` for `remux --fragmented`; verify with the DASH-IF validator.
 
 ### C. Containers (demux / mux)
 
