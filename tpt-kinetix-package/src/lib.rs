@@ -111,6 +111,34 @@ impl From<tpt_kinetix_core::error::KinetixError> for PackageError {
     }
 }
 
+/// The ClearKey JSON Web Key set for `enc`: the key ID and the key, each base64url
+/// without padding. Shared by the static and the live packager.
+pub(crate) fn clearkey_json(enc: &tpt_kinetix_mux::Encryption) -> String {
+    format!(
+        "{{\"keys\":[{{\"kty\":\"oct\",\"kid\":\"{}\",\"k\":\"{}\"}}]}}",
+        base64url(&enc.key_id),
+        base64url(&enc.key)
+    )
+}
+
+/// Base64url (RFC 4648 section 5) without padding.
+fn base64url(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for i in 0..=chunk.len() {
+            out.push(char::from(T[(n >> (18 - 6 * i)) as usize & 63]));
+        }
+    }
+    out
+}
+
 /// Packaging options.
 #[derive(Debug, Clone)]
 pub struct PackagerOptions {
@@ -263,6 +291,13 @@ impl Packager {
     /// The CENC key the packaged tracks are protected with, if any.
     pub fn encryption(&self) -> Option<&tpt_kinetix_mux::Encryption> {
         self.opts.encryption.as_ref()
+    }
+
+    /// The ClearKey license (`key.json`) for the protected tracks, or `None` for
+    /// clear output. It is the JSON Web Key set that ClearKey players expect: the
+    /// key ID and the key, each base64url without padding.
+    pub fn clearkey_license(&self) -> Option<String> {
+        self.opts.encryption.as_ref().map(clearkey_json)
     }
 
     /// RFC 6381 codec string of packaged track `track`.

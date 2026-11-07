@@ -1,4 +1,4 @@
-//! WHIP (WebRTC-HTTP ingest, RFC 9725): browsers and encoders publish **VP9 + Opus**
+//! WHIP (WebRTC-HTTP ingest, RFC 9725): browsers and encoders publish **VP9 or AV1 + Opus**
 //! over WebRTC with one HTTP request.
 //!
 //! `POST /whip/<key>` with `Content-Type: application/sdp` and an SDP offer is
@@ -18,8 +18,9 @@
 //! timeout, recording, reconnect handling and multi-rendition packaging all apply
 //! unchanged.
 //!
-//! Limits of this first version: VP9 and Opus only (AV1 over WebRTC needs the
-//! sequence header turned into an `av1C`), non-trickle ICE (the answer carries the
+//! AV1 frames are ingested as temporal units; the `av1C` is taken from the first
+//! key frame's sequence header, as VP9's configuration is taken from its first key
+//! frame. Limits of this version: non-trickle ICE (the answer carries the
 //! candidates), no `PATCH`, and audio/video are aligned by arrival time of each
 //! track's first packet rather than RTCP sender reports, so A/V sync can be off by
 //! the start-up jitter (tens of milliseconds).
@@ -164,6 +165,7 @@ mod engine {
             .clear_codecs()
             .enable_opus(true, false)
             .enable_vp9(true)
+            .enable_av1(true)
             .build(Instant::now());
 
         // One socket per advertised address, all on the same port. A single socket
@@ -316,28 +318,32 @@ mod engine {
                                 .as_secs_f64()
                                 * 1000.0;
                             match (kind, codec) {
-                                (Some(MediaKind::Video), Codec::Vp9) => {
+                                (Some(MediaKind::Video), Codec::Vp9 | Codec::Av1) => {
                                     let origin = video_origin.get_or_insert_with(|| {
                                         // First video packet: declare the track. The record is
                                         // empty on purpose, so the configuration is derived
                                         // from the first key frame.
                                         session.on_event(&RtmpMediaEvent::Video {
                                             timestamp: arrival_ms as u32,
-                                            tag: video_tag(true, true, Vec::new()),
+                                            tag: video_tag(codec, true, true, Vec::new()),
                                         });
                                         Origin {
                                             base_ms: arrival_ms,
                                             rtp_ms,
                                         }
                                     });
-                                    let key = vp9_is_key(&d.data);
+                                    let key = if codec == Codec::Av1 {
+                                        d.is_keyframe()
+                                    } else {
+                                        vp9_is_key(&d.data)
+                                    };
                                     video_mid = Some((d.mid, d.rid));
                                     if key {
                                         last_key = Instant::now();
                                     }
                                     session.on_event(&RtmpMediaEvent::Video {
                                         timestamp: origin.map(rtp_ms),
-                                        tag: video_tag(key, false, d.data.to_vec()),
+                                        tag: video_tag(codec, key, false, d.data.to_vec()),
                                     });
                                     if !d.contiguous && last_pli.elapsed() > Duration::from_secs(1)
                                     {
@@ -425,14 +431,18 @@ mod engine {
         result
     }
 
-    fn video_tag(key: bool, sequence_start: bool, data: Vec<u8>) -> FlvVideoTag {
+    fn video_tag(codec: Codec, key: bool, sequence_start: bool, data: Vec<u8>) -> FlvVideoTag {
         FlvVideoTag {
             frame_type: if key {
                 FlvFrameType::KeyFrame
             } else {
                 FlvFrameType::InterFrame
             },
-            codec: FlvVideoCodec::Vp9,
+            codec: if codec == Codec::Av1 {
+                FlvVideoCodec::Av1
+            } else {
+                FlvVideoCodec::Vp9
+            },
             avc_packet_type: if sequence_start {
                 AvcPacketType::SequenceHeader
             } else {

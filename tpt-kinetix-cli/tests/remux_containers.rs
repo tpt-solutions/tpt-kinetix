@@ -205,3 +205,58 @@ fn opus_to_ogg_keeps_the_audio_frames() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// IVF in, MP4 and WebM out: an AV1 IVF has no codec configuration of its own,
+/// so the remux builds `av1C` from its sequence header. Frames must survive.
+#[test]
+fn ivf_to_mp4_and_webm_keeps_av1_frames() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: ffmpeg not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tpt_remux_ivf_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src.ivf");
+    let made = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=30",
+            "-t",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libaom-av1",
+            "-cpu-used",
+            "8",
+        ])
+        .arg(&src)
+        .status()
+        .unwrap();
+    if !made.success() {
+        eprintln!("skipping: could not encode AV1 with ffmpeg (libaom-av1)");
+        return;
+    }
+
+    let mp4 = dir.join("out.mp4");
+    let webm = dir.join("out.webm");
+    remux(&src, &mp4);
+    assert_eq!(&file_head(&mp4)[4..8], b"ftyp", "a .mp4 output must be MP4");
+    remux(&src, &webm);
+    assert_eq!(
+        &file_head(&webm)[..4],
+        [0x1A, 0x45, 0xDF, 0xA3],
+        "a .webm output must be WebM"
+    );
+
+    let video = frame_hashes(&src, "0:v:0");
+    assert!(!video.is_empty(), "the source IVF decodes");
+    assert_eq!(frame_hashes(&mp4, "0:v:0"), video, "MP4 video frames");
+    assert_eq!(frame_hashes(&webm, "0:v:0"), video, "WebM video frames");
+    let _ = std::fs::remove_dir_all(&dir);
+}

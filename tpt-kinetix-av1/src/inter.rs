@@ -643,13 +643,15 @@ fn scaled_predict(
     }
 
     let mid_row = |r_abs: i32| -> Vec<i32> {
-        let ry = r_abs.clamp(0, ref_h as i32 - 1) as usize * ref_stride;
+        let ry = r_abs.clamp(0, ref_h.max(1) as i32 - 1) as usize * ref_stride;
         cols.iter()
             .map(|(off, k)| {
                 let mut s = 0i32;
                 for (t, &c) in k.iter().enumerate() {
-                    let sx = (left + off + t as i32 - 3).clamp(0, ref_w as i32 - 1);
-                    s += refp[ry + sx as usize] as i32 * c;
+                    let sx = (left + off + t as i32 - 3).clamp(0, ref_w.max(1) as i32 - 1);
+                    // A reference plane shorter than its header says reads as 0, not a panic
+                    // (found by fuzz_av1_frame: the decoder keeps state across inputs).
+                    s += refp.get(ry + sx as usize).copied().unwrap_or(0) as i32 * c;
                 }
                 (s + ((1 << (6 - ib)) >> 1)) >> (6 - ib)
             })
@@ -1545,5 +1547,34 @@ mod tests {
         };
         assert_eq!(seen, again);
         assert!(seen.iter().all(|&r| is_inter_ref(r)));
+    }
+
+    /// A reference whose buffer is shorter than its header says must read as zero,
+    /// not panic (found by fuzz_av1_frame).
+    #[test]
+    fn scaled_prediction_tolerates_a_short_reference_buffer() {
+        let sc = RefScale::new(64, 64, 32, 32).expect("a scaled reference");
+        let refp = vec![100u16; 10];
+        let mut dest = vec![0u16; 8 * 8];
+        motion_compensate_scaled(
+            &mut dest,
+            8,
+            &refp,
+            64,
+            64,
+            64,
+            0,
+            0,
+            8,
+            8,
+            Mv { row: 0, col: 0 },
+            0,
+            0,
+            0,
+            0,
+            &sc,
+            8,
+        );
+        assert!(dest.iter().all(|&v| v <= 100));
     }
 }

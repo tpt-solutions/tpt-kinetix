@@ -16,6 +16,7 @@
 pub mod http;
 pub mod ivf;
 pub mod mkv;
+pub mod mkv_metadata;
 pub mod mkv_reader;
 pub mod mkv_stream;
 pub mod mp4;

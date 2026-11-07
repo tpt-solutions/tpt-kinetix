@@ -1,0 +1,21 @@
+{
+  "machine": "Windows-11-10.0.26200-SP0",
+  "publishers": 1,
+  "viewers": 1,
+  "seconds": 20.0,
+  "requests_ok": 1992,
+  "requests_not_ready": 0,
+  "requests_error": 0,
+  "requests_per_second": 99.6,
+  "latency_ms": {
+    "mean": 10.04,
+    "p50": 15.56,
+    "p95": 17.94,
+    "p99": 19.57,
+    "max": 34.1
+  },
+  "server_rss_mib": {
+    "min": 15.7,
+    "max": 16.7
+  }
+}
