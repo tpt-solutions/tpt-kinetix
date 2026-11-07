@@ -52,6 +52,8 @@ pub struct FragmentWriter {
     tracks: Vec<Track>,
     sequence: u32,
     segment_index: bool,
+    /// A `udta` box (header included) for the init segment's `moov`.
+    user_data: Option<Vec<u8>>,
 }
 
 fn rescale(value: i64, from: (u32, u32), to_scale: u32) -> Result<i64, MuxError> {
@@ -101,6 +103,7 @@ impl FragmentWriter {
             tracks,
             sequence: 1,
             segment_index: false,
+            user_data: None,
         })
     }
 
@@ -109,6 +112,12 @@ impl FragmentWriter {
     /// describing the fragment (earliest presentation time, duration, SAP), then
     /// `moof` + `mdat`. Off by default (live parts and plain fragments are bare
     /// `moof` + `mdat`).
+    /// Carries a `udta` box (metadata, header included) into the init segment's `moov`.
+    pub fn with_user_data(mut self, udta: Option<Vec<u8>>) -> Self {
+        self.user_data = udta;
+        self
+    }
+
     pub fn with_segment_index(mut self, on: bool) -> Self {
         self.segment_index = on;
         self
@@ -187,6 +196,9 @@ impl FragmentWriter {
             mvex.extend(full_box(b"trex", 0, 0, &trex));
         }
         moov.extend(boxed(b"mvex", &mvex));
+        if let Some(udta) = &self.user_data {
+            moov.extend_from_slice(udta);
+        }
         [boxed(b"ftyp", &ftyp), boxed(b"moov", &moov)].concat()
     }
 

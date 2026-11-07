@@ -36,6 +36,9 @@ pub struct WriterOptions {
     pub max_chunk_bytes: usize,
     /// Always write 64-bit chunk offsets (`co64`), even for small files.
     pub force_co64: bool,
+    /// A complete `udta` box (header included) to append to `moov`, so metadata
+    /// from another file (see the demuxer's `user_data`) is carried over.
+    pub user_data: Option<Vec<u8>>,
 }
 
 impl Default for WriterOptions {
@@ -44,6 +47,7 @@ impl Default for WriterOptions {
             chunk_duration_ms: 500,
             max_chunk_bytes: 4 << 20,
             force_co64: false,
+            user_data: None,
         }
     }
 }
@@ -334,6 +338,9 @@ impl<W: Write + Seek> Mp4Writer<W> {
         let mut body = full_box(b"mvhd", 0, 0, &mvhd);
         for t in traks {
             body.extend(t);
+        }
+        if let Some(udta) = &self.opts.user_data {
+            body.extend_from_slice(udta);
         }
         Ok(boxed(b"moov", &body))
     }

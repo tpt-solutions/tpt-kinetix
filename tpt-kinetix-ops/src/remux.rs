@@ -5,7 +5,7 @@
 //! The output container follows the output path: `.webm`/`.mkv` writes WebM
 //! (a seekable file with a `Cues` index, or a live stream with unknown sizes to
 //! `-`), anything else writes MP4 (progressive, `--faststart`, or
-//! `--fragmented`). The input can be either container, so MP4 to WebM and WebM
+//! `--fragmented`). The input can be MP4, WebM or IVF, so MP4 to WebM and WebM
 //! to MP4 are copies too.
 
 use std::io::{BufWriter, Write};
@@ -16,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use tpt_kinetix_core::codec::{CodecId, MediaType};
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
-use tpt_kinetix_demux::{Demuxer, MkvReader, Mp4Reader, ReadAt};
+use tpt_kinetix_demux::{Demuxer, IvfDemuxer, MkvReader, Mp4Reader, ReadAt};
 use tpt_kinetix_mux::{
     faststart, FragmentWriter, IvfWriter, Mp4Writer, OggWriter, WebmOptions, WebmWriter,
     WriterOptions,
@@ -64,12 +64,15 @@ enum Target {
 }
 
 /// Output options that only MP4 can honour.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Layout {
     faststart: bool,
     fragment_ms: Option<u32>,
     /// Set by `sanitize`: keep only royalty-free streams and enforce these limits.
     sanitize: Option<Limits>,
+    /// The `udta` metadata of an MP4 input, carried into a progressive MP4 output.
+    /// Never set by `sanitize`: metadata of an untrusted upload is not copied.
+    user_data: Option<Vec<u8>>,
 }
 
 /// Bounds for untrusted input. Input beyond one of them is refused, never truncated.
@@ -124,6 +127,7 @@ pub fn remux(
         faststart: want_faststart,
         fragment_ms,
         sanitize: None,
+        user_data: None,
     };
     remux_with(input, output, layout)
 }
@@ -135,6 +139,7 @@ pub fn sanitize(input: &str, output: &Path, limits: Limits) -> Result<()> {
         faststart: false,
         fragment_ms: None,
         sanitize: Some(limits),
+        user_data: None,
     };
     let result = remux_with(input, output, layout);
     if result.is_err() {
@@ -147,11 +152,14 @@ fn remux_with(input: &str, output: &Path, layout: Layout) -> Result<()> {
     let fragment_ms = layout.fragment_ms;
     let remote = input.starts_with("http://") || input.starts_with("https://");
     // The input's magic decides the reader; the output path decides the writer.
-    let input_is_webm = if remote {
-        // Remote inputs are indexed by their first bytes; a WebM starts with the
-        // EBML magic, an MP4 with a box type such as `ftyp`.
+    // Remote inputs are indexed by their first bytes; a WebM starts with the
+    // EBML magic, an IVF with `DKIF`, an MP4 with a box type such as `ftyp`.
+    let head: [u8; 4] = if remote {
         let head = fetch_head(input)?;
-        head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+        let mut magic = [0u8; 4];
+        let n = head.len().min(4);
+        magic[..n].copy_from_slice(&head[..n]);
+        magic
     } else {
         let file = std::fs::File::open(input)
             .with_context(|| format!("failed to open input file: {input}"))?;
@@ -162,8 +170,13 @@ fn remux_with(input: &str, output: &Path, layout: Layout) -> Result<()> {
             f.read_exact(&mut head)
                 .with_context(|| format!("failed to read input file: {input}"))?;
         }
-        head == [0x1A, 0x45, 0xDF, 0xA3]
+        head
     };
+    let input_is_webm = head == [0x1A, 0x45, 0xDF, 0xA3];
+    let input_is_ivf = &head == b"DKIF";
+    if input_is_ivf && remote {
+        bail!("an IVF input must be a local file (IVF has no index to read over HTTP)");
+    }
     // `-` (stdout) can only carry a live WebM or a fragmented MP4.
     let target = if wants_ivf(output) {
         Target::Ivf
@@ -187,6 +200,11 @@ fn remux_with(input: &str, output: &Path, layout: Layout) -> Result<()> {
         bail!("writing MP4 to stdout needs --fragmented (a progressive MP4 must seek back)");
     }
 
+    if input_is_ivf {
+        // IVF is a whole-buffer container (no index), so it is read in full.
+        let data = std::fs::read(input).with_context(|| format!("failed to read IVF: {input}"))?;
+        return remux_from_ivf(data, output, target, layout);
+    }
     match (input_is_webm, remote) {
         (true, true) => {
             let reader = MkvReader::open(tpt_kinetix_demux::http::open_url(input))
@@ -237,11 +255,43 @@ fn remux_from_mp4<S: ReadAt>(
 ) -> Result<()> {
     let streams = reader.streams();
     let scales: Vec<u32> = streams.iter().map(|s| s.timescale).collect();
+    let user_data = if layout.sanitize.is_some() {
+        None
+    } else {
+        reader.user_data().map(<[u8]>::to_vec)
+    };
+    let layout = Layout {
+        user_data,
+        ..layout
+    };
     let next: Box<NextFrame> = Box::new(move || -> Result<Option<Frame>> {
         let Some((p, ticks)) = reader.read_packet_timed()? else {
             return Ok(None);
         };
         let scale = scales.get(p.stream_index as usize).copied().unwrap_or(1000);
+        Ok(Some((p, ticks, scale, 0)))
+    });
+    let (streams, mut next) = guard(streams, next, layout.sanitize);
+    write_output(streams, &mut *next, output, target, layout)
+}
+
+/// Copies an IVF input (one AV1 or VP9 track). IVF frame `i` starts at
+/// `i * ticks_per_frame` on the stream's own clock, so every frame lasts the
+/// same number of ticks: the track duration divided by the frame count.
+fn remux_from_ivf(data: Vec<u8>, output: &Path, target: Target, layout: Layout) -> Result<()> {
+    let mut demuxer = IvfDemuxer::new(data).context("failed to parse IVF input")?;
+    let streams = vec![demuxer.stream_info().clone()];
+    let scale = streams[0].timescale;
+    let frames = demuxer.frame_count() as u64;
+    let ticks = streams[0]
+        .duration
+        .checked_div(frames)
+        .and_then(|t| u32::try_from(t).ok())
+        .unwrap_or(0);
+    let next: Box<NextFrame> = Box::new(move || -> Result<Option<Frame>> {
+        let Some(p) = demuxer.read_packet()? else {
+            return Ok(None);
+        };
         Ok(Some((p, ticks, scale, 0)))
     });
     let (streams, mut next) = guard(streams, next, layout.sanitize);
@@ -424,8 +474,15 @@ fn write_output(
                 bail!("no copyable video or audio streams in the input");
             }
             match layout.fragment_ms {
-                Some(ms) => copy_fragmented(next, &kept, &map, output, ms),
-                None => copy_progressive(next, &kept, &map, output, layout.faststart),
+                Some(ms) => copy_fragmented(next, &kept, &map, output, ms, layout.user_data),
+                None => copy_progressive(
+                    next,
+                    &kept,
+                    &map,
+                    output,
+                    layout.faststart,
+                    layout.user_data,
+                ),
             }
         }
     }
@@ -584,6 +641,7 @@ fn copy_progressive(
     map: &[Option<u32>],
     output: &Path,
     want_faststart: bool,
+    user_data: Option<Vec<u8>>,
 ) -> Result<()> {
     let started = Instant::now();
     // With --faststart, write to a sibling temp file first, then relocate moov.
@@ -591,7 +649,11 @@ fn copy_progressive(
     let target: &Path = if want_faststart { &tmp } else { output };
     let file = std::fs::File::create(target)
         .with_context(|| format!("failed to create {}", target.display()))?;
-    let mut writer = Mp4Writer::new(BufWriter::new(file), kept, WriterOptions::default())?;
+    let options = WriterOptions {
+        user_data,
+        ..WriterOptions::default()
+    };
+    let mut writer = Mp4Writer::new(BufWriter::new(file), kept, options)?;
     let (mut packets, mut bytes) = (0u64, 0u64);
     while let Some((mut p, ticks, scale, discard)) = next()? {
         let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
@@ -637,6 +699,7 @@ fn copy_fragmented(
     map: &[Option<u32>],
     output: &Path,
     fragment_ms: u32,
+    user_data: Option<Vec<u8>>,
 ) -> Result<()> {
     let started = Instant::now();
     let mut out: Box<dyn Write> = if output.as_os_str() == "-" {
@@ -646,7 +709,7 @@ fn copy_fragmented(
             || format!("failed to create {}", output.display()),
         )?))
     };
-    let mut writer = FragmentWriter::new(kept)?;
+    let mut writer = FragmentWriter::new(kept)?.with_user_data(user_data);
     out.write_all(&writer.init_segment())?;
     // The stream that decides where fragments end.
     let lead = kept
