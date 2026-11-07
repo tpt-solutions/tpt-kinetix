@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Version set to 0.2.0 with the rest of the workspace (2026-11-08). Not published: the C ABI ships in the repository.
+
 ### Added
 
 - C ABI: `tk_probe_json`, `tk_faststart`, `tk_remux` and `tk_package` (HLS and DASH, with optional
