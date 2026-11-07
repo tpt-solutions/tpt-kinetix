@@ -859,6 +859,15 @@ fn ll_playlist_tags_follow_the_spec() {
     let seg_lines = |p: &str| p.lines().filter(|l| l.starts_with("seg-")).count();
     let n = seg_lines(&full);
     assert!(n >= 8, "need a long window: {n} segments");
+    // With parts, TARGETDURATION is twice the longest segment (hls.js caps blocking
+    // reloads at 0.8 x it); a segment of 1 s gives 2.
+    let target: u64 = full
+        .lines()
+        .find_map(|l| l.strip_prefix("#EXT-X-TARGETDURATION:"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(target, 2, "{full}");
     let first_msn: u64 = full
         .lines()
         .find_map(|l| l.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))

@@ -217,15 +217,13 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       holding the cues that start in that part's window, so cues show up as they are known rather than a whole segment
       later. The windows are the video's part windows (`LivePackager::sub_parts`). Test: `tpt-kinetix-cli/tests/live_subtitles.rs`
       (real-time ffmpeg publisher, parts fetched as WebVTT). Browser (2026-11-08, `tools/live-subtitle-browser-test.sh`): hls.js
-      shows the live cues on the video's text track (6-7 cues while publishing). OPEN, found there: with a subtitle track in
-      the live stream, hls.js reports `levelLoadTimeOut` / `audioTrackLoadTimeOut` in headless Chrome, though playback
-      continues. The same happens before the subtitle-parts commit, and video-only live streams do not show it. Traced 2026-11-08 with the
-      DevTools network log (`tools/cdp-netlog.mjs`): hls.js sends `_HLS_msn=N&_HLS_part=5` for the segment after the one
-      in progress, which the server holds until that part exists (1.4-2 s), and hls.js aborts its request after ~1.6 s
-      (`ERR_ABORTED`), then retries. The video-only run asks for the same part with a shorter wait and never aborts, so
-      it is timing-dependent. Not the subtitle parts (turning their listing off does not change it), and not the server's
-      hold (it answers when the part exists). Next: find hls.js's blocking-request timeout, and decide whether the server
-      should answer a future-part request sooner, which the spec does not allow as written.
+      shows the live cues on the video's text track (6-7 cues while publishing). FIXED 2026-11-08: with a subtitle track, hls.js aborted blocking playlist
+      reloads and reported `levelLoadTimeOut` / `audioTrackLoadTimeOut`. Cause: hls.js caps a low-latency playlist request
+      at `min(..., max(3 x PART-TARGET, 0.8 x TARGETDURATION))`. With 2 s segments that is 1.6 s, and a reload for a part of
+      the next segment can wait up to a segment. Fix: with parts, `EXT-X-TARGETDURATION` is twice the longest segment
+      (`target_duration`, live media and subtitle playlists). A larger target is still a valid upper bound. Checked:
+      `live-subtitle-browser-test.sh` passes with no errors, 7 cues, 3 runs; `live-browser-test.sh` still passes; package
+      and CLI live tests pass (`ll_playlist_tags_follow_the_spec` pins the value). Traced with `tools/cdp-netlog.mjs`.
 - [-] **Subtitles on RTMP and WHIP ingest**: closed as not applicable. Neither carries a text track: RTMP/FLV has no
       standard caption or text track in Enhanced RTMP, and WebRTC has no text media. Subtitles reach a live presentation
       through WebM ingest (a subtitle track, `live_subtitles.rs`), which is the carriage that exists.

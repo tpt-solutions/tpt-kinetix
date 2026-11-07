@@ -256,6 +256,19 @@ fn vtt_of(sub: &LiveSub, keep: impl Fn(&LiveCue) -> bool) -> Vec<u8> {
     crate::subtitles::segment_file(&cues).into_bytes()
 }
 
+/// `EXT-X-TARGETDURATION` for a live playlist whose longest segment is `longest`
+/// seconds. With parts, the value is doubled: hls.js caps a blocking reload at
+/// `0.8 x` this value, and a reload for a part of the next segment waits for up to a
+/// whole segment. A larger target is still a valid upper bound on every segment.
+fn target_duration(longest: f64, parts: bool) -> u64 {
+    let base = longest.ceil() as u64;
+    if parts {
+        base * 2
+    } else {
+        base
+    }
+}
+
 /// Whether `info` is a WebVTT subtitle track.
 fn is_webvtt(info: &StreamInfo) -> bool {
     info.codec == CodecId::WebVtt && info.media_type == MediaType::Subtitle
@@ -1075,7 +1088,7 @@ impl LivePackager {
         let key = crate::hls::key_line_for(self.opts.encryption.as_ref());
         let mut out = format!(
             "#EXTM3U\n#EXT-X-VERSION:{version}\n#EXT-X-TARGETDURATION:{}\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXT-X-INDEPENDENT-SEGMENTS\n{key}#EXT-X-MAP:URI=\"init-{track}.mp4\"\n",
-            max.ceil() as u64,
+            target_duration(max, parts),
             first.number,
         );
         let disc_seq = self.discontinuities_dropped
@@ -1225,7 +1238,7 @@ impl LivePackager {
 #EXT-X-MEDIA-SEQUENCE:{}
 ",
             if parts { 9 } else { 7 },
-            max.ceil() as u64,
+            target_duration(max, parts),
             first.number
         );
         if parts {
