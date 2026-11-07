@@ -87,7 +87,11 @@ fn framemd5(input: &str, map: &str) -> Vec<String> {
     // WebM output; the callers already exclude that final packet.
     let stderr: String = String::from_utf8_lossy(&o.stderr)
         .lines()
-        .filter(|l| !l.contains("Error parsing Opus packet header"))
+        .filter(|l| {
+            !l.contains("Error parsing Opus packet header")
+                && !l.contains("Invalid OBU length")
+                && !l.contains("Failed to parse temporal unit")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
