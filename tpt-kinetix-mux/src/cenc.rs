@@ -13,14 +13,21 @@
 
 use std::fmt;
 
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockEncrypt, KeyInit, KeyIvInit, StreamCipher};
+use aes::cipher::{Block, BlockCipherEncrypt, KeyInit, KeyIvInit, StreamCipher};
 use aes::Aes128;
 
 use crate::entries::{boxed, full_box};
 use crate::MuxError;
 
 type Aes128Ctr = ctr::Ctr64BE<Aes128>;
+
+/// Encrypts one 16-byte block in place.
+fn encrypt_block_in_place(cipher: &Aes128, block: &mut [u8]) {
+    let mut b = Block::<Aes128>::default();
+    b.copy_from_slice(block);
+    cipher.encrypt_block(&mut b);
+    block.copy_from_slice(&b);
+}
 
 /// The pattern of `cbcs-pattern`: encrypt 1 block, skip 9.
 const PATTERN_CRYPT: usize = 1;
@@ -126,7 +133,7 @@ pub fn apply_cbc_encrypt(key: &[u8; 16], iv: [u8; 16], data: &mut [u8]) {
         for (b, p) in block.iter_mut().zip(prev.iter()) {
             *b ^= p;
         }
-        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+        encrypt_block_in_place(&cipher, block);
         prev.copy_from_slice(block);
     }
 }
@@ -146,7 +153,7 @@ pub fn apply_cbc_pattern(key: &[u8; 16], iv: [u8; 16], data: &mut [u8], crypt: u
         for (b, p) in block.iter_mut().zip(prev.iter()) {
             *b ^= p;
         }
-        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+        encrypt_block_in_place(&cipher, block);
         prev.copy_from_slice(block);
     }
 }
@@ -157,7 +164,7 @@ pub fn cbc_iv(key: &[u8; 16], counter: u64) -> [u8; 16] {
     let cipher = Aes128::new(key.into());
     let mut block = [0u8; 16];
     block[8..].copy_from_slice(&counter.to_be_bytes());
-    cipher.encrypt_block(GenericArray::from_mut_slice(&mut block));
+    encrypt_block_in_place(&cipher, &mut block);
     block
 }
 
