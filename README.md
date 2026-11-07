@@ -11,6 +11,30 @@ successor to FFmpeg for production transcoding and streaming pipelines.
 
 ---
 
+## Quickstart
+
+Install the CLI (see [Install the CLI](#install-the-cli) for the options), then try it on any MP4 or WebM file:
+
+```bash
+tpt-kinetix probe in.mp4                       # list tracks, codecs, duration
+tpt-kinetix remux in.webm out.mp4 --faststart  # copy streams into MP4, no re-encode
+tpt-kinetix package in.mp4 out/                # HLS + DASH with fMP4 segments
+tpt-kinetix live --port 8080                   # live server; publish AV1/VP9 + Opus to /ingest/<key>
+```
+
+To try it without a file of your own, make a six-second H.264/AAC sample with ffmpeg and probe it:
+
+```bash
+ffmpeg -f lavfi -i testsrc=size=320x180:rate=25 -f lavfi -i sine=frequency=440 -t 6 \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart sample.mp4
+tpt-kinetix probe sample.mp4
+```
+
+Expected output for that sample (checked on 2026-11-08): two tracks, `codec=H264` 320x180 with 150 samples
+and `codec=Aac` 1 channel at 44100 Hz. `remux` and `package` copy the H.264 and AAC unchanged. Kinetix
+does not decode H.264 or AAC; see [what works with my files](docs/what-works-with-my-files.md) for the
+full matrix, and [the ffmpeg migration guide](docs/migrating-from-ffmpeg.md) for command equivalents.
+
 ## Current status
 
 TPT Kinetix is **early-stage and pre-1.0**. This table summarizes what works

@@ -120,6 +120,13 @@ cd tpt-kinetix-demux && cargo fuzz build
 cd tpt-kinetix-av1   && cargo fuzz build
 ```
 
+**On Windows**, the MSVC toolchain cannot link the sanitizer build that libFuzzer needs, so
+`cargo fuzz run` fails at link time. Run fuzzing under WSL (Ubuntu) instead, from the same
+checkout: `wsl -d Ubuntu`, then the commands above. Each target's no-panic proptest
+(`tests/proptest_*.rs`, with `KINETIX_FUZZ_ITERS` where present) still runs natively on Windows,
+so you can check parsers without WSL; a fuzz run is still needed before a parser change is
+considered done.
+
 If cargo-fuzz finds a crash it writes a reproducer to
 `fuzz/artifacts/<target>/crash-*`.  Add that file to the crate's
 `fuzz/corpus/<target>/` directory so it becomes a permanent regression case.
