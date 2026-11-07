@@ -1,6 +1,6 @@
 {
   "name": "tpt-kinetix-node",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Probe, remux and package media files with the TPT Kinetix engine (native Node.js addon)",
   "main": "index.js",
   "types": "index.d.ts",
