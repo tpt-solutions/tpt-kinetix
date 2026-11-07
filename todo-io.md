@@ -125,8 +125,15 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       an error on the *next* `recv_from` (ignored now), str0m needs the true local address of each datagram (one UDP
       socket per advertised address, not one on 0.0.0.0), a WebRTC encoder sends a key frame only at the start and
       on request (so the server sends a PLI every segment duration, or no segment is ever cut), and the VP9
-      configuration must come from the first key frame. OPEN: AV1 over WebRTC (needs `av1C` built from the sequence
-      header), trickle ICE / `PATCH`, A/V alignment from RTCP sender reports (str0m already surfaces the NTP<->RTP
+      configuration must come from the first key frame. **AV1 over WebRTC DONE 2026-11-08**: negotiated alongside VP9
+      (`enable_av1`); the `av1C` is built from the first key frame's sequence header (`av1c_from_sequence_header`), the
+      same as VP9's config-from-key-frame; the keyframe flag comes from str0m's AV1 depacketizer. The publish page offers
+      only the codec the transport names (VP9 or AV1, plus RTX); with VP9 also offered, the answer picked VP9 and the
+      first "AV1" run was really VP9. Verified in headless Chrome: `TRANSPORT=whip-av1 tools/browser-publish-test.sh`
+      publishes `av01.0.01M.08` over WHIP, 3 segments decode in ffmpeg, and the harness now fails unless the master
+      playlist names the codec it asked for. The VP9 WHIP browser failure seen earlier was the harness running a stale
+      `target/debug/examples/live_server` instead of the one it had just built (`CARGO_TARGET_DIR`); fixed in the
+      script. Trickle ICE / `PATCH`, A/V alignment from RTCP sender reports (str0m already surfaces the NTP<->RTP
       mapping; today each track is aligned by the arrival time of its first packet), TURN/STUN for publishers
       behind NAT (`--whip-candidate-ip` advertises a public address), an OBS WHIP pass, a session metric.
 - [x] **Browser publish** DONE 2026-10-06: chose **WebSocket ingest** over streaming `fetch` (Chrome's upload streaming
@@ -202,11 +209,25 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       `Packager` works over a `SampleIndex` trait (implemented by `Mp4Index` and `MkvIndex`), and
       `package`/`serve` sniff the EBML magic. Verified: a real VP9 + Opus WebM packages into HLS that
       ffmpeg decodes frame-for-frame identically to the source.
-- [ ] Worker: segment cache layer (Cache API), `Range` on segment responses, real Cloudflare/R2 deployment test,
-      CPU/memory limits under load, Deno/Fastly smoke tests.
+- [~] Worker, 2026-11-07: Cache API layer (`caches.default`) for init, segment, trick-play and WebVTT responses, checked before any origin read; `Range` (206/416) on binary responses; trick-play and subtitle routes added (the handler was missing them, so `just edge-worker-test` had been failing on the trick-play output). `tools/edge-worker-test.sh` passes with all 12 native files byte-identical. Open: real Cloudflare/R2 deployment test, CPU/memory limits under load, Deno/Fastly smoke tests.
 - [ ] Live variant at the edge (Durable Object / stateful worker holding the `LivePackager`).
 - [ ] Encryption: CENC/CBCS + ClearKey/Widevine key hooks (AV1/VP9/Opus).
-- [ ] Subtitles/WebVTT passthrough, multi-audio-language tracks and `EXT-X-MEDIA` metadata, trick-play.
+- [x] **LL-HLS subtitle parts** DONE 2026-11-08: the live subtitle playlist lists the parts of the segment in progress
+      (`#EXT-X-PART`, `INDEPENDENT=YES`, `EXT-X-VERSION:9`, `PART-INF`), one WebVTT file per A/V part (`sub-{k}-{n}-{i}.vtt`)
+      holding the cues that start in that part's window, so cues show up as they are known rather than a whole segment
+      later. The windows are the video's part windows (`LivePackager::sub_parts`). Test: `tpt-kinetix-cli/tests/live_subtitles.rs`
+      (real-time ffmpeg publisher, parts fetched as WebVTT). Browser (2026-11-08, `tools/live-subtitle-browser-test.sh`): hls.js
+      shows the live cues on the video's text track (6-7 cues while publishing). FIXED 2026-11-08: with a subtitle track, hls.js aborted blocking playlist
+      reloads and reported `levelLoadTimeOut` / `audioTrackLoadTimeOut`. Cause: hls.js caps a low-latency playlist request
+      at `min(..., max(3 x PART-TARGET, 0.8 x TARGETDURATION))`. With 2 s segments that is 1.6 s, and a reload for a part of
+      the next segment can wait up to a segment. Fix: with parts, `EXT-X-TARGETDURATION` is twice the longest segment
+      (`target_duration`, live media and subtitle playlists). A larger target is still a valid upper bound. Checked:
+      `live-subtitle-browser-test.sh` passes with no errors, 7 cues, 3 runs; `live-browser-test.sh` still passes; package
+      and CLI live tests pass (`ll_playlist_tags_follow_the_spec` pins the value). Traced with `tools/cdp-netlog.mjs`.
+- [-] **Subtitles on RTMP and WHIP ingest**: closed as not applicable. Neither carries a text track: RTMP/FLV has no
+      standard caption or text track in Enhanced RTMP, and WebRTC has no text media. Subtitles reach a live presentation
+      through WebM ingest (a subtitle track, `live_subtitles.rs`), which is the carriage that exists.
+- [ ] Multi-audio-language tracks and `EXT-X-MEDIA` metadata, trick-play.
 - [x] `styp` + `sidx` on VOD media segments DONE 2026-10-07 (`FragmentWriter::with_segment_index`; single-track segments get a v1 one-reference `sidx`, used by `Packager::media_segment`; test in `package.rs`). Still open: `sidx` for live segments (parts stay bare `moof`+`mdat`) and a whole-file `sidx` for `remux --fragmented`; verify with the DASH-IF validator.
 
 ### C. Containers (demux / mux)
@@ -233,12 +254,12 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       *after* every cluster, so reading them means reading the whole file anyway. What it buys is a
       validated index a web-demuxer-style client (or a cached one) can seek with. Still open:
       actually serving that index / cue-based seeking over HTTP.
-- [ ] MPEG-TS: streaming demux (`TsDemuxer` still takes a `Vec`) and `StreamInfo` (M1/M2 for TS).
+- [x] MPEG-TS streaming demux (`TsDemuxer::from_reader`, 504b196): reads on demand, no whole-file `Vec`. Seeking on TS is still unsupported.
 - [~] IVF (AV1/VP9) demux done 2026-10-04 (`IvfDemuxer`: fourcc, geometry, frame ranges, seek,
       truncated-tail tolerant, `probe` support incl. `--json`; values match `ffprobe`). IVF mux and
       Ogg/Opus (`.opus`) demux/mux still open.
-- [ ] Metadata/chapters/`udta`/cover art passthrough in `remux`; non-seekable progressive output; MP4 `elst` multi-edit.
-- [ ] `av1C`/`vpcC` synthesis when a container omits them (AV1 sequence-header OBU parse; VP9 from key frame is done).
+- [~] Metadata/chapters/`udta`/cover art passthrough in `remux`; non-seekable progressive output; MP4 `elst` multi-edit. `udta` DONE 2026-11-07 for MP4 to progressive MP4: the demuxer keeps the raw `moov/udta` box, `remux` appends it byte for byte (`tpt-kinetix-cli/tests/remux_metadata.rs`: a title survives, and `sanitize` drops it on purpose). `covr` cover art is inside `udta`, so it comes along, but that is not checked separately. Fragmented output carries it too (in the init segment's `moov`, 2026-11-07). WebM output carries the text tags (title, artist, album, date, comment, genre) as a Matroska `Tags` element after `Tracks` (2026-11-07; `tpt-kinetix-cli/tests/remux_metadata.rs`, read back by ffprobe). Chapters too (2026-11-07): the MP4 `chpl` list is read and written as a Matroska `Chapters` element after `Tracks` (`remux_metadata.rs`, read back by ffprobe). A Matroska input's tags, its title (from `Info`) and its chapters are carried into WebM output too (2026-11-07: `mkv_metadata.rs` scans the file's `Tags`, `Info` and `Chapters` by their headers; `remux_metadata.rs` checks the title and chapters with ffprobe). Still open: cover art is not carried as a separate item (it stays inside `udta`), non-seekable progressive output, and the MP4 `elst` multi-edit.
+- [~] `av1C`/`vpcC` synthesis when a container omits them. DONE 2026-11-07 for IVF input: `IvfDemuxer` builds `extradata` from the first AV1 sequence header (`av1c_from_sequence_header`) or VP9 key frame (`vpcC`), so `remux` of an IVF into MP4/WebM works (`ivf_to_mp4_and_webm_keeps_av1_frames`, frame MD5s identical to the source). 2026-11-07, also for MP4 and WebM: `Mp4Index::load` builds a missing `av1C`/`vpcC` from the first key frame (capped at 16 MiB), and the MKV AV1 track no longer fails without CodecPrivate (it waits for its first key frame, as VP9 does). Checked in `tpt-kinetix-demux/tests/config_synthesis.rs`: the AV1 record matches ffmpeg's byte for byte, and a remux of an MP4 with the record hidden decodes to the same frame MD5s as the original. OPEN: AV1 over WebRTC is not implemented at all (`whip.rs` takes VP9 and Opus only; it needs RTP AV1 depacketisation and SDP work), so it cannot call this yet.
 - [x] Removed the remaining `std::fs::read` callers, 2026-10-04. `DemuxStage` now holds a
       `Box<dyn ReadAt + Send>` and demuxes through `Mp4Reader` (positional reads) instead of a
       `Vec<u8>`; a `Vec<u8>` still satisfies `ReadAt` so existing callers are unaffected. The CLI
@@ -272,7 +293,7 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
 
 ### D. Evidence, quality, tooling
 
-- [ ] **M6 `just bench-io`**: startup, remote-probe round trips, RSS per stream and streams/core vs ffmpeg
+- [~] **M6 `just bench-io`** (2026-11-07, `docs/perf/io-compare-2026-11-07.md`): probe startup 14.4 ms / 7.9 MiB vs ffprobe 35.8 ms / 19.2 MiB on a 480 KiB 720p VP9 MP4; a 1000-variant hostile corpus gives the same 799 clean / 201 rejected for both, with no crashes or hangs. Remote probe measured with simulated RTT (same file). Live density (2026-11-07, `docs/perf/live-streams-2026-11-07.md`): about 5 MiB median RSS per 3 Mbit/s 720p copy-ingest stream, flat from 1 to 16 publishers, with CPU under about 0.004 cores per stream, at the counter's noise floor, so streams per core is not pinned down. Still open: a real network
       (RTMP/WebM -> HLS density), hostile-input corpus (ffmpeg crash/hang count vs Kinetix).
       **Started 2026-10-08** (`just bench-io`, `examples/io_compare.rs`): probe startup + peak RSS (Windows only) and a
       deterministic 300-variant mutated-MP4 corpus. First result, 64 KiB seed: probe 8.4 ms / 6.9 MiB vs ffprobe
@@ -294,19 +315,16 @@ Priority rule (user, 2026-10-04): **royalty-free first — AV1, VP9, Opus.** H.2
       102 vs 162 ms (0.2 vs 34.8 MiB moved); 50 ms 222 vs 339 ms; 100 ms 429 vs 648 ms. Both use 3 requests;
       Kinetix wins ~1.5x on time and 5-175x on bytes. Caveats: localhost proxy models latency not bandwidth; ffprobe
       untuned (-probesize).
-- [ ] Run the fuzz targets (`fuzz_mp4_reader`, add `fuzz_mkv_stream`, `fuzz_moof`) in CI — local nightly sanitizer broken;
-      commit crash regressions to `fuzz/corpus/`.
+- [~] Run the fuzz targets (`fuzz_mp4_reader`, add `fuzz_mkv_stream`, `fuzz_moof`) in CI. 2026-11-07: the local sanitizer build works in WSL Ubuntu (not on Windows MSVC), 60 s runs of `fuzz_moof` and `fuzz_faststart` are clean, and `fuzz_mkv_stream` found and fixed a u64 overflow (regression test `tpt-kinetix-demux/tests/fuzz_regression_mkv_stream.rs`). CI `fuzz-smoke` already runs. Crash reproducers are tracked through a `.gitignore` exception (`**/fuzz/corpus/*/crash-*`). AV1 (2026-11-07, stateful `fuzz_av1_frame`, which keeps one decoder across inputs): the untracked `crash-5a7e…` no longer reproduces; a four-minute run found two real panics, both fixed with unit tests: a short reference plane in the scaled prediction (`inter.rs`, now reads as 0), and film-grain scaling points that do not increase (`frame.rs` rejects them, `film_grain.rs` guards the table). The reproducers are tracked as `crash-*` in the corpus. Open: the `oom-417ef90b…` and `ibc-negative-origin-overflow` files in the same directory are not named `crash-*`, so they stay untracked; the stateful crashes depend on the input history, so each one needs the run that found it to reproduce. Sweep 2026-11-07, 60 s on each of the 14 in-scope targets (AV1, VP9, demux, mux, stream): two more real panics, both fixed with tests and reproducers tracked: VP9 `frame.rs` wrote the above contexts past `mi_cols` for blocks at the right edge (now padded to whole superblocks), and the MP4 reader's `find_moov` overflowed `pos + 8` on a box size near `u64::MAX` (now saturating). The other 12 targets ran clean. The stateful AV1 run and the 60 s sweep are the two that found anything, so a longer nightly run is the next step.
 - [x] CI jobs for the new end-to-end tests: `wasm-package-test`, `edge-worker-test`, `browser-package-test`,
       `live-browser-test` (added to `.github/workflows/ci.yml`; they run the existing `just` recipes /
       `tools/*.sh` scripts). Chrome comes from `tools/fetch-chrome.sh` (Chrome-for-Testing, cached;
       falls back to a system browser), since GitHub runners have none by default. NOT yet observed
       green on a real runner — the scripts were only run locally on Windows.
-- [ ] Load test the live server (N concurrent publishers/viewers; CPU, RSS, latency) and record it.
+- [x] Load test the live server (N concurrent publishers/viewers; CPU, RSS, latency), 2026-11-07: `tools/live-load-test.py`, results in `docs/perf/live-load-2026-11-07.md`. 4 publishers with 16 viewers: 3978 req/s, p99 7.5 ms, no errors, RSS 10–16 MiB. The client shares the host, so these are floors. CPU per stream and blocking reloads are not measured.
 - [ ] Real network latency measurements for remote probe / JIT segments (everything so far is localhost).
-- [ ] Docs: user guide for `remux` / `package` / `serve` / `live`, API docs for `ReadAt`/`AsyncReadAt`/`Packager`/
-      `LivePackager`, a PATENTS.md note on royalty-free vs passthrough of encumbered codecs.
-- [ ] `Packet` has no duration field (it is built in ~200 places): decide on a migration or keep the out-of-band
-      `read_packet_timed` / `write_packet_with_duration`.
+- [~] Docs: user guide DONE 2026-11-07 (`docs/user-guide.md`, linked from `docs/README.md`). The PATENTS.md container-level H.264 note was already there. Open: API docs for `ReadAt`/`AsyncReadAt`/`Packager`/`LivePackager` beyond the rustdoc comments that exist.
+- [x] `Packet` has no duration field (it is built in ~200 places). Decided 2026-11-06 in `todo.md`: keep the out-of-band `read_packet_timed` / `write_packet_with_duration`; revisit only with a 1.0 breaking-change window.
 
 ### E. Explicitly not planned
 

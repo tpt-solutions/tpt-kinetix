@@ -16,6 +16,7 @@ use tpt_kinetix_core::{
     timestamp::Timestamp,
 };
 
+use crate::rfconfig::{av1c_from_sequence_header, vp9_config_from_frame, vpcc_record};
 use crate::Demuxer;
 
 /// The file header size: 32 bytes, always present.
@@ -224,7 +225,26 @@ fn parse(data: &[u8]) -> Result<ParsedIvf, KinetixError> {
     }
     // Frame `i` starts at `i * ticks_per_frame`, so the track lasts one step per frame.
     info.duration = frames.len() as u64 * ticks_per_frame;
+    // IVF has no configuration record, so build one from the stream itself. A
+    // remux into MP4 (`av01`/`vp09`) needs it; without it the writer refuses.
+    info.extradata = config_record(codec, data, &frames).unwrap_or_default();
     Ok((info, frames, ticks_per_frame))
+}
+
+/// The codec configuration record (`av1C` / `vpcC`) for an IVF stream, built
+/// from the first frame that carries the stream's parameters: the first AV1
+/// sequence header, or the first VP9 key frame.
+fn config_record(codec: CodecId, data: &[u8], frames: &[(usize, usize)]) -> Option<Vec<u8>> {
+    frames.iter().find_map(|&(start, end)| {
+        let payload = &data[start..end];
+        match codec {
+            CodecId::Av1 if has_sequence_header(payload) => av1c_from_sequence_header(payload),
+            CodecId::Vp9 if is_keyframe(codec, payload) => {
+                vp9_config_from_frame(payload, 0, 0).map(|cfg| vpcc_record(&cfg))
+            }
+            _ => None,
+        }
+    })
 }
 
 impl Demuxer for IvfDemuxer {

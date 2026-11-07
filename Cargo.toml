@@ -22,6 +22,9 @@ members = [
   "tpt-kinetix-cli",
   "tpt-kinetix-test-utils",
   "tpt-kinetix-ffi",
+  "tpt-kinetix-ops",
+  "tpt-kinetix-py",
+  "tpt-kinetix-node",
 ]
 exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "out-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz", "tpt-kinetix-vision/fuzz"]
 
@@ -73,6 +76,7 @@ tpt-kinetix-volumetric = { path = "tpt-kinetix-volumetric", version = "0.1.2" }
 tpt-kinetix-lossless = { path = "tpt-kinetix-lossless", version = "0.1.2" }
 tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.1.2" }
 tpt-kinetix-package = { path = "tpt-kinetix-package", version = "0.1.2" }
+tpt-kinetix-ops = { path = "tpt-kinetix-ops", version = "0.1.2" }
 tpt-kinetix-pipeline = { path = "tpt-kinetix-pipeline", version = "0.1.2", default-features = false }
 tpt-kinetix-stream = { path = "tpt-kinetix-stream", version = "0.1.2", default-features = false }
 

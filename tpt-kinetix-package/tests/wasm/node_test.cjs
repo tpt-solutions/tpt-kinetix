@@ -47,6 +47,22 @@ const { WasmPackager } = require(path.resolve(pkgDir, "tpt_kinetix_package.js"))
       files++;
     }
   }
+  // WebVTT subtitle renditions, when the source has them.
+  for (let k = 0; k < pk.subtitleCount; k++) {
+    same(`subs-${k}.m3u8`, pk.subtitleMediaPlaylist(k));
+    files++;
+    for (let n = 1; n <= pk.segmentCount; n++) {
+      same(`sub-${k}-${n}.vtt`, await pk.subtitleSegment(k, n));
+      files++;
+    }
+  }
+  // Trick-play renditions, for each video track the native output wrote.
+  for (let t = 0; t < pk.trackCount; t++) {
+    if (!fs.existsSync(path.join(nativeDir, `iframes-${t}.m3u8`))) continue;
+    same(`iframes-${t}.m3u8`, await pk.iframePlaylist(t));
+    same(`iframes-${t}.m4s`, await pk.iframeFile(t));
+    files += 2;
+  }
   assert.strictEqual(pk.requests, reads);
   await assert.rejects(pk.mediaSegment(0, 9999));
   assert.throws(() => pk.hlsMedia(99));

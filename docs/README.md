@@ -5,6 +5,7 @@ install it. The pages here go further.
 
 ## Using the CLI
 
+- [User guide](user-guide.md): `remux`, `package`, `serve` and `live`, with the flags for encryption, limits and recording.
 - [Migrating from ffmpeg / ffprobe](migrating-from-ffmpeg.md): which command
   does what, and what does not exist yet.
 - `tpt-kinetix <command> --help` lists every flag, with examples for `probe`,

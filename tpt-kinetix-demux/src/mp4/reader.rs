@@ -25,7 +25,7 @@
 use anyhow::{anyhow, bail, Result};
 use tpt_kinetix_core::{error::KinetixError, packet::Packet, timestamp::Timestamp};
 
-use super::container::{parse_moov_payload, Mp4Track};
+use super::container::{parse_moov_payload, walk_boxes, Mp4Track};
 use super::fragment::{is_fragmented, parse_moof, parse_trex_list};
 use crate::source::{block_on, AsyncReadAt, Blocking, ReadAt};
 use crate::Demuxer;
@@ -68,7 +68,25 @@ pub struct Mp4Index {
     pub(crate) index: Vec<Vec<SampleRef>>,
     /// `StreamInfo` per track, built once (see [`Mp4Index::stream_infos`]).
     stream_infos: Vec<tpt_kinetix_core::stream::StreamInfo>,
+    /// The `udta` box of `moov` (header included), copied as it is, for remux.
+    user_data: Option<Vec<u8>>,
 }
+
+/// The `udta` child of a `moov` payload as a complete box, or `None` if absent or
+/// too large to be metadata (over 1 MiB).
+fn user_data_box(moov_payload: &[u8]) -> Option<Vec<u8>> {
+    let (_, payload) = walk_boxes(moov_payload).find(|(kind, _)| kind == b"udta")?;
+    if payload.len() > 1 << 20 {
+        return None;
+    }
+    let mut raw = (payload.len() as u32 + 8).to_be_bytes().to_vec();
+    raw.extend_from_slice(b"udta");
+    raw.extend_from_slice(payload);
+    Some(raw)
+}
+
+/// The largest key frame read to build a missing codec configuration record.
+const MAX_CONFIG_FRAME: usize = 16 << 20;
 
 impl Mp4Index {
     /// Loads the index from `source`.
@@ -77,9 +95,10 @@ impl Mp4Index {
         let (payload_off, payload_len) = find_moov(source, len).await?;
         let mut payload = vec![0u8; payload_len as usize];
         source.read_at(payload_off, &mut payload).await?;
-        let tracks = parse_moov_payload(&payload);
+        let mut tracks = parse_moov_payload(&payload);
         let fragmented = is_fragmented(&payload);
         let trex = parse_trex_list(&payload);
+        let user_data = user_data_box(&payload);
         drop(payload);
         let mut index = tracks.iter().map(build_index).collect::<Result<Vec<_>>>()?;
         if fragmented {
@@ -95,7 +114,38 @@ impl Mp4Index {
                 parse_moof(start, &moof, &trex, &tracks, &mut next_dts, &mut index)?;
             }
         }
-        Ok(Self::new(len, tracks, index))
+        // A track whose sample entry has no codec configuration (some muxers omit
+        // `av1C` or `vpcC`) gets one built from its first key frame, so a remux or a
+        // package still writes a decodable init segment. The frame read is capped:
+        // a sample size comes from the file, so it cannot be trusted.
+        for (t, track) in tracks.iter_mut().enumerate() {
+            if !track.extradata.is_empty() {
+                continue;
+            }
+            let Some(codec) = track.codec else { continue };
+            if !matches!(
+                codec,
+                tpt_kinetix_core::codec::CodecId::Av1 | tpt_kinetix_core::codec::CodecId::Vp9
+            ) {
+                continue;
+            }
+            let Some(key) = index[t].iter().find(|s| s.is_key) else {
+                continue;
+            };
+            if key.size as usize > MAX_CONFIG_FRAME {
+                continue;
+            }
+            let mut frame = vec![0u8; key.size as usize];
+            source.read_at(key.offset, &mut frame).await?;
+            if let Some(cfg) =
+                crate::rfconfig::config_from_key_frame(codec, &frame, track.width, track.height)
+            {
+                track.extradata = cfg;
+            }
+        }
+        let mut idx = Self::new(len, tracks, index);
+        idx.user_data = user_data;
+        Ok(idx)
     }
 
     /// Builds the derived per-track `StreamInfo` cache from a finished index.
@@ -118,7 +168,14 @@ impl Mp4Index {
             tracks,
             index,
             stream_infos,
+            user_data: None,
         }
+    }
+
+    /// The `udta` box of the movie (`moov/udta`, header included): metadata such as
+    /// titles and cover art, kept byte for byte so a remux can carry it over.
+    pub fn user_data(&self) -> Option<&[u8]> {
+        self.user_data.as_deref()
     }
 
     /// Length of the file the index was loaded from.
@@ -217,6 +274,11 @@ impl<S: ReadAt> Mp4Reader<S> {
             idx,
             cursor,
         })
+    }
+
+    /// The movie's `udta` box (metadata), byte for byte, if the file has one.
+    pub fn user_data(&self) -> Option<&[u8]> {
+        self.idx.user_data()
     }
 
     /// The loaded index.
@@ -325,7 +387,8 @@ impl<S: ReadAt> Demuxer for Mp4Reader<S> {
 async fn find_moov<S: AsyncReadAt>(source: &S, len: u64) -> Result<(u64, u64)> {
     let mut pos = 0u64;
     for _ in 0..MAX_TOP_LEVEL_BOXES {
-        if pos + 8 > len {
+        // `pos` comes from box sizes in the file: a plain add can overflow.
+        if pos.saturating_add(8) > len {
             break;
         }
         let mut hdr = [0u8; 16];

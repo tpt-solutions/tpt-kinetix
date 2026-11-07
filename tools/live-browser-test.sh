@@ -30,7 +30,7 @@ ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=320x240:rate=25 -t 30 \
 
 cargo build --release -q -p tpt-kinetix-cli
 port=8871
-target/release/tpt-kinetix live --port "$port" --segment-seconds 2 >"$work/live.log" 2>&1 &
+${CARGO_TARGET_DIR:-target}/release/tpt-kinetix live --port "$port" --segment-seconds 2 >"$work/live.log" 2>&1 &
 server=$!
 ffmpeg -loglevel error -re -i "$work/src.webm" -c copy -f webm -method POST -chunked_post 1 \
   "http://127.0.0.1:$port/ingest/cam" &

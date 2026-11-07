@@ -15,6 +15,8 @@ use super::config::parse_sample_entry;
 /// A fully-parsed MP4 track, including its complete sample table.
 #[derive(Debug, Clone)]
 pub struct Mp4Track {
+    /// The `tkhd` enabled flag, reported as the track's default disposition.
+    pub enabled: bool,
     pub track_id: u32,
     pub timescale: u32,
     pub duration: u64,
@@ -72,6 +74,7 @@ impl Mp4Track {
         s.extradata = self.extradata.clone();
         s.edit_media_time = self.edit_media_time;
         s.language = self.language.clone();
+        s.disposition.default = self.enabled;
         s
     }
 
@@ -264,6 +267,7 @@ fn parse_trak(trak_payload: &[u8]) -> Result<Mp4Track> {
     let language = mdhd.language.clone();
     Ok(Mp4Track {
         language,
+        enabled: tkhd.enabled,
         track_id: tkhd.track_id,
         timescale: mdhd.timescale,
         duration: mdhd.duration,

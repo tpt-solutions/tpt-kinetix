@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tpt-kinetix"
+version = "0.1.2"
+description = "Probe, remux and package media files with the TPT Kinetix engine"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Video",
+]
+
+[tool.maturin]
+module-name = "tpt_kinetix._tpt_kinetix"
+python-source = "python"
+features = ["extension-module"]
