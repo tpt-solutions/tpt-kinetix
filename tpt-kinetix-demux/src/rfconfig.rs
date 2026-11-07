@@ -15,6 +15,9 @@ pub struct Vp9Config {
     pub chroma_subsampling: u8,
     /// Full-range video.
     pub full_range: bool,
+    /// RGB samples (`color_space` 7): the matrix is the identity, so ffprobe
+    /// calls a 4:4:4 stream `gbrp`.
+    pub rgb: bool,
     /// Coded width.
     pub width: u32,
     /// Coded height.
@@ -375,6 +378,7 @@ pub fn vp9_config_from_frame(frame: &[u8], _hint_w: u32, _hint_h: u32) -> Option
         bit_depth,
         chroma_subsampling,
         full_range,
+        rgb: color_space == 7,
         width,
         height,
     })
@@ -406,7 +410,8 @@ pub fn vpcc_record(cfg: &Vp9Config) -> Vec<u8> {
     v.push(cfg.profile);
     v.push(vp9_level(cfg.width, cfg.height));
     v.push((cfg.bit_depth << 4) | (cfg.chroma_subsampling << 1) | u8::from(cfg.full_range));
-    v.extend_from_slice(&[2, 2, 2]); // colour primaries / transfer / matrix: unspecified
+    // Colour primaries and transfer are unspecified; the matrix is the identity for RGB.
+    v.extend_from_slice(&[2, 2, if cfg.rgb { 0 } else { 2 }]);
     v.extend_from_slice(&0u16.to_be_bytes()); // codecInitializationDataSize
     v
 }
@@ -463,6 +468,23 @@ pub fn opus_packet_samples(packet: &[u8]) -> Option<u32> {
         _ => u32::from(*packet.get(1)? & 0x3F),
     };
     (frames > 0).then_some(frame * frames)
+}
+
+/// The codec configuration record (`av1C` for AV1, `vpcC` for VP9) for a stream
+/// whose container omits it, built from one of its key frames: the AV1 sequence
+/// header or the VP9 key-frame header. `None` when the frame carries neither.
+pub fn config_from_key_frame(
+    codec: tpt_kinetix_core::codec::CodecId,
+    frame: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    use tpt_kinetix_core::codec::CodecId;
+    match codec {
+        CodecId::Av1 => av1c_from_sequence_header(frame),
+        CodecId::Vp9 => vp9_config_from_frame(frame, width, height).map(|cfg| vpcc_record(&cfg)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

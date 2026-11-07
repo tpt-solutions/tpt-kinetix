@@ -37,6 +37,11 @@ const ID_CODEC_ID: u32 = 0x86;
 const ID_CODEC_PRIVATE: u32 = 0x63A2;
 const ID_DEFAULT_DURATION: u32 = 0x23_E383;
 const ID_VIDEO: u32 = 0xE0;
+const ID_COLOUR: u32 = 0x55B0;
+const ID_MATRIX_COEFFICIENTS: u32 = 0x55B1;
+const ID_RANGE: u32 = 0x55B9;
+const ID_TRANSFER_CHARACTERISTICS: u32 = 0x55BA;
+const ID_PRIMARIES: u32 = 0x55BB;
 const ID_PIXEL_WIDTH: u32 = 0xB0;
 const ID_PIXEL_HEIGHT: u32 = 0xBA;
 const ID_AUDIO: u32 = 0xE1;
@@ -124,6 +129,12 @@ struct TrackBuilder {
     rate: f64,
     channels: u32,
     bit_depth: u32,
+    /// The `Colour` element's values, where the file states them (ISO 23001-8 codes;
+    /// `range`: 1 = broadcast, 2 = full).
+    primaries: Option<u64>,
+    transfer: Option<u64>,
+    matrix: Option<u64>,
+    range: Option<u64>,
 }
 
 struct RawFrame {
@@ -320,7 +331,7 @@ impl MkvStream {
                 // Inlined rather than `self.flush_cue()`: `rest` borrows
                 // `self.buf` here, so only disjoint field accesses are allowed.
                 if let Some(c) = self.cue.take() {
-                    let time_ms = (c.time_ticks * self.timecode_scale_ns / 1_000_000) as i64;
+                    let time_ms = ticks_to_ms(c.time_ticks, self.timecode_scale_ns);
                     self.events.push(MkvEvent::Cue(MkvCue {
                         time_ms,
                         track: c.track,
@@ -335,6 +346,7 @@ impl MkvStream {
                 | ID_TRACKS
                 | ID_TRACK_ENTRY
                 | ID_VIDEO
+                | ID_COLOUR
                 | ID_AUDIO
                 | ID_CLUSTER
                 | ID_BLOCK_GROUP
@@ -394,7 +406,7 @@ impl MkvStream {
     /// arrives, and by [`MkvStream::finish`] for the last one.
     fn flush_cue(&mut self) {
         if let Some(c) = self.cue.take() {
-            let time_ms = (c.time_ticks * self.timecode_scale_ns / 1_000_000) as i64;
+            let time_ms = ticks_to_ms(c.time_ticks, self.timecode_scale_ns);
             self.events.push(MkvEvent::Cue(MkvCue {
                 time_ms,
                 track: c.track,
@@ -416,6 +428,10 @@ impl MkvStream {
                 | ID_DEFAULT_DURATION
                 | ID_PIXEL_WIDTH
                 | ID_PIXEL_HEIGHT
+                | ID_MATRIX_COEFFICIENTS
+                | ID_RANGE
+                | ID_TRANSFER_CHARACTERISTICS
+                | ID_PRIMARIES
                 | ID_SAMPLING_FREQUENCY
                 | ID_CHANNELS
                 | ID_BIT_DEPTH
@@ -529,6 +545,10 @@ impl MkvStream {
                         ID_CODEC_PRIVATE => b.private = body.to_vec(),
                         ID_PIXEL_WIDTH => b.width = uint(body).min(u64::from(u32::MAX)) as u32,
                         ID_PIXEL_HEIGHT => b.height = uint(body).min(u64::from(u32::MAX)) as u32,
+                        ID_MATRIX_COEFFICIENTS => b.matrix = Some(uint(body)),
+                        ID_RANGE => b.range = Some(uint(body)),
+                        ID_TRANSFER_CHARACTERISTICS => b.transfer = Some(uint(body)),
+                        ID_PRIMARIES => b.primaries = Some(uint(body)),
                         ID_SAMPLING_FREQUENCY => b.rate = float(body),
                         ID_CHANNELS => b.channels = uint(body).min(255) as u32,
                         ID_BIT_DEPTH => b.bit_depth = uint(body).min(64) as u32,
@@ -665,15 +685,35 @@ fn build_stream_info(
 ) -> Result<Built, KinetixError> {
     match (b.kind, b.codec_id.as_str()) {
         (1, "V_AV1") => {
-            if b.private.first() != Some(&0x81) {
-                return Err(KinetixError::Unsupported(
-                    "V_AV1 track without an av1C CodecPrivate".into(),
-                ));
+            // A CodecPrivate that starts with the `av1C` marker is the record itself.
+            // Without one, the record is built from the first key frame's sequence
+            // header, as VP9 builds its `vpcC` from its key frame.
+            if b.private.first() == Some(&0x81) {
+                let mut s = StreamInfo::new(index, CodecId::Av1, 90_000);
+                s.width = b.width;
+                s.height = b.height;
+                s.extradata = b.private.clone();
+                return Ok(Built::Info(s));
             }
+            let Some(frame) = first_key_frame else {
+                return Ok(Built::NeedFrame);
+            };
+            let record = crate::rfconfig::config_from_key_frame(
+                CodecId::Av1,
+                frame,
+                b.width,
+                b.height,
+            )
+            .ok_or_else(|| {
+                KinetixError::Parse(
+                    "V_AV1 track without an av1C CodecPrivate, and no sequence header in its first key frame"
+                        .into(),
+                )
+            })?;
             let mut s = StreamInfo::new(index, CodecId::Av1, 90_000);
             s.width = b.width;
             s.height = b.height;
-            s.extradata = b.private.clone();
+            s.extradata = record;
             Ok(Built::Info(s))
         }
         (1, "V_VP9") => {
@@ -685,7 +725,22 @@ fn build_stream_info(
             let mut s = StreamInfo::new(index, CodecId::Vp9, 90_000);
             s.width = if b.width > 0 { b.width } else { cfg.width };
             s.height = if b.height > 0 { b.height } else { cfg.height };
-            s.extradata = vpcc_record(&cfg);
+            // The Matroska `Colour` element states the primaries, transfer and matrix
+            // (and the range) more reliably than the bitstream, so it wins where present.
+            let mut record = vpcc_record(&cfg);
+            if let Some(v) = b.primaries {
+                record[7] = v.min(255) as u8;
+            }
+            if let Some(v) = b.transfer {
+                record[8] = v.min(255) as u8;
+            }
+            if let Some(v) = b.matrix {
+                record[9] = v.min(255) as u8;
+            }
+            if let Some(r) = b.range {
+                record[6] = (record[6] & !1) | u8::from(r == 2);
+            }
+            s.extradata = record;
             Ok(Built::Info(s))
         }
         (2, "A_OPUS") => {
@@ -725,5 +780,26 @@ impl MkvStream {
     /// Media type of announced stream `i`.
     pub fn media_type(&self, i: usize) -> Option<MediaType> {
         self.infos.get(i).map(|s| s.media_type)
+    }
+}
+
+/// A cue time in milliseconds: `ticks` scaled by the timecode scale (ns per tick).
+/// Computed in 128 bits and clamped, because both factors come from the file: a
+/// hostile scale used to overflow the multiply (found by `fuzz_mkv_stream`).
+fn ticks_to_ms(ticks: u64, scale_ns: u64) -> i64 {
+    let ms = u128::from(ticks) * u128::from(scale_ns) / 1_000_000;
+    ms.min(i64::MAX as u128) as i64
+}
+
+#[cfg(test)]
+mod ticks_to_ms_tests {
+    use super::ticks_to_ms;
+
+    #[test]
+    fn scales_and_clamps_without_overflow() {
+        assert_eq!(ticks_to_ms(500, 1_000_000), 500);
+        assert_eq!(ticks_to_ms(3, 1_000_000_000), 3_000);
+        assert_eq!(ticks_to_ms(u64::MAX, u64::MAX), i64::MAX);
+        assert_eq!(ticks_to_ms(0, u64::MAX), 0);
     }
 }
