@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.1.3) - 2026-11-07
+
+### Other
+
+- av1, vp9: fix panics found by the fuzz targets
+- fix IBC negative source-origin overflow found by fuzzing
+
 ### Fixed
 
 - Intra block copy with a source origin left of or above the tile no longer overflows
