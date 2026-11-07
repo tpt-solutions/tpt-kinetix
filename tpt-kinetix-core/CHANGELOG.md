@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.2.0) - 2026-11-07
+
+### Other
+
+- core, demux: disposition default and forced for each track
+- WebVTT cue forms, Matroska text and MP4 vttc
+- core, demux, mux: track language from mdhd (read and write)
+- subtitle tracks in core, MP4 demux, MP4 mux and remux
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Changed

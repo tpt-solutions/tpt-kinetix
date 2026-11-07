@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.1.3) - 2026-11-07
+
+### Other
+
+- Merge pull request #40 from tpt-solutions/dependabot/cargo/str0m-0.25.0
+- negotiate the codec the transport names, and check it in the browser test
+- LL-HLS subtitle parts
+- publish AV1 over WebRTC
+- *(deps)* bump str0m from 0.24.1 to 0.25.0
+- CENC encryption and DASH text sets for live packaging
+- WebVTT subtitle renditions from WebM ingest
+- cap RTMP chunk streams and buffered bytes; recover poisoned locks; test TD stripping and refused publish
+- strip AV1 temporal delimiters for RTMP ingest, cap RTMP chunk prealloc, drain refused publish bodies; vp9: commit fuzz regression ae1c6505
+- linger refused publish connections so the status line is not reset
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Fixed
