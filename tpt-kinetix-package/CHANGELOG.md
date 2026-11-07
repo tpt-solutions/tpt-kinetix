@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.2.0) - 2026-11-07
+
+### Other
+
+- double EXT-X-TARGETDURATION when parts are on
+- DevTools network log for the browser runner, and the stall analysis
+- LL-HLS subtitle parts
+- signal cbcs-pattern as SAMPLE-AES, checked in hls.js and dash.js
+- cbcs-pattern CENC, with a subsample map so the pattern applies
+- CENC encryption and DASH text sets for live packaging
+- npm package for the WASM packager, bindings in CI
+- HLS ClearKey plays in headless Chrome
+- HLS key signaling for CENC (ClearKey), not yet playing in hls.js
+- WebVTT subtitle renditions from WebM ingest
+- WebVTT in WebM checked against ffmpeg
+- subtitle and trick-play renditions in the WASM packager
+- trick-play I-frame renditions for every video track
+- LANGUAGE on HLS renditions and lang on DASH sets
+- every WebVTT track becomes its own subtitle rendition
+- --cenc-scheme cenc|cbcs for package and serve
+- tests and CI: WebVTT and CENC end to end, in ffmpeg and in browsers
+- WebVTT subtitle group (HLS and DASH) and CENC protection
+- subtitle tracks in core, MP4 demux, MP4 mux and remux
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Changed

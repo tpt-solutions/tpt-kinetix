@@ -1,6 +1,6 @@
 [package]
 name = "tpt-kinetix-mux"
-version = "0.1.2"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,8 +16,8 @@ documentation = "https://docs.rs/tpt-kinetix-mux"
 thiserror = { workspace = true }
 tpt-kinetix-core = { workspace = true }
 # CENC (ISO/IEC 23001-7) AES-128 counter mode for protected fragments.
-aes = "0.8"
-ctr = "0.9"
+aes = "0.9"
+ctr = "0.10"
 
 [dev-dependencies]
 tpt-kinetix-demux = { path = "../tpt-kinetix-demux" }

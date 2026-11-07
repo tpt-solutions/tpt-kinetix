@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.1.3) - 2026-11-07
+
+### Other
+
+- av1, vp9: fix panics found by the fuzz targets
+- rustfmt the fuzz regression test
+- strip AV1 temporal delimiters for RTMP ingest, cap RTMP chunk prealloc, drain refused publish bodies; vp9: commit fuzz regression ae1c6505
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Added

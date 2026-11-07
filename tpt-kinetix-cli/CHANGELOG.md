@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.1.3) - 2026-11-07
+
+### Other
+
+- LL-HLS subtitle parts
+- build each trick-play rendition once
+- a Matroska input's tags, title and chapters go into WebM output
+- MP4 chapters go into WebM output
+- signal cbcs-pattern as SAMPLE-AES, checked in hls.js and dash.js
+- MP4 text metadata goes into WebM output as Matroska tags
+- cbcs-pattern CENC, with a subsample map so the pattern applies
+- report disposition.default and disposition.forced
+- colour fields for AV1, read from the sequence header
+- CENC encryption and DASH text sets for live packaging
+- pix_fmt for AV1 and VP9, colour fields for VP9
+- IVF output, and MP4 metadata carried to MP4 output
+- package runs on the shared ops crate
+- container operations as a library, shared by the CLI
+- HLS ClearKey plays in headless Chrome
+- ClearKey pssh in protected init segments
+- HLS key signaling for CENC (ClearKey), not yet playing in hls.js
+- WebVTT subtitle renditions from WebM ingest
+- WebVTT in WebM checked against ffmpeg
+- WebVTT subtitle tracks (demux, mux, remux) and cue end times
+- build each I-frame rendition once and keep it
+- trick-play I-frame renditions for every video track
+- rustfmt the probe JSON test
+- multi-audio packaging renditions and DASH sets, with languages
+- show the track language in text and JSON output
+- LANGUAGE on HLS renditions and lang on DASH sets
+- every WebVTT track becomes its own subtitle rendition
+- --cenc-scheme cenc|cbcs for package and serve
+- tests and CI: WebVTT and CENC end to end, in ffmpeg and in browsers
+- WebVTT subtitle group (HLS and DASH) and CENC protection
+- subtitle tracks in core, MP4 demux, MP4 mux and remux
+- prebuilt CLI binaries, cargo-binstall metadata, container image
+- stream MPEG-TS from a byte source instead of a whole buffer
+- sanitize re-muxes untrusted WebM or MP4 keeping only AV1, VP9 and Opus
+- cli thumbnails: --sprite-columns writes a contact sheet (sprite.png)
+- doctor says whether a file will play in a browser, and why not
+- Ogg writer for one Opus track; cli remux: .ogg and .opus output
+- thumbnails command writes PNG stills from keyframes
+- IVF track duration; conformance test of probe --json against ffprobe
+- ffmpeg migration guide, SECURITY.md, CODE_OF_CONDUCT.md; cli: --help examples for probe, remux, package
+- IVF writer; cli remux: .ivf output for one AV1 or VP9 track
+- cli remux: choose the container from the output name, so WebM to MP4 and MP4 to WebM work
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Changed
