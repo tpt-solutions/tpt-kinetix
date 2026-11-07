@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.2.0) - 2026-11-07
+
+### Other
+
+- fuzz and property-test the Matroska and MP4 metadata parsers
+- a Matroska input's tags, title and chapters go into WebM output
+- MP4 chapters go into WebM output
+- MP4 text metadata goes into WebM output as Matroska tags
+- core, demux: disposition default and forced for each track
+- colour fields for AV1, read from the sequence header
+- IVF input gets a codec configuration record
+- codec config for MP4/WebM without it, Colour, udta; fuzz fixes
+- WebVTT cue forms, Matroska text and MP4 vttc
+- WebVTT subtitle tracks (demux, mux, remux) and cue end times
+- core, demux, mux: track language from mdhd (read and write)
+- subtitle tracks in core, MP4 demux, MP4 mux and remux
+- stream MPEG-TS from a byte source instead of a whole buffer
+- report keyframes from the bitstream instead of marking every frame one
+- IVF track duration; conformance test of probe --json against ffprobe
+- checked box and offset arithmetic in faststart; fuzz mkv_stream, moof, faststart
+
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
 
 ### Changed
