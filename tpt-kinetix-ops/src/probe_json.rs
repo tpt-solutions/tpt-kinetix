@@ -233,6 +233,14 @@ fn stream_json(index: usize, s: &StreamInfo, frames: Option<u64>) -> String {
     if let Some(n) = frames {
         let _ = write!(out, "\"nb_frames\":{n},");
     }
+    // ffprobe's disposition object; only the two flags the container states are
+    // reported, the rest of its keys are 0 for these files.
+    let _ = write!(
+        out,
+        "\"disposition\":{{\"default\":{},\"forced\":{}}},",
+        u8::from(s.disposition.default),
+        u8::from(s.disposition.forced)
+    );
     if let Some(lang) = &s.language {
         // ffprobe's shape: language is a tag of the stream.
         let _ = write!(out, "\"tags\":{{\"language\":{}}},", quote(lang));
