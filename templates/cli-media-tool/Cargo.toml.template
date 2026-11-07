@@ -1,0 +1,10 @@
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+
+[dependencies]
+# Container parsing (WebM/Matroska, MP4, IVF). Versions match the TPT Kinetix release.
+tpt-kinetix-core = "0.1.2"
+tpt-kinetix-demux = "0.1.2"

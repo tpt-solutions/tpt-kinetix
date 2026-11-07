@@ -189,7 +189,7 @@ fn seeking_lands_on_a_key_frame() {
         eprintln!("skipping: ffmpeg not on PATH");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("tpt_mkvseek_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tpt_mkvseek2_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let Some(webm) = make_webm(
         &dir,

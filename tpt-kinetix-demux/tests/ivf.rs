@@ -241,3 +241,48 @@ fn a_written_header_round_trips_through_the_reader() {
         .collect();
     assert_eq!(got, frames.iter().map(|f| f.to_vec()).collect::<Vec<_>>());
 }
+
+/// Builds an IVF file (AV01 fourcc) whose frames are the given payloads.
+fn ivf_with_frames(fourcc: &[u8; 4], frames: &[&[u8]]) -> Vec<u8> {
+    use tpt_kinetix_demux::ivf::IVF_HEADER_LEN;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"DKIF");
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(IVF_HEADER_LEN as u16).to_le_bytes());
+    out.extend_from_slice(fourcc);
+    out.extend_from_slice(&320u16.to_le_bytes());
+    out.extend_from_slice(&240u16.to_le_bytes());
+    out.extend_from_slice(&30u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for (i, f) in frames.iter().enumerate() {
+        out.extend_from_slice(&(f.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(i as u64).to_le_bytes());
+        out.extend_from_slice(f);
+    }
+    out
+}
+
+#[test]
+fn av1_ivf_gets_an_av1c_from_its_sequence_header() {
+    // Same libaom 4:2:0 8-bit sequence header the rfconfig unit test uses.
+    let seq = [
+        0x0A, 0x0A, 0x00, 0x00, 0x00, 0x02, 0xAF, 0xF7, 0x9B, 0x5F, 0x20, 0x08,
+    ];
+    let record = [&[0x81, 0x00, 0x0C, 0x00][..], &seq[..]].concat();
+    // Temporal unit 0: temporal delimiter, sequence header, a frame OBU.
+    let tu0 = [&[0x12, 0x00][..], &seq[..], &[0x32, 0x01, 0x00][..]].concat();
+    let tu1 = [0x12u8, 0x00, 0x32, 0x01, 0x00];
+    let data = ivf_with_frames(b"AV01", &[&tu0, &tu1]);
+    let demuxer = IvfDemuxer::new(data).unwrap();
+    assert_eq!(demuxer.stream_info().codec, CodecId::Av1);
+    assert_eq!(demuxer.stream_info().extradata, record);
+}
+
+#[test]
+fn av1_ivf_without_a_sequence_header_has_no_extradata() {
+    let data = ivf_with_frames(b"AV01", &[&[0x12, 0x00, 0x32, 0x01, 0x00]]);
+    let demuxer = IvfDemuxer::new(data).unwrap();
+    assert!(demuxer.stream_info().extradata.is_empty());
+}

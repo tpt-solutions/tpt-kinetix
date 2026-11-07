@@ -1,0 +1,27 @@
+{
+  "name": "tpt-kinetix-node",
+  "version": "0.1.2",
+  "description": "Probe, remux and package media files with the TPT Kinetix engine (native Node.js addon)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "native/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tpt-solutions/tpt-kinetix"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "private": true,
+  "_comment": "private until the maintainer approves the npm scope and name; remove this field to publish"
+}

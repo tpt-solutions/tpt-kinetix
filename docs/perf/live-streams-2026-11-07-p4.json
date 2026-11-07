@@ -1,0 +1,24 @@
+{
+  "machine": "Windows-11-10.0.26200-SP0",
+  "publishers": 4,
+  "viewers": 0,
+  "seconds": 15.0,
+  "requests_ok": 0,
+  "requests_not_ready": 0,
+  "requests_error": 0,
+  "requests_per_second": 0.0,
+  "latency_ms": {
+    "mean": null,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null
+  },
+  "server_rss_mib": {
+    "min": 20.6,
+    "max": 53.8
+  },
+  "server_cpu_cores": 0.0039,
+  "rss_per_publisher_mib": 5.13,
+  "cores_per_publisher": 0.000964
+}

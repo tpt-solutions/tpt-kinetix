@@ -11,6 +11,7 @@ pub mod boxes;
 pub mod config;
 pub mod container;
 pub mod fragment;
+pub mod metadata;
 pub mod reader;
 
 pub use boxes::{

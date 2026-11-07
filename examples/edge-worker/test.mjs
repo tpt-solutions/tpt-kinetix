@@ -58,7 +58,7 @@ for (const name of names) {
   assert.equal(res.status, 200, `${name}: ${res.status} ${await res.clone().text()}`);
   assert.ok((await bytes(res)).equals(fs.readFileSync(path.join(nativeDir, name))), `${name} differs`);
   const cc = res.headers.get("cache-control");
-  const immutable = /^(init-|seg-)/.test(name);
+  const immutable = /^(init-|seg-|iframes-\d+\.m4s|sub-\d+-\d+\.vtt)/.test(name);
   assert.equal(/immutable/.test(cc), immutable, `${name}: cache-control ${cc}`);
   assert.equal(res.headers.get("access-control-allow-origin"), "*");
 }
@@ -96,6 +96,7 @@ console.log(`ok  ${names.length} files byte-identical to the native output (orig
 
   assert.equal((await get(handle, env, "seg-0-9999.m4s")).status, 404);
   assert.equal((await get(handle, env, "seg-9-1.m4s")).status, 404);
+  assert.equal((await get(handle, env, "subs-0.m3u8")).status, 404, "no subtitle track in this sample");
   assert.equal((await get(handle, env, "nonsense.txt")).status, 404);
   assert.equal((await handle(new Request("http://worker.test/missing.mp4/master.m3u8"), env)).status, 404);
   assert.equal((await handle(new Request("http://worker.test/clip.mp4/master.m3u8", { method: "POST" }), env)).status, 405);
@@ -134,5 +135,84 @@ console.log(`ok  ${names.length} files byte-identical to the native output (orig
   assert.equal((await r2(new Request("http://worker.test/nope.mp4/master.m3u8"), { BUCKET: bucket })).status, 404);
   console.log("ok  R2-style bucket binding");
 }
+
+
+// 5. The edge cache: immutable responses come from caches.default, not the origin.
+{
+  const { parseRange } = await import(pathToFileURL(path.resolve("examples/edge-worker/handler.mjs")).href);
+  assert.deepEqual(parseRange("bytes=0-9", 100), { start: 0, end: 9 });
+  assert.deepEqual(parseRange("bytes=-5", 100), { start: 95, end: 99 });
+  assert.deepEqual(parseRange("bytes=95-", 100), { start: 95, end: 99 });
+  assert.deepEqual(parseRange("bytes=90-500", 100), { start: 90, end: 99 });
+  assert.equal(parseRange("bytes=100-", 100), "unsatisfiable");
+  assert.equal(parseRange("bytes=0-9", 0), "unsatisfiable");
+  assert.equal(parseRange("bytes=0-9,20-29", 100), null, "multiple ranges are served whole");
+  assert.equal(parseRange(null, 100), null);
+
+  class MemoryCache {
+    constructor() {
+      this.entries = new Map();
+      this.puts = 0;
+    }
+    async match(req) {
+      const hit = this.entries.get(req.url);
+      return hit ? hit.clone() : undefined;
+    }
+    async put(req, res) {
+      this.puts++;
+      this.entries.set(req.url, res.clone());
+    }
+  }
+  const cache = new MemoryCache();
+  globalThis.caches = { default: cache };
+  try {
+    const cached = createHandler({ ...glue, wasmModule });
+    const seg = names.find((n) => n.startsWith("seg-0-2"));
+    const native = fs.readFileSync(path.join(nativeDir, seg));
+
+    originRequests = 0;
+    const first = await get(cached, env, seg);
+    assert.equal(first.status, 200);
+    assert.ok((await bytes(first)).equals(native), "first fetch is byte-identical");
+    const cold = originRequests;
+    assert.ok(cold > 0, "a cold segment reads the origin");
+    assert.equal(cache.puts, 1, "the segment is stored once");
+
+    // A second isolate (its own packager) must be served from the cache alone.
+    const other = createHandler({ ...glue, wasmModule });
+    const second = await get(other, env, seg);
+    assert.equal(second.status, 200);
+    assert.ok((await bytes(second)).equals(native), "cached fetch is byte-identical");
+    assert.equal(originRequests, cold, "a cache hit makes no origin request");
+    assert.equal(cache.puts, 1, "a hit does not store again");
+
+    // Range on a cached segment: a prefix, a suffix, and an unsatisfiable range.
+    const prefix = await get(other, env, seg, { headers: { Range: "bytes=0-9" } });
+    assert.equal(prefix.status, 206);
+    assert.equal(prefix.headers.get("content-range"), `bytes 0-9/${native.length}`);
+    assert.ok((await bytes(prefix)).equals(native.subarray(0, 10)));
+    const suffix = await get(other, env, seg, { headers: { Range: "bytes=-5" } });
+    assert.equal(suffix.status, 206);
+    assert.ok((await bytes(suffix)).equals(native.subarray(native.length - 5)));
+    const bad = await get(other, env, seg, { headers: { Range: `bytes=${native.length}-` } });
+    assert.equal(bad.status, 416);
+    assert.equal(bad.headers.get("content-range"), `bytes */${native.length}`);
+    assert.equal(first.headers.get("accept-ranges"), "bytes");
+
+    // Playlists are never stored and ignore Range (sent whole).
+    const playlist = await get(other, env, "master.m3u8", { headers: { Range: "bytes=0-9" } });
+    assert.equal(playlist.status, 200);
+    assert.equal(cache.puts, 1, "playlists are not cached");
+
+    // Errors are not stored.
+    const missing = await get(other, env, "seg-0-9999.m4s");
+    assert.equal(missing.status, 404);
+    assert.equal(cache.puts, 1, "a 404 is not cached");
+    console.log(`ok  edge cache: cold segment ${cold} origin requests, cache hit 0; Range 206/416; playlists not stored`);
+  } finally {
+    delete globalThis.caches;
+  }
+}
+
 
 origin.close();

@@ -91,7 +91,7 @@ fn remux_to_mp4_keeps_the_webvtt_track() {
 }
 
 #[test]
-fn remux_to_webm_skips_the_subtitle_track() {
+fn remux_to_webm_keeps_the_webvtt_track_and_its_cue_ends() {
     let dir = std::env::temp_dir().join(format!("tpt-webvtt-webm-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.mp4");
@@ -99,7 +99,29 @@ fn remux_to_webm_skips_the_subtitle_track() {
     write_input(&input);
 
     let out = remux(&[input.to_str().unwrap(), output.to_str().unwrap()]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("skipping stream 0"), "stderr: {stderr}");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The WebM carries the subtitle track with each cue's bytes. Each cue's
+    // end comes from its BlockDuration, which the cues were written with.
+    let reader = tpt_kinetix_demux::MkvReader::open(std::fs::File::open(&output).unwrap()).unwrap();
+    let streams = reader.streams();
+    let sub = streams
+        .iter()
+        .position(|s| s.codec == CodecId::WebVtt)
+        .expect("a WebVTT track in the WebM");
+    assert_eq!(streams[sub].media_type, MediaType::Subtitle);
+    let samples = reader.samples_of(sub);
+    assert_eq!(samples.len(), CUES.len());
+    for (s, text) in samples.iter().zip(CUES) {
+        let data = reader.read_sample(s).unwrap();
+        assert_eq!(data, cue(text));
+    }
+    // Two-second cues, as written: the end time is the start plus the duration.
+    assert_eq!(samples[0].pts_ms, 0);
+    assert_eq!(samples[1].pts_ms, 2000);
     let _ = std::fs::remove_dir_all(&dir);
 }

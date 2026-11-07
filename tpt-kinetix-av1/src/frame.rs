@@ -2060,9 +2060,17 @@ fn parse_film_grain(
                 "film grain: too many scaling points".into(),
             ));
         }
-        (0..n)
+        let points: Vec<(u8, u8)> = (0..n)
             .map(|_| Ok((read_f8(br, 8)?, read_f8(br, 8)?)))
-            .collect()
+            .collect::<Result<_, KinetixError>>()?;
+        // Positions must strictly increase (spec 5.9.30): the scaling table is built
+        // by walking them, so a repeated or falling position is malformed.
+        if points.windows(2).any(|w| w[1].0 <= w[0].0) {
+            return Err(KinetixError::Parse(
+                "film grain: scaling point positions do not increase".into(),
+            ));
+        }
+        Ok(points)
     };
     p.point_y = read_points(br, 14)?;
     p.chroma_scaling_from_luma = if mono_chrome { false } else { read_flag(br)? };
