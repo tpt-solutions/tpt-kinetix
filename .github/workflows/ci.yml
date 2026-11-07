@@ -152,6 +152,7 @@ jobs:
           cargo fuzz build fuzz_ts
           cargo fuzz build fuzz_mkv_ebml
           cargo fuzz build fuzz_mkv_stream
+          cargo fuzz build fuzz_mkv_metadata
           cargo fuzz build fuzz_moof
         working-directory: tpt-kinetix-demux
       - name: Check fuzz targets compile (mux)
@@ -370,6 +371,24 @@ jobs:
         # dash.js with EME: the browser must decrypt the protected VP9/Opus fragments.
         env:
           CHROME: ${{ steps.chrome.outputs.path }}
+        run: bash tools/browser-cenc-test.sh
+      - name: Run the CENC cbcs-pattern (ClearKey) DASH playback test
+        # The 1:9 pattern: the browser must decrypt the pattern-encrypted fragments.
+        env:
+          CHROME: ${{ steps.chrome.outputs.path }}
+          CENC_SCHEME: cbcs-pattern
+        run: bash tools/browser-cenc-test.sh
+      - name: Run the CENC (ClearKey) HLS playback test
+        # hls.js with EME, the protected media playlists and the license.
+        env:
+          CHROME: ${{ steps.chrome.outputs.path }}
+          CENC_PROTOCOL: hls
+        run: bash tools/browser-cenc-test.sh
+      - name: Run the cbcs-pattern (ClearKey) HLS playback test
+        env:
+          CHROME: ${{ steps.chrome.outputs.path }}
+          CENC_PROTOCOL: hls
+          CENC_SCHEME: cbcs-pattern
         run: bash tools/browser-cenc-test.sh
 
   live-browser-test:
