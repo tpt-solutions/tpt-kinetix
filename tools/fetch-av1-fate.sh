@@ -31,7 +31,9 @@ for f in "${FILES[@]}"; do
     echo "have $f"
   else
     echo "fetch $f"
-    curl -fsSL --retry 3 -o "$DEST/$f" "$BASE/$f"
+    # The FATE server sometimes drops a connection (a CI run failed on one fetch
+    # that succeeds on a rerun), so retry every error, not only transient ones.
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$DEST/$f" "$BASE/$f"
   fi
 done
 echo "KINETIX_AV1_FATE_DIR=$DEST"
