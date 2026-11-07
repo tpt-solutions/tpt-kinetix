@@ -3,8 +3,8 @@
 //!
 //! * [`probe_json`]: the ffprobe-shaped JSON of `tpt-kinetix probe --json`.
 //! * [`summary`]: the compact track list the C ABI and bindings return.
-//! * [`remux`] and [`sanitize`]: copy streams into a new container without decoding.
-//! * [`package`]: write an on-demand HLS/DASH package of a file to a directory.
+//! * [`fn@remux`] and [`sanitize`]: copy streams into a new container without decoding.
+//! * [`fn@package`]: write an on-demand HLS/DASH package of a file to a directory.
 //!
 //! Progress is reported through `tracing` (`info` for the summaries), never on
 //! stdout, so a library caller decides where it goes.
