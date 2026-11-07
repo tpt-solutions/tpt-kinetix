@@ -50,5 +50,9 @@ ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=320x240:rate=25 \
   -c:v libvpx-vp9 -b:v 300k -pix_fmt yuv420p -c:a libopus -ac 2 "$work/av.webm"
 
 mkdir "$work/out"
-PATH="$lib_dir:$PATH" "$exe" "$work/av.mp4" "$work/av.webm" "$work/out"
+# Windows finds the DLL through PATH, but the ELF and Mach-O loaders do not: they
+# search LD_LIBRARY_PATH and DYLD_LIBRARY_PATH.
+PATH="$lib_dir:$PATH" LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  DYLD_LIBRARY_PATH="$lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+  "$exe" "$work/av.mp4" "$work/av.webm" "$work/out"
 echo "ffi smoke test passed"
