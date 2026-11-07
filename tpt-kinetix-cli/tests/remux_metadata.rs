@@ -112,6 +112,64 @@ fn mp4_remux_keeps_the_title_and_sanitize_drops_it() {
         "WebM remux keeps the title as a tag"
     );
 
+    // Chapters: an MP4 with two chapters keeps them, in order, in WebM output.
+    let chapter_text = dir.join("chapters.txt");
+    std::fs::write(
+        &chapter_text,
+        ";FFMETADATA1
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=500
+title=Intro
+[CHAPTER]
+TIMEBASE=1/1000
+START=500
+END=1000
+title=Main part
+",
+    )
+    .unwrap();
+    let chaptered = dir.join("chaptered.mp4");
+    ffmpeg(&[
+        "-i",
+        src.to_str().unwrap(),
+        "-i",
+        chapter_text.to_str().unwrap(),
+        "-map_metadata",
+        "1",
+        "-map_chapters",
+        "1",
+        "-c",
+        "copy",
+        chaptered.to_str().unwrap(),
+    ]);
+    let chapter_webm = dir.join("chaptered.webm");
+    tpt(&[
+        "remux",
+        chaptered.to_str().unwrap(),
+        chapter_webm.to_str().unwrap(),
+    ]);
+    let titles = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "chapter_tags=title",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&chapter_webm)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&titles.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["Intro", "Main part"],
+        "WebM output keeps the chapters"
+    );
+
     let clean = dir.join("clean.mp4");
     tpt(&["sanitize", src.to_str().unwrap(), clean.to_str().unwrap()]);
     assert_eq!(title_of(&clean), None, "sanitize does not copy metadata");

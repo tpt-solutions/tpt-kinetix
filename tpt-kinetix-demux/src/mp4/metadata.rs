@@ -2,6 +2,15 @@
 //! title, artist, album, and so on), as name and value pairs. Other items, cover
 //! art included, are left alone; the raw `udta` is what a copy carries over.
 
+/// The payload of a `udta` box, given either whole (header included, as the demuxer
+/// keeps it) or as its payload.
+fn udta_payload(udta: &[u8]) -> &[u8] {
+    match udta.get(4..8) {
+        Some(b"udta") => &udta[8..],
+        _ => udta,
+    }
+}
+
 /// The Matroska tag name for each supported `ilst` item, by its four-byte type
 /// (`0xA9` is the © of the iTunes keys).
 fn tag_name(kind: &[u8]) -> Option<&'static str> {
@@ -40,15 +49,46 @@ fn child<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     boxes(data).find(|(k, _)| k == kind).map(|(_, p)| p)
 }
 
+/// The chapters of a `udta` box (the QuickTime `chpl` list) as `(start in
+/// nanoseconds, title)`, in file order. Empty when there is no list or it is cut short.
+pub fn chapters(udta: &[u8]) -> Vec<(u64, String)> {
+    let mut out = Vec::new();
+    let udta = udta_payload(udta);
+    let Some(chpl) = child(udta, b"chpl") else {
+        return out;
+    };
+    // Version 1 has four reserved bytes after the version and flags.
+    let (version, mut p) = match chpl.first() {
+        Some(v) => (*v, if chpl.len() >= 8 { 8 } else { chpl.len() }),
+        None => return out,
+    };
+    if version == 0 {
+        p = 4;
+    }
+    let Some(&count) = chpl.get(p) else {
+        return out;
+    };
+    p += 1;
+    for _ in 0..count {
+        // Start time: 8 bytes in units of 100 ns; then a length byte and the title.
+        let (Some(start), Some(&len)) = (chpl.get(p..p + 8), chpl.get(p + 8)) else {
+            break;
+        };
+        let start = u64::from_be_bytes(start.try_into().unwrap_or([0; 8])).saturating_mul(100);
+        let Some(title) = chpl.get(p + 9..p + 9 + usize::from(len)) else {
+            break;
+        };
+        out.push((start, String::from_utf8_lossy(title).to_string()));
+        p += 9 + usize::from(len);
+    }
+    out
+}
+
 /// The text items of a `udta` box as `(Matroska tag name, value)` pairs, in file
 /// order. Empty values are dropped. `None` when there is no `meta`/`ilst`.
 pub fn text_tags(udta: &[u8]) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
-    // Accept the whole box (header included, as the demuxer keeps it) or its payload.
-    let udta = match udta.get(4..8) {
-        Some(b"udta") => &udta[8..],
-        _ => udta,
-    };
+    let udta = udta_payload(udta);
     let Some(meta) = child(udta, b"meta") else {
         return out;
     };
@@ -86,7 +126,7 @@ pub fn text_tags(udta: &[u8]) -> Vec<(&'static str, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::text_tags;
+    use super::{chapters, text_tags};
 
     fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut v = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
@@ -135,5 +175,27 @@ mod tests {
     fn a_movie_without_metadata_has_no_tags() {
         assert!(text_tags(&[]).is_empty());
         assert!(text_tags(&boxed(b"udta", &boxed(b"free", &[0; 4]))).is_empty());
+    }
+
+    #[test]
+    fn reads_the_chpl_chapter_list() {
+        // Version 1: version and flags, four reserved bytes, a count, then each
+        // chapter's start (in 100 ns units), a title length and the title.
+        let mut chpl = vec![1u8, 0, 0, 0, 0, 0, 0, 0, 2];
+        chpl.extend_from_slice(&0u64.to_be_bytes());
+        chpl.push(5);
+        chpl.extend_from_slice(b"Intro");
+        chpl.extend_from_slice(&5_000_000u64.to_be_bytes());
+        chpl.push(9);
+        chpl.extend_from_slice(b"Main part");
+        let udta = boxed(b"udta", &boxed(b"chpl", &chpl));
+        assert_eq!(
+            chapters(&udta),
+            vec![
+                (0, "Intro".to_string()),
+                (500_000_000, "Main part".to_string())
+            ]
+        );
+        assert!(chapters(&boxed(b"udta", &[])).is_empty());
     }
 }

@@ -74,6 +74,15 @@ const ID_CUE_TRACK_POSITIONS: u32 = 0xB7;
 const ID_CUE_TRACK: u32 = 0xF7;
 const ID_CUE_CLUSTER_POSITION: u32 = 0xF1;
 const ID_TAGS: u32 = 0x1254_C367;
+const ID_CHAPTERS: u32 = 0x1043_A770;
+const ID_EDITION_ENTRY: u32 = 0x45B9;
+const ID_EDITION_UID: u32 = 0x45BC;
+const ID_CHAPTER_ATOM: u32 = 0xB6;
+const ID_CHAPTER_UID: u32 = 0x73C4;
+const ID_CHAPTER_TIME_START: u32 = 0x91;
+const ID_CHAPTER_DISPLAY: u32 = 0x80;
+const ID_CHAP_STRING: u32 = 0x85;
+const ID_CHAP_LANGUAGE: u32 = 0x437C;
 const ID_TAG: u32 = 0x7373;
 const ID_TARGETS: u32 = 0x63C0;
 const ID_SIMPLE_TAG: u32 = 0x67C8;
@@ -98,6 +107,9 @@ pub struct WebmOptions {
     /// `ARTIST`, ...). Written as one `Tag` for the whole file, straight after
     /// `Tracks`: players and ffmpeg read tags from the header, not from the end.
     pub tags: Vec<(String, String)>,
+    /// Chapters as `(start in nanoseconds, title)`, in order. Written as one edition
+    /// straight after `Tracks`.
+    pub chapters: Vec<(u64, String)>,
 }
 
 impl Default for WebmOptions {
@@ -106,6 +118,7 @@ impl Default for WebmOptions {
             cluster_ms: 2000,
             writing_app: "tpt-kinetix".to_string(),
             tags: Vec::new(),
+            chapters: Vec::new(),
         }
     }
 }
@@ -405,6 +418,7 @@ impl<W: Write> WebmWriter<W> {
         self.write_info(&mut buf)?;
         self.write_tracks(&mut buf)?;
         self.write_tags(&mut buf)?;
+        self.write_chapters(&mut buf);
         self.flush(&buf)?;
         Ok(())
     }
@@ -783,6 +797,29 @@ impl<W: Write> WebmWriter<W> {
 
     /// Writes the file's tags as one `Tag` with an empty `Targets` (the whole
     /// file), each pair as a `SimpleTag`.
+    /// Writes the chapters as one edition: a `ChapterAtom` per chapter, with a
+    /// `ChapterUID`, its start, and a display string in English.
+    fn write_chapters(&self, buf: &mut Vec<u8>) {
+        if self.opts.chapters.is_empty() {
+            return;
+        }
+        let mut edition = Vec::new();
+        elem_uint(&mut edition, ID_EDITION_UID, 1);
+        for (index, (start_ns, title)) in self.opts.chapters.iter().enumerate() {
+            let mut atom = Vec::new();
+            elem_uint(&mut atom, ID_CHAPTER_UID, index as u64 + 1);
+            elem_uint(&mut atom, ID_CHAPTER_TIME_START, *start_ns);
+            let mut display = Vec::new();
+            elem(&mut display, ID_CHAP_STRING, title.as_bytes());
+            elem(&mut display, ID_CHAP_LANGUAGE, b"und");
+            elem(&mut atom, ID_CHAPTER_DISPLAY, &display);
+            elem(&mut edition, ID_CHAPTER_ATOM, &atom);
+        }
+        let mut body = Vec::new();
+        elem(&mut body, ID_EDITION_ENTRY, &edition);
+        elem(buf, ID_CHAPTERS, &body);
+    }
+
     fn write_tags(&self, buf: &mut Vec<u8>) -> Result<(), KinetixError> {
         if self.opts.tags.is_empty() {
             return Ok(());

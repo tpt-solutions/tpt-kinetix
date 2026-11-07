@@ -464,8 +464,8 @@ fn write_output(
             if kept.is_empty() {
                 bail!("no AV1, VP9 or Opus track in the input");
             }
-            let tags = layout_tags(layout.user_data.as_deref());
-            write_webm(&kept, &map, next, output, tags)
+            let options = webm_options(layout.user_data.as_deref());
+            write_webm(&kept, &map, next, output, options)
         }
         Target::Ivf => write_ivf(streams, next, output),
         Target::Ogg => write_ogg(streams, next, output),
@@ -573,32 +573,31 @@ fn write_ogg(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> R
     Ok(())
 }
 
-/// Writes frames to a WebM file (or a live stream to stdout when `output` is `-`).
-/// The text tags of an MP4 input's `udta`, as WebM tag pairs.
-fn layout_tags(user_data: Option<&[u8]>) -> Vec<(String, String)> {
-    user_data
-        .map(tpt_kinetix_demux::mp4::metadata::text_tags)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(name, value)| (name.to_string(), value))
-        .collect()
+/// The WebM options an MP4 input's metadata gives: its text tags and its chapters.
+fn webm_options(user_data: Option<&[u8]>) -> WebmOptions {
+    let mut options = WebmOptions::default();
+    if let Some(udta) = user_data {
+        options.tags = tpt_kinetix_demux::mp4::metadata::text_tags(udta)
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect();
+        options.chapters = tpt_kinetix_demux::mp4::metadata::chapters(udta);
+    }
+    options
 }
 
+/// Writes frames to a WebM file (or a live stream to stdout when `output` is `-`).
 fn write_webm(
     kept: &[StreamInfo],
     map: &[Option<u32>],
     next: &mut NextFrame,
     output: &Path,
-    tags: Vec<(String, String)>,
+    options: WebmOptions,
 ) -> Result<()> {
     let started = Instant::now();
     let (mut packets, mut bytes) = (0u64, 0u64);
     if output.as_os_str() == "-" {
         // stdout cannot seek, so only a live (unknown-size) stream is possible.
-        let options = WebmOptions {
-            tags,
-            ..WebmOptions::default()
-        };
         let mut writer = WebmWriter::with_options(std::io::stdout().lock(), options);
         writer.set_tracks(kept)?;
         while let Some((mut p, ticks, scale, discard)) = next()? {
@@ -621,10 +620,6 @@ fn write_webm(
     }
     let file = std::fs::File::create(output)
         .with_context(|| format!("failed to create {}", output.display()))?;
-    let options = WebmOptions {
-        tags,
-        ..WebmOptions::default()
-    };
     let mut writer = WebmWriter::new_seekable_with_options(BufWriter::new(file), options);
     writer.set_tracks(kept)?;
     while let Some((mut p, ticks, scale, discard)) = next()? {
