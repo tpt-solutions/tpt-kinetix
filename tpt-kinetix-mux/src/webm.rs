@@ -73,6 +73,12 @@ const ID_CUE_TIME: u32 = 0xB3;
 const ID_CUE_TRACK_POSITIONS: u32 = 0xB7;
 const ID_CUE_TRACK: u32 = 0xF7;
 const ID_CUE_CLUSTER_POSITION: u32 = 0xF1;
+const ID_TAGS: u32 = 0x1254_C367;
+const ID_TAG: u32 = 0x7373;
+const ID_TARGETS: u32 = 0x63C0;
+const ID_SIMPLE_TAG: u32 = 0x67C8;
+const ID_TAG_NAME: u32 = 0x45A3;
+const ID_TAG_STRING: u32 = 0x4487;
 
 /// Matroska timestamps are in milliseconds (`TimecodeScale` = 1 ms).
 const TIMECODE_SCALE_NS: u64 = 1_000_000;
@@ -88,6 +94,10 @@ pub struct WebmOptions {
     pub cluster_ms: i64,
     /// `WritingApp` string (also used as `MuxingApp`).
     pub writing_app: String,
+    /// Tags for the file, as `(Matroska tag name, value)` pairs (`TITLE`,
+    /// `ARTIST`, ...). Written as one `Tag` for the whole file, straight after
+    /// `Tracks`: players and ffmpeg read tags from the header, not from the end.
+    pub tags: Vec<(String, String)>,
 }
 
 impl Default for WebmOptions {
@@ -95,6 +105,7 @@ impl Default for WebmOptions {
         Self {
             cluster_ms: 2000,
             writing_app: "tpt-kinetix".to_string(),
+            tags: Vec::new(),
         }
     }
 }
@@ -393,6 +404,7 @@ impl<W: Write> WebmWriter<W> {
         self.write_header(&mut buf)?;
         self.write_info(&mut buf)?;
         self.write_tracks(&mut buf)?;
+        self.write_tags(&mut buf)?;
         self.flush(&buf)?;
         Ok(())
     }
@@ -769,6 +781,26 @@ impl<W: Write> WebmWriter<W> {
         self.flush(&buf)
     }
 
+    /// Writes the file's tags as one `Tag` with an empty `Targets` (the whole
+    /// file), each pair as a `SimpleTag`.
+    fn write_tags(&self, buf: &mut Vec<u8>) -> Result<(), KinetixError> {
+        if self.opts.tags.is_empty() {
+            return Ok(());
+        }
+        let mut tag = Vec::new();
+        elem(&mut tag, ID_TARGETS, &[]);
+        for (name, value) in &self.opts.tags {
+            let mut simple = Vec::new();
+            elem(&mut simple, ID_TAG_NAME, name.as_bytes());
+            elem(&mut simple, ID_TAG_STRING, value.as_bytes());
+            elem(&mut tag, ID_SIMPLE_TAG, &simple);
+        }
+        let mut body = Vec::new();
+        elem(&mut body, ID_TAG, &tag);
+        elem(buf, ID_TAGS, &body);
+        Ok(())
+    }
+
     fn patch_segment_size(&mut self) -> Result<(), KinetixError> {
         if self.seekable.is_none() {
             return Ok(());
@@ -798,6 +830,14 @@ impl<W: Write> WebmWriter<W> {
 impl<W: Write + Seek> WebmWriter<W> {
     /// A writer in finite mode: cluster and segment sizes are patched after the
     /// fact and a `Cues` index is appended, so the file is seekable.
+    /// A seekable writer with `opts` (for example tags); see [`WebmWriter::new_seekable`].
+    pub fn new_seekable_with_options(out: W, opts: WebmOptions) -> Self {
+        Self {
+            opts,
+            ..Self::new_seekable(out)
+        }
+    }
+
     pub fn new_seekable(out: W) -> Self {
         Self {
             seekable: Some(Box::new(|out: &mut W, at: u64, bytes: &[u8]| {

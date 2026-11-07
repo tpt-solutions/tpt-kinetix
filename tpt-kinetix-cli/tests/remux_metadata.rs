@@ -103,6 +103,15 @@ fn mp4_remux_keeps_the_title_and_sanitize_drops_it() {
         "fragmented remux keeps the title"
     );
 
+    // WebM output carries the same text tags, as a Matroska Tags element.
+    let webm = dir.join("out.webm");
+    tpt(&["remux", src.to_str().unwrap(), webm.to_str().unwrap()]);
+    assert_eq!(
+        title_of(&webm).as_deref(),
+        Some("Kinetix metadata check"),
+        "WebM remux keeps the title as a tag"
+    );
+
     let clean = dir.join("clean.mp4");
     tpt(&["sanitize", src.to_str().unwrap(), clean.to_str().unwrap()]);
     assert_eq!(title_of(&clean), None, "sanitize does not copy metadata");

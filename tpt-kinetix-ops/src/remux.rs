@@ -464,7 +464,8 @@ fn write_output(
             if kept.is_empty() {
                 bail!("no AV1, VP9 or Opus track in the input");
             }
-            write_webm(&kept, &map, next, output)
+            let tags = layout_tags(layout.user_data.as_deref());
+            write_webm(&kept, &map, next, output, tags)
         }
         Target::Ivf => write_ivf(streams, next, output),
         Target::Ogg => write_ogg(streams, next, output),
@@ -573,17 +574,32 @@ fn write_ogg(streams: Vec<StreamInfo>, next: &mut NextFrame, output: &Path) -> R
 }
 
 /// Writes frames to a WebM file (or a live stream to stdout when `output` is `-`).
+/// The text tags of an MP4 input's `udta`, as WebM tag pairs.
+fn layout_tags(user_data: Option<&[u8]>) -> Vec<(String, String)> {
+    user_data
+        .map(tpt_kinetix_demux::mp4::metadata::text_tags)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect()
+}
+
 fn write_webm(
     kept: &[StreamInfo],
     map: &[Option<u32>],
     next: &mut NextFrame,
     output: &Path,
+    tags: Vec<(String, String)>,
 ) -> Result<()> {
     let started = Instant::now();
     let (mut packets, mut bytes) = (0u64, 0u64);
     if output.as_os_str() == "-" {
         // stdout cannot seek, so only a live (unknown-size) stream is possible.
-        let mut writer = WebmWriter::with_options(std::io::stdout().lock(), WebmOptions::default());
+        let options = WebmOptions {
+            tags,
+            ..WebmOptions::default()
+        };
+        let mut writer = WebmWriter::with_options(std::io::stdout().lock(), options);
         writer.set_tracks(kept)?;
         while let Some((mut p, ticks, scale, discard)) = next()? {
             let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
@@ -605,7 +621,11 @@ fn write_webm(
     }
     let file = std::fs::File::create(output)
         .with_context(|| format!("failed to create {}", output.display()))?;
-    let mut writer = WebmWriter::new_seekable(BufWriter::new(file));
+    let options = WebmOptions {
+        tags,
+        ..WebmOptions::default()
+    };
+    let mut writer = WebmWriter::new_seekable_with_options(BufWriter::new(file), options);
     writer.set_tracks(kept)?;
     while let Some((mut p, ticks, scale, discard)) = next()? {
         let Some(Some(new_index)) = map.get(p.stream_index as usize) else {
