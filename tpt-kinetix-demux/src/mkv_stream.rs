@@ -38,6 +38,8 @@ const ID_CODEC_PRIVATE: u32 = 0x63A2;
 const ID_DEFAULT_DURATION: u32 = 0x23_E383;
 const ID_VIDEO: u32 = 0xE0;
 const ID_COLOUR: u32 = 0x55B0;
+const ID_FLAG_DEFAULT: u32 = 0x88;
+const ID_FLAG_FORCED: u32 = 0x55AA;
 const ID_MATRIX_COEFFICIENTS: u32 = 0x55B1;
 const ID_RANGE: u32 = 0x55B9;
 const ID_TRANSFER_CHARACTERISTICS: u32 = 0x55BA;
@@ -135,6 +137,9 @@ struct TrackBuilder {
     transfer: Option<u64>,
     matrix: Option<u64>,
     range: Option<u64>,
+    /// `FlagDefault` (absent means 1) and `FlagForced` (absent means 0).
+    flag_default: Option<u64>,
+    flag_forced: Option<u64>,
 }
 
 struct RawFrame {
@@ -428,6 +433,8 @@ impl MkvStream {
                 | ID_DEFAULT_DURATION
                 | ID_PIXEL_WIDTH
                 | ID_PIXEL_HEIGHT
+                | ID_FLAG_DEFAULT
+                | ID_FLAG_FORCED
                 | ID_MATRIX_COEFFICIENTS
                 | ID_RANGE
                 | ID_TRANSFER_CHARACTERISTICS
@@ -546,6 +553,8 @@ impl MkvStream {
                         ID_PIXEL_WIDTH => b.width = uint(body).min(u64::from(u32::MAX)) as u32,
                         ID_PIXEL_HEIGHT => b.height = uint(body).min(u64::from(u32::MAX)) as u32,
                         ID_MATRIX_COEFFICIENTS => b.matrix = Some(uint(body)),
+                        ID_FLAG_DEFAULT => b.flag_default = Some(uint(body)),
+                        ID_FLAG_FORCED => b.flag_forced = Some(uint(body)),
                         ID_RANGE => b.range = Some(uint(body)),
                         ID_TRANSFER_CHARACTERISTICS => b.transfer = Some(uint(body)),
                         ID_PRIMARIES => b.primaries = Some(uint(body)),
@@ -649,7 +658,12 @@ impl MkvStream {
                 .find(|f| f.track == b.number && f.key)
                 .map(|f| f.data.as_slice());
             match build_stream_info(infos.len() as u32, b, sample)? {
-                Built::Info(info) => {
+                Built::Info(mut info) => {
+                    info.disposition = tpt_kinetix_core::stream::Disposition {
+                        // Matroska: FlagDefault is 1 when absent, FlagForced 0.
+                        default: b.flag_default != Some(0),
+                        forced: b.flag_forced == Some(1),
+                    };
                     infos.push(info);
                     map.push(bi);
                 }

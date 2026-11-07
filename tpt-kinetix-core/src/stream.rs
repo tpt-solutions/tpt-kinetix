@@ -103,6 +103,20 @@ pub struct StreamInfo {
     /// `None` when the container does not state one or it is `und`.
     #[serde(default)]
     pub language: Option<String>,
+    /// The track's dispositions (ffprobe's `disposition.default` and `forced`).
+    #[serde(default)]
+    pub disposition: Disposition,
+}
+
+/// Flags a container states about a track. ffprobe reports these as
+/// `disposition.default` and `disposition.forced`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Disposition {
+    /// The track is the default one of its kind (MP4: the track is enabled;
+    /// WebM: `FlagDefault`).
+    pub default: bool,
+    /// The track holds forced narrative content (WebM: `FlagForced`).
+    pub forced: bool,
 }
 
 impl StreamInfo {
@@ -123,6 +137,7 @@ impl StreamInfo {
             edit_media_time: None,
             color: None,
             language: None,
+            disposition: Disposition::default(),
         }
     }
 
