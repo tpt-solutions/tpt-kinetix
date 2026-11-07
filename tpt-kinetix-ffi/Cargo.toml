@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "C ABI for the TPT Kinetix container tools: probe and faststart"
+description = "C ABI for the TPT Kinetix container tools: probe, faststart, remux and package"
 publish = false
 
 [lib]
@@ -17,3 +17,4 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-mux = { workspace = true }
+tpt-kinetix-ops = { workspace = true }

@@ -3,8 +3,6 @@
 mod doctor;
 mod package;
 mod png;
-mod probe_json;
-mod remux;
 mod thumbnails;
 
 use std::path::PathBuf;
@@ -145,7 +143,8 @@ enum Commands {
         /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
         #[arg(long, requires = "cenc_key_id")]
         cenc_key: Option<String>,
-        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        /// CENC scheme: `cenc` (AES-CTR), `cbcs` (AES-CBC, every block) or
+        /// `cbcs-pattern` (AES-CBC, 1 block in 10, as HLS and most players expect).
         #[arg(long, default_value = "cenc")]
         cenc_scheme: String,
     },
@@ -168,6 +167,18 @@ enum Commands {
         /// (`EXT-X-PART` + blocking playlist reload); 0 disables parts.
         #[arg(long, default_value_t = 0.333)]
         part_seconds: f64,
+        /// CENC key ID (32 hex digits) to protect the fMP4 segments with ClearKey.
+        /// Needs `--cenc-key`. The playlists carry the key line and `/<key>/key.json`
+        /// serves the license.
+        #[arg(long, requires = "cenc_key")]
+        cenc_key_id: Option<String>,
+        /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
+        #[arg(long, requires = "cenc_key_id")]
+        cenc_key: Option<String>,
+        /// CENC scheme: `cenc` (AES-CTR), `cbcs` (AES-CBC, every block) or
+        /// `cbcs-pattern` (AES-CBC, 1 block in 10, as HLS and most players expect).
+        #[arg(long, default_value = "cenc")]
+        cenc_scheme: String,
         /// Listen on all interfaces instead of localhost only.
         #[arg(long)]
         public: bool,
@@ -243,7 +254,8 @@ enum Commands {
         /// The content key for `--cenc-key-id`, 32 hex digits (AES-128).
         #[arg(long, requires = "cenc_key_id")]
         cenc_key: Option<String>,
-        /// CENC scheme: `cenc` (AES-CTR) or `cbcs` (AES-CBC, no pattern).
+        /// CENC scheme: `cenc` (AES-CTR), `cbcs` (AES-CBC, every block) or
+        /// `cbcs-pattern` (AES-CBC, 1 block in 10, as HLS and most players expect).
         #[arg(long, default_value = "cenc")]
         cenc_scheme: String,
     },
@@ -352,7 +364,17 @@ fn parse_key_limit(arg: &str) -> Result<(String, tpt_kinetix_stream::KeyLimits),
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // The remux and package summaries come from tpt-kinetix-ops at info; show them by
+    // default, as the CLI always has. RUST_LOG still overrides the filter.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,tpt_kinetix_ops=info")
+            }),
+        )
+        .without_time()
+        .with_target(false)
+        .init();
 
     let cli = Cli::parse();
 
@@ -365,10 +387,10 @@ async fn main() -> Result<()> {
             max_packet_bytes,
             max_packets,
             max_total_mb,
-        } => remux::sanitize(
+        } => tpt_kinetix_ops::remux::sanitize(
             &input,
             &output,
-            remux::Limits {
+            tpt_kinetix_ops::remux::Limits {
                 max_packet_bytes,
                 max_packets,
                 max_total_bytes: max_total_mb * 1024 * 1024,
@@ -394,6 +416,9 @@ async fn main() -> Result<()> {
             segment_seconds,
             window,
             part_seconds,
+            cenc_key_id,
+            cenc_key,
+            cenc_scheme,
             public,
             rtmp_port,
             publish_token,
@@ -416,10 +441,16 @@ async fn main() -> Result<()> {
             println!(
                 "live server on {scheme}://{host}:{port}\n  publish: POST a WebM (AV1/VP9 + Opus) to /ingest/<key>\n  play   : {scheme}://{host}:{port}/<key>/master.m3u8"
             );
+            let encryption = tpt_kinetix_ops::encryption_from_hex(
+                cenc_key_id.as_deref(),
+                cenc_key.as_deref(),
+                &cenc_scheme,
+            )?;
             let server = tpt_kinetix_stream::LiveServer::new(tpt_kinetix_package::LiveOptions {
                 segment_seconds,
                 window,
                 part_seconds: (part_seconds > 0.0).then_some(part_seconds),
+                encryption,
             })
             .with_policy(tpt_kinetix_stream::IngestPolicy {
                 token: publish_token,
@@ -517,7 +548,7 @@ async fn main() -> Result<()> {
             faststart,
             fragmented,
             fragment_ms,
-        } => remux::remux(
+        } => tpt_kinetix_ops::remux::remux(
             &input,
             &output,
             faststart,
@@ -579,12 +610,12 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
         if json {
             print!(
                 "{}",
-                probe_json::document(
+                tpt_kinetix_ops::probe_json::document(
                     "mov,mp4,m4a,3gp,3g2,mj2",
                     "QuickTime / MOV",
-                    probe_json::duration_of(&streams),
+                    tpt_kinetix_ops::probe_json::duration_of(&streams),
                     src,
-                    &probe_json::streams(&streams, &counts),
+                    &tpt_kinetix_ops::probe_json::streams(&streams, &counts),
                 )
             );
         } else {
@@ -627,12 +658,12 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
                 .collect();
             print!(
                 "{}",
-                probe_json::document(
+                tpt_kinetix_ops::probe_json::document(
                     "matroska,webm",
                     "Matroska / WebM",
                     Some(reader.duration_ms() as f64 / 1000.0),
                     len,
-                    &probe_json::streams(&streams, &counts),
+                    &tpt_kinetix_ops::probe_json::streams(&streams, &counts),
                 )
             );
         } else {
@@ -661,12 +692,12 @@ fn probe(input: &std::path::Path, json: bool) -> Result<()> {
             .collect();
         print!(
             "{}",
-            probe_json::document(
+            tpt_kinetix_ops::probe_json::document(
                 "mov,mp4,m4a,3gp,3g2,mj2",
                 "QuickTime / MOV",
-                probe_json::duration_of(&streams),
+                tpt_kinetix_ops::probe_json::duration_of(&streams),
                 len,
-                &probe_json::streams(&streams, &counts),
+                &tpt_kinetix_ops::probe_json::streams(&streams, &counts),
             )
         );
     } else {
@@ -887,12 +918,12 @@ fn probe_ts(input: &std::path::Path, json: bool) -> Result<()> {
             .map(|ms| ms as f64 / 1000.0);
         print!(
             "{}",
-            probe_json::document(
+            tpt_kinetix_ops::probe_json::document(
                 "mpegts",
                 "MPEG-TS",
                 duration,
                 std::fs::metadata(input).map(|m| m.len()).unwrap_or(0),
-                &probe_json::streams(&infos, &counts),
+                &tpt_kinetix_ops::probe_json::streams(&infos, &counts),
             )
         );
     }
@@ -909,12 +940,12 @@ fn probe_ivf(data: &[u8], json: bool) -> Result<()> {
     if json {
         print!(
             "{}",
-            probe_json::document(
+            tpt_kinetix_ops::probe_json::document(
                 "ivf",
                 "IVF (raw AV1/VP9)",
-                probe_json::duration_of(std::slice::from_ref(&info)),
+                tpt_kinetix_ops::probe_json::duration_of(std::slice::from_ref(&info)),
                 data.len() as u64,
-                &probe_json::streams(std::slice::from_ref(&info), &[Some(frames)]),
+                &tpt_kinetix_ops::probe_json::streams(std::slice::from_ref(&info), &[Some(frames)]),
             )
         );
         return Ok(());

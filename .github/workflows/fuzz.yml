@@ -36,6 +36,8 @@ jobs:
           - crate: tpt-kinetix-demux
             target: fuzz_mkv_stream
           - crate: tpt-kinetix-demux
+            target: fuzz_mkv_metadata
+          - crate: tpt-kinetix-demux
             target: fuzz_mp4_reader
           - crate: tpt-kinetix-demux
             target: fuzz_moof

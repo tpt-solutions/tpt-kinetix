@@ -125,7 +125,7 @@ fn cenc_and_cbcs_tracks_decrypt_to_the_clear_frames() {
     ]);
 
     let clear = dir.join("clear");
-    for scheme in ["cenc", "cbcs"] {
+    for scheme in ["cenc", "cbcs", "cbcs-pattern"] {
         let enc = dir.join(format!("enc-{scheme}"));
         tpt(&[
             "package",
@@ -152,10 +152,9 @@ fn cenc_and_cbcs_tracks_decrypt_to_the_clear_frames() {
         let init = std::fs::read(enc.join("init-0.mp4")).unwrap();
         assert!(init.windows(4).any(|w| w == b"encv"), "encv sample entry");
         assert!(init.windows(4).any(|w| w == b"tenc"), "tenc box");
-        assert!(
-            init.windows(4).any(|w| w == scheme.as_bytes()),
-            "schm names {scheme}"
-        );
+        // The scheme type is the fourcc: `cbcs-pattern` is cbcs with a 1:9 pattern.
+        let fourcc: &[u8] = if scheme == "cenc" { b"cenc" } else { b"cbcs" };
+        assert!(init.windows(4).any(|w| w == fourcc), "schm names {scheme}");
         let mpd = std::fs::read_to_string(enc.join("manifest.mpd")).unwrap();
         assert!(
             mpd.contains("cenc:default_KID=\"00112233-4455-6677-8899-aabbccddeeff\""),
@@ -164,6 +163,36 @@ fn cenc_and_cbcs_tracks_decrypt_to_the_clear_frames() {
         assert!(!std::fs::read_to_string(clear.join("manifest.mpd"))
             .unwrap()
             .contains("ContentProtection"));
+        // HLS: the protected media playlists name the ClearKey system and the license,
+        // which carries the key ID and key as base64url JWK fields. Clear output has
+        // neither.
+        // `cenc` and `cbcs-pattern` have a key line; plain `cbcs` does not.
+        let track = std::fs::read_to_string(enc.join("track-0.m3u8")).unwrap();
+        if scheme == "cenc" {
+            assert!(
+                track.contains("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,KEYFORMAT=\"org.w3.clearkey\""),
+                "{track}"
+            );
+            let license = std::fs::read_to_string(enc.join("key.json")).unwrap();
+            assert_eq!(
+        license,
+        "{\"keys\":[{\"kty\":\"oct\",\"kid\":\"ABEiM0RVZneImaq7zN3u_w\",\"k\":\"Dw4NDAsKCQgHBgUEAwIBAA\"}]}"
+    );
+        }
+        // cbcs-pattern is signalled as SAMPLE-AES with the same ClearKey license (the
+        // browser test plays it with hls.js); plain cbcs is not signalled.
+        if scheme == "cbcs-pattern" {
+            assert!(
+                track.contains("#EXT-X-KEY:METHOD=SAMPLE-AES,KEYFORMAT=\"org.w3.clearkey\""),
+                "{track}"
+            );
+        }
+        let clear_track = std::fs::read_to_string(clear.join("track-0.m3u8")).unwrap();
+        assert!(!clear_track.contains("EXT-X-KEY"), "{clear_track}");
+        assert!(
+            !clear.join("key.json").exists(),
+            "clear output has no license"
+        );
         let clear_init = std::fs::read(clear.join("init-0.mp4")).unwrap();
         assert!(
             !clear_init.windows(4).any(|w| w == b"encv"),
