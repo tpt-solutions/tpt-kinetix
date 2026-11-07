@@ -46,7 +46,7 @@ jobs:
       - name: Check the page's module is present
         run: test -s web-demo/pkg/tpt_kinetix_demux.js
       - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: web-demo
 
