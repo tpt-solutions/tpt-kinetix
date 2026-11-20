@@ -299,7 +299,7 @@ jobs:
         run: cargo install cbindgen --locked
       - name: C ABI smoke test (header current, C program links and runs)
         run: bash tools/ffi-smoke-test.sh
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Install maturin
