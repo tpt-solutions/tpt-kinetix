@@ -94,7 +94,7 @@ jobs:
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Set-Content -Encoding ascii "dist/$name.zip.sha256"
       - name: Attach to the GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           files: dist/*
