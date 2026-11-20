@@ -33,7 +33,7 @@ jobs:
           command: build
           args: --release --out dist -m tpt-kinetix-py/Cargo.toml
           manylinux: auto
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
@@ -48,7 +48,7 @@ jobs:
         with:
           command: sdist
           args: --out dist -m tpt-kinetix-py/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
