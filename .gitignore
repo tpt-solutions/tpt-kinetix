@@ -92,3 +92,10 @@ dav1d_grid*.dump
 
 # Local kilo tool state (untracked, 2026-11-07)
 .kilo/
+
+# FFmpeg source cache (LGPL) fetched by tpt-kinetix-kg fetch-source / verify-tables.
+# Must never be committed, at any depth.
+**/.cache/
+
+# Local-only FFmpeg reference excerpts (LGPL): never commit. See oracle/README.md.
+out-kinetix-h264/oracle/
