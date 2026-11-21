@@ -194,6 +194,14 @@ pub fn sample_entry(info: &StreamInfo) -> Result<Vec<u8>, MuxError> {
             e.extend_from_slice(&boxed(b"vttC", header));
             boxed(b"wvtt", &e)
         }
+        CodecId::Spls => {
+            // Kinetix splat sequence: `spls` entry with the SPLS header in `splc`.
+            need_config("SPLS header")?;
+            let mut e = vec![0u8; 6]; // reserved
+            e.extend_from_slice(&1u16.to_be_bytes()); // data_reference_index
+            e.extend_from_slice(&boxed(b"splc", &info.extradata));
+            boxed(b"spls", &e)
+        }
         CodecId::Unknown(f) => {
             return Err(MuxError::Unsupported(format!(
                 "cannot write a sample entry for unknown codec '{}'",
@@ -212,6 +220,15 @@ pub fn language_code(lang: Option<&str>) -> u16 {
     };
     l.bytes()
         .fold(0u16, |acc, b| (acc << 5) | u16::from(b - 0x60))
+}
+
+/// The `hdlr` handler for a stream. Splat sequences use the timed-metadata
+/// handler (`meta`); everything else follows its media type.
+pub fn stream_handler(info: &StreamInfo) -> Result<([u8; 4], &'static str), MuxError> {
+    if info.codec == CodecId::Spls {
+        return Ok((*b"meta", "SplatSequenceHandler"));
+    }
+    handler_for(info.media_type)
 }
 
 /// The `hdlr` handler type for a media type.

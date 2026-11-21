@@ -21,7 +21,7 @@ use tpt_kinetix_core::codec::{CodecId, MediaType};
 use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
 
-use crate::entries::{boxed, full_box, handler_for, sample_entry};
+use crate::entries::{boxed, full_box, sample_entry, stream_handler};
 use crate::MuxError;
 
 /// Movie timescale written to `mvhd` (ticks per second).
@@ -124,7 +124,7 @@ impl<W: Write + Seek> Mp4Writer<W> {
         }
         let mut tracks = Vec::with_capacity(streams.len());
         for (i, s) in streams.iter().enumerate() {
-            handler_for(s.media_type)?;
+            stream_handler(s)?;
             if s.timescale == 0 {
                 return Err(MuxError::InvalidConfig(format!(
                     "stream {i} has a zero timescale"
@@ -445,7 +445,7 @@ fn build_trak(
     );
     mdhd.extend_from_slice(&[0u8; 2]);
 
-    let (handler, name) = handler_for(t.info.media_type)?;
+    let (handler, name) = stream_handler(&t.info)?;
     let mut hdlr = vec![0u8; 4];
     hdlr.extend_from_slice(&handler);
     hdlr.extend_from_slice(&[0u8; 12]);

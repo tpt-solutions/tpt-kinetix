@@ -187,6 +187,12 @@ impl<'a> Sequence<'a> {
         self.degree
     }
 
+    /// The quantisation the file was written with.
+    #[must_use]
+    pub fn quantization(&self) -> Quantization {
+        self.quant
+    }
+
     /// The slab index.
     #[must_use]
     pub fn entries(&self) -> &[SlabEntry] {
@@ -344,4 +350,125 @@ pub fn read_sequence(data: &[u8]) -> Result<Sequence<'_>, SplatError> {
         slab_duration,
         entries,
     })
+}
+
+/// Size of the configuration record written by [`sequence_config`].
+pub const CONFIG_LEN: usize = 16;
+
+impl Sequence<'_> {
+    /// The coded payload of slab `k`, exactly as stored (see the module layout).
+    ///
+    /// # Errors
+    ///
+    /// [`SplatError::Invalid`] if `k` is out of range.
+    pub fn slab_payload(&self, k: usize) -> Result<&[u8], SplatError> {
+        let e = self
+            .entries
+            .get(k)
+            .ok_or(SplatError::Invalid("slab index out of range"))?;
+        Ok(&self.data[e.offset as usize..(e.offset + e.length) as usize])
+    }
+}
+
+/// Packs what a container needs to rebuild an `SPLS` file into
+/// [`CONFIG_LEN`] bytes: version, flags, SH degree, depths, slab duration, and
+/// the first slab's start time.
+///
+/// # Errors
+///
+/// [`SplatError::Invalid`] for an empty sequence (it has no start time).
+pub fn sequence_config(seq: &Sequence<'_>) -> Result<Vec<u8>, SplatError> {
+    let t0 = seq
+        .entries()
+        .first()
+        .ok_or(SplatError::Invalid("empty sequence has no start time"))?
+        .t_start;
+    let (pos_bits, attr_bits) = seq.quantization().depths();
+    let mut out = Vec::with_capacity(CONFIG_LEN);
+    out.push(VERSION);
+    out.push(
+        if matches!(seq.quantization(), Quantization::Lossy { .. }) {
+            FLAG_LOSSY
+        } else {
+            0
+        },
+    );
+    out.push(seq.sh_degree());
+    out.push(pos_bits);
+    out.push(attr_bits);
+    out.extend_from_slice(&[0, 0, 0]);
+    out.extend_from_slice(&seq.slab_duration().to_le_bytes());
+    out.extend_from_slice(&t0.to_le_bytes());
+    Ok(out)
+}
+
+/// Rebuilds an `SPLS` file from a configuration record (see
+/// [`sequence_config`]) and one payload per slab, in order.
+///
+/// Slab times follow the writer's rule, `t0 + k · slab`, so a sequence written
+/// by [`write_sequence`] and passed through its parts comes back byte-identical.
+///
+/// # Errors
+///
+/// [`SplatError::Parse`] for a malformed record, or a payload whose member
+/// count is unreadable. [`SplatError::Unsupported`] for other versions.
+pub fn sequence_from_config(config: &[u8], payloads: &[&[u8]]) -> Result<Vec<u8>, SplatError> {
+    if config.len() != CONFIG_LEN {
+        return Err(SplatError::Parse("SPLS config record has the wrong length"));
+    }
+    if config[0] != VERSION {
+        return Err(SplatError::Unsupported("SPLS config version other than 1"));
+    }
+    let flags = config[1];
+    if flags & !FLAG_LOSSY != 0 || config[2] > MAX_SH_DEGREE {
+        return Err(SplatError::Parse("SPLS config flags or degree invalid"));
+    }
+    // Validates the depths against the lossy flag. The payloads carry their own data.
+    Quantization::from_depths(flags & FLAG_LOSSY != 0, config[3], config[4])?;
+    let slab = f32::from_le_bytes([config[8], config[9], config[10], config[11]]);
+    let t0 = f32::from_le_bytes([config[12], config[13], config[14], config[15]]);
+    if !slab.is_finite() || slab <= 0.0 || !t0.is_finite() {
+        return Err(SplatError::Parse("SPLS config times invalid"));
+    }
+    let count = payloads.len();
+    if count > MAX_SLABS {
+        return Err(SplatError::Parse("SPLS slab count out of range"));
+    }
+
+    let index_end = HEADER_LEN + count * INDEX_ENTRY_LEN;
+    let mut header = Vec::with_capacity(index_end);
+    header.extend_from_slice(&MAGIC);
+    header.push(VERSION);
+    header.push(flags);
+    header.push(config[2]);
+    header.push(0);
+    header.extend_from_slice(&(count as u32).to_le_bytes());
+    header.push(config[3]);
+    header.push(config[4]);
+    header.extend_from_slice(&[0, 0]);
+    header.extend_from_slice(&slab.to_le_bytes());
+
+    let mut offset = index_end as u64;
+    let mut index = Vec::with_capacity(count * INDEX_ENTRY_LEN);
+    for (k, p) in payloads.iter().enumerate() {
+        if p.len() < 4 {
+            return Err(SplatError::Parse("SPLS slab payload too short"));
+        }
+        let members = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+        let t_start = t0 + k as f32 * slab;
+        let t_end = t_start + slab;
+        index.extend_from_slice(&t_start.to_le_bytes());
+        index.extend_from_slice(&t_end.to_le_bytes());
+        index.extend_from_slice(&offset.to_le_bytes());
+        index.extend_from_slice(&(p.len() as u64).to_le_bytes());
+        index.extend_from_slice(&members.to_le_bytes());
+        offset += p.len() as u64;
+    }
+    let mut out = Vec::with_capacity(index_end + payloads.iter().map(|p| p.len()).sum::<usize>());
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&index);
+    for p in payloads {
+        out.extend_from_slice(p);
+    }
+    Ok(out)
 }

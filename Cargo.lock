@@ -2999,6 +2999,7 @@ dependencies = [
  "tpt-kinetix-demux",
  "tpt-kinetix-mux",
  "tpt-kinetix-package",
+ "tpt-kinetix-splat",
  "tracing",
 ]
 

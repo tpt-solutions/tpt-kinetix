@@ -19,7 +19,7 @@ use tpt_kinetix_core::packet::Packet;
 use tpt_kinetix_core::stream::StreamInfo;
 
 use crate::cenc::{self, Encryption};
-use crate::entries::{boxed, full_box, handler_for, sample_entry};
+use crate::entries::{boxed, full_box, sample_entry, stream_handler};
 use crate::MuxError;
 
 const MOVIE_TIMESCALE: u32 = 1000;
@@ -82,7 +82,7 @@ impl FragmentWriter {
         }
         let mut tracks = Vec::new();
         for (i, s) in streams.iter().enumerate() {
-            handler_for(s.media_type)?;
+            stream_handler(s)?;
             if s.timescale == 0 {
                 return Err(MuxError::InvalidConfig(format!(
                     "stream {i} has a zero timescale"
@@ -431,7 +431,7 @@ fn init_trak(t: &Track, track_id: u32) -> Vec<u8> {
     );
     mdhd.extend_from_slice(&[0u8; 2]);
 
-    let (handler, name) = handler_for(t.info.media_type).expect("validated in new()");
+    let (handler, name) = stream_handler(&t.info).expect("validated in new()");
     let mut hdlr = vec![0u8; 4];
     hdlr.extend_from_slice(&handler);
     hdlr.extend_from_slice(&[0u8; 12]);

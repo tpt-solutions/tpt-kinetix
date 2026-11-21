@@ -148,9 +148,9 @@ pub fn parse_sample_entry(media: MediaType, extra: &[u8]) -> SampleEntryConfig {
             }
         }
         // A text sample entry is just the 8-byte SampleEntry header followed by
-        // its children (`vttC` for WebVTT).
-        MediaType::Subtitle => 8,
-        MediaType::Other => return cfg,
+        // its children (`vttC` for WebVTT). Other tracks (Kinetix `spls`) use
+        // the same layout.
+        MediaType::Subtitle | MediaType::Other => 8,
     };
     let Some(children) = extra.get(children_at..) else {
         return cfg;
@@ -158,7 +158,7 @@ pub fn parse_sample_entry(media: MediaType, extra: &[u8]) -> SampleEntryConfig {
     for (kind, payload) in child_boxes(children) {
         match &kind {
             b"avcC" | b"hvcC" | b"av1C" | b"vpcC" | b"dOps" | b"dfLa" | b"dac3" | b"dec3"
-            | b"vttC"
+            | b"vttC" | b"splc"
                 if cfg.extradata.is_empty() =>
             {
                 cfg.extradata = payload.to_vec();
