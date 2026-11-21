@@ -10,7 +10,8 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
 
 - [x] **M0 Scaffold** — workspace member + `[workspace.dependencies]` (`tpt-math-splat = "0.1.0"`), `README.md`, `CHANGELOG.md`,
       `release-plz.toml` entry, PATENTS.md row, README status row, `fuzz/` dir + `exclude` entry, `justfile` fuzz-build line; `just deny` passes.
-      Bench list not added yet (no Criterion bench in the crate). `proptest` is pinned locally (`"1"`) because the workspace has no `proptest` entry.
+      Bench added: `benches/splat_codec.rs` (SPLT lossless and lossy 16/8 encode/decode, PLY read/write on a 50k-splat synthetic cloud),
+      registered in the `justfile` bench recipes and the test-utils bench lists. `proptest` is pinned locally (`"1"`) because the workspace has no `proptest` entry.
 - [~] **M1 Data model + interop** — done: `GaussianCloud` (3D, format-neutral; `[point][channel][coeff]` SH), `SplatError`,
       3DGS `.ply` read/write (INRIA property order, bounds checked before allocation), 9 unit + 4 proptest tests (never-panic on random and
       mutated input, bit-exact round trip). Fuzz target `fuzz_splat_ply` ran 60s in WSL Ubuntu-24.04 (`cargo +nightly fuzz run -s none`, no crashes). The Windows nightly
@@ -42,7 +43,17 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       data. Each channel now stores its own 256-entry frequency table (fitted to its byte histogram) ahead of its rANS stream.
       Results: lossless 31.8% of PLY; lossy 16/12 15.3%, 16/10 13.8%, **16/8 9.7%** (about SPZ's ~9%, so 16/8 is the
       operating point to compare against SPZ; SH dominates the cost at high attribute depths); 12/8 9.4%.
-      Smallest-three quaternion coding for lossy SPLT rotations is done (flag `FLAG_SMALLEST3`; lossless keeps four components; older files still read). Lossy 16/8 is now 9.4% of the reference PLY (was 9.7%); rotations are a small share of the bytes. Still open: context modelling across neighbouring points. The seed corpus
+      Smallest-three quaternion coding for lossy SPLT rotations is done (flag `FLAG_SMALLEST3`; lossless keeps four components; older files still read). Lossy 16/8 is now 9.4% of the reference PLY (was 9.7%); rotations are a small share of the bytes. Residual contexts are done (SPLT version 2; version 1 still reads; SPLS unchanged): each channel's varints are split into
+      32 substreams, each with its own table. The context uses four neighbours: the same channel's previous residual (4 magnitude
+      buckets) and its sign, the residual just before it in row-major order (split at 8 bits) and its sign. Version-2 tables are sparse
+      (only used symbols are stored). Reference cloud, original plain coding → now:
+      lossless 62.01 → 59.22 MB (31.8% → 30.4% of PLY), lossy 16/8 18.25 → 17.31 MB (9.4% → 8.9%), 16/12 28.85 → 27.59 MB,
+      16/10 26.01 → 24.68 MB, 12/8 17.64 → 16.73 MB. Steps: one previous-residual context gave 1–2%; 8 magnitude contexts a further
+      ~1.7% on lossy; the row-major neighbour ~1.5% on lossless; the sign of the same channel's previous residual ~2.8% on lossless;
+      sparse tables ~0.2%; the row-major sign ~0.2%. Tried and rejected: the row-major neighbour alone (slightly worse than the same channel).
+      Adaptive per-context tables were measured, not built: an ideal-code-length estimate on the same substreams (adaptive counts,
+      increment 24, halving at 2^16) is 1.4% below the fitted static tables. That is under the 2% bar, and it would need a new adaptive
+      rANS path with a matching decoder, so it is closed. Reopen only with a better model to test. The seed corpus
       for `fuzz_splat_splt` is committed (`fuzz/corpus/fuzz_splat_splt`); the deeper decode paths are still covered mainly by proptests.
 - [~] **M3 4D temporal chunking** — done: `GaussianCloud4D` model (`src/cloud4d.rs`: means xyzt, log scales, isoclinic quaternion
       pair, opacity, SH; temporal variance via `tpt-math-splat`), time-slab chunking (`src/chunk.rs`: a splat is in a slab when its
@@ -69,8 +80,17 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       Players don't read splat tracks, so this is Kinetix-to-Kinetix delivery.
       glTF: `tpt-kinetix-splat::gltf` writes static clouds as GLB with `KHR_gaussian_splatting` (ellipse kernel, srgb_rec709_display).
       RUB clouds export unchanged, and RDF (PLY) clouds get the 180° X flip (positions, quaternions, and SH signs read from the basis).
-      Verified by a view-dependent colour invariance test, GLB container tests, and a CLI `.glb` output. Not verified: the official
-      glTF validator, which could not run in this session (the npm download was denied). Run it before relying on the file.
+      Verified by a view-dependent colour invariance test, GLB container tests, and a CLI `.glb` output. Official glTF validator (npm `gltf-validator`, run from
+      scratch on a 3-splat GLB): no structural errors. The only errors are `MESH_PRIMITIVE_INVALID_ATTRIBUTE` for the four
+      `KHR_gaussian_splatting:*` attributes and `UNSUPPORTED_EXTENSION`, because that validator release does not know the extension.
+      Still open: validate the extension attributes with an extension-aware validator. The `bufferView.target` hint is fixed (ARRAY_BUFFER).
+      Base spec checked: the `KHR_gaussian_splatting` README in KhronosGroup/glTF is "Complete, Ratified" (read via a
+      summarising fetch, not verbatim). Our writer matches its rules: POINTS mode, linear SCALE/OPACITY, xyzw ROTATION, all SH
+      degrees up to the cloud's degree, kernel "ellipse", colorSpace "srgb_rec709_display". `projection` and `sortingMethod`
+      are omitted and take their defaults.
+      Still open: the SPZ compression extension is blocked. It is not in the Khronos repo (only a generic mention of
+      "3D Gaussian splatting compression extensions"), so it is not implemented. Drafts used `KHR_spz_gaussian_splats_compression`
+      and the search results used `KHR_gaussian_splatting_compression_spz`. Reopen when a ratified spec is published.
       Not in scope: COLOR_0 fallback, and sequences (glTF has no 4D form).
 
 Verification for every milestone: `just check`, `just deny`, fuzz >= 60s on any new parser, golden vectors committed.
