@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d94546843e46bc241f88c4b721a6c51147b168fac24c7f0cccad95f8a70d73c2 # shrinks to cloud = GaussianCloud { positions: [[-50.0, -50.0, -50.0]], rotations: [[-1.0, -1.0, -1.0, -1.0]], scales: [[-8.0, -8.0, -8.0]], opacities: [-6.0], sh_degree: 0, sh: [-1.0, -1.0, -1.0], frame: Rdf }, pb = 10, ab = 8
