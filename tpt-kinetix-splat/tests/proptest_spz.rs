@@ -108,3 +108,15 @@ proptest! {
         }
     }
 }
+
+/// Regression: a header with `fractionalBits` of 32 or more used to overflow
+/// the position scale (`1 << frac`). It must now be a clean parse error.
+#[test]
+fn oversized_fractional_bits_is_rejected_not_panicking() {
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fuzz/corpus/fuzz_splat_spz/regression-frac-bits-overflow"
+    ))
+    .unwrap();
+    assert!(read_spz(&bytes).is_err());
+}
