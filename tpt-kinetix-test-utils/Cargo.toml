@@ -16,7 +16,6 @@ publish = false
 tpt-kinetix-core = { workspace = true }
 out-kinetix-h264 = { workspace = true }
 tpt-kinetix-av1 = { workspace = true }
-tpt-kinetix-vp9 = { workspace = true }
 tpt-kinetix-realtime = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,6 +29,7 @@ proptest = "1.5"
 tpt-kinetix-bitstream = { workspace = true }
 tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-av1 = { workspace = true }
+tpt-kinetix-vp9 = { workspace = true }
 tpt-kinetix-lean = { workspace = true }
 tpt-kinetix-vision = { workspace = true }
 tpt-kinetix-screen = { workspace = true }
