@@ -61,7 +61,7 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization; **Enhanced RTMP** AV1/VP9 + Opus straight into live HLS (`live --rtmp-port`) |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
-| Gaussian splats | 🟡 Experimental | `tpt-kinetix-splat`: PLY and SPZ read/write (SPZ checked against the reference decoder), the native `SPLT` static codec, and `SPLS` 4D sequences with time-slab chunking. Not yet in the CLI or packaging; math from `tpt-math-splat` |
+| Gaussian splats | 🟡 Experimental | `tpt-kinetix-splat`: PLY and SPZ read/write (SPZ checked against the reference decoder), the native `SPLT` static codec, `SPLS` 4D sequences with time-slab chunking, and glTF `.glb` export. Exposed through `tpt-kinetix splat`, MP4 `spls` tracks and per-slab packaging. Not yet published to crates.io; RUB ↔ RDF conversion is not implemented. See [its README](tpt-kinetix-splat/README.md) |
 | Original codecs | 🟡 Experimental | `lean`, `screen`, `realtime`, `vision`, `face`, `volumetric` and `lossless`: Kinetix-designed formats with no external reference decoder, pinned by golden vectors instead (see the note below). `lossless` is bit-exact and round-trips; `face` is synthesized by design; `volumetric` is not yet validated against the TMC13 oracle |
 | CLI | ✅ Works / 🟡 Partial | `probe` (MP4, MPEG-TS, Matroska/WebM, IVF; `--json` is ffprobe-shaped), `remux`, `sanitize` (keeps only royalty-free streams from untrusted files), `doctor` (will it play in a browser?), `thumbnails` (keyframe PNGs and a contact sheet), `package`, `serve`, `live`, and `stream` (older RTMP → TS HLS server) all work. `transcode --vcodec av1` runs the full demux → decode → encode pipeline, but VP9 is the only supported input (royalty-free `codec-vp9` path). `vision` decodes Vision bitstreams. See [tpt-kinetix-cli](tpt-kinetix-cli/README.md) |
 
@@ -145,7 +145,9 @@ tpt-kinetix (workspace)
 │
 ├── tpt-kinetix-vp9         — VP9 decoder (pixel-exact, profile 0)
 │
-├── out-kinetix-h264        — H.264 / AVC decoder (unpublished, patent-encumbered)
+├── tpt-kinetix-splat       — Gaussian splat I/O (PLY, SPZ), SPLT/SPLS codecs, glTF export (experimental)
+│
+├── out-kinetix-h264        — H.264 / AVC decoder (unpublished, patent-encumbered, LGPL-2.1+)
 │
 ├── tpt-kinetix-pipeline    — lock-free multi-stage processing pipeline
 │
@@ -318,12 +320,16 @@ dependency graph. In outline:
 
 1. `tpt-kinetix-core`
 2. `tpt-kinetix-demux`, `tpt-kinetix-mux`, `tpt-kinetix-av1`, `tpt-kinetix-vp9`, `tpt-kinetix-bitstream`, `tpt-kinetix-kg` *(depend only on `tpt-kinetix-core`)*
-3. `tpt-kinetix-package`, `tpt-kinetix-pipeline`, `tpt-kinetix-lean`, `-screen`, `-realtime`, `-vision`, `-face`, `-volumetric`, `-lossless` *(depend on the crates above)*
+3. `tpt-kinetix-package`, `tpt-kinetix-pipeline`, `tpt-kinetix-splat`, `-lean`, `-screen`, `-realtime`, `-vision`, `-face`, `-volumetric`, `-lossless` *(depend on the crates above)*
 4. `tpt-kinetix-ops` *(depends on `core`, `demux`, `mux`, `package`; the CLI depends on it)* and `tpt-kinetix-stream` *(depends on `tpt-kinetix-package`)*
 5. `tpt-kinetix-cli` *(depends on pipeline, stream, ops, package and the rest)*
 
 `out-kinetix-h264` and `tpt-kinetix-test-utils` are never published. `tpt-kinetix-ffi`, `tpt-kinetix-py` and
 `tpt-kinetix-node` are `publish = false` (the Python and Node bindings ship through PyPI and npm instead).
+
+To see which crates need publishing, run `just publish-status`. It compares each crate's version with
+crates.io, counts commits since the last `v<version>` tag, and prints the dependency order. The
+crates share one workspace version, so a release normally bumps all of them.
 
 ### crates.io name reservation
 
@@ -355,3 +361,7 @@ Licensed under either of:
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+**Exception:** `out-kinetix-h264` is licensed `LGPL-2.1-or-later`, not under the terms above, because it
+contains FFmpeg-derived code. It is not published. Third-party code ported into this repository is
+listed in [THIRD_PARTY.md](THIRD_PARTY.md). See [PATENTS.md](PATENTS.md) for the H.264 patent position.

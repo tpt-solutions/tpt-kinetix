@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `tpt-kinetix-splat`: Gaussian splat I/O, native `SPLT` and `SPLS` codecs, glTF export, and MP4 carriage of 4D sequences. Not yet published.
+- `tpt-kinetix` CLI: `splat probe` and `splat convert` subcommands.
+- `THIRD_PARTY.md` lists the third-party code ported or adapted into the repository.
+- `just publish-status` (`scripts/publish-status.py`) shows which crates need publishing to crates.io.
+
+### Changed
+
+- `out-kinetix-h264` is licensed `LGPL-2.1-or-later` because it contains FFmpeg-derived code. It is not covered by the workspace MIT/Apache-2.0 grant. See `PATENTS.md`.
+- The FFmpeg source cache and the H.264 oracle excerpts are no longer tracked in git. They are LGPL and are ignored at any depth.
+- `tpt-kinetix-py` enables `extension-module` by default, so `cargo build --workspace` links without libpython.
+
+
 ### Fixed
 
 - README: the language-bindings row of the status table was split across two lines, which broke the
