@@ -74,6 +74,7 @@ tpt-kinetix-screen = { path = "tpt-kinetix-screen", version = "0.2.1" }
 tpt-kinetix-vision = { path = "tpt-kinetix-vision", version = "0.2.1" }
 tpt-kinetix-face = { path = "tpt-kinetix-face", version = "0.2.1" }
 tpt-kinetix-volumetric = { path = "tpt-kinetix-volumetric", version = "0.2.1" }
+tpt-kinetix-splat = { path = "tpt-kinetix-splat", version = "0.2.1" }
 tpt-math-splat = "0.1.0"
 tpt-kinetix-lossless = { path = "tpt-kinetix-lossless", version = "0.2.1" }
 tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.2.1" }

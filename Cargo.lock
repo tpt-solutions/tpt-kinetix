@@ -2880,6 +2880,7 @@ dependencies = [
  "tpt-kinetix-ops",
  "tpt-kinetix-package",
  "tpt-kinetix-pipeline",
+ "tpt-kinetix-splat",
  "tpt-kinetix-stream",
  "tpt-kinetix-vision",
  "tpt-kinetix-vp9",

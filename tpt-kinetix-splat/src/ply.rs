@@ -11,18 +11,24 @@
 
 use std::collections::HashSet;
 
-use crate::cloud::{sh_coeffs_for_degree, GaussianCloud};
+use crate::cloud::{sh_coeffs_for_degree, CoordinateFrame, GaussianCloud};
 use crate::error::SplatError;
 
 /// The header is searched for `end_header` within this many bytes. Real 3DGS
 /// headers are a few hundred bytes, so this bounds work on hostile input.
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 
+/// Header comment that marks a cloud as RUB. PLY has no frame field, and other
+/// tools ignore comments, so the file stays readable everywhere. Files without
+/// it are RDF, the 3DGS convention.
+const RUB_COMMENT: &str = "comment tpt-kinetix frame rub";
+
 struct Header {
     vertex_count: usize,
     /// Property names in file order, which fixes each property's byte offset.
     names: Vec<String>,
     body_start: usize,
+    frame: CoordinateFrame,
 }
 
 fn parse_header(bytes: &[u8]) -> Result<Header, SplatError> {
@@ -60,9 +66,11 @@ fn parse_header(bytes: &[u8]) -> Result<Header, SplatError> {
 
     let mut vertex_count = None;
     let mut names: Vec<String> = Vec::new();
+    let mut frame = CoordinateFrame::Rdf;
     for line in lines {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         match tokens.as_slice() {
+            ["comment", "tpt-kinetix", "frame", "rub"] => frame = CoordinateFrame::Rub,
             ["comment", ..] | ["obj_info", ..] => {}
             ["element", "vertex", count] => {
                 if vertex_count.is_some() {
@@ -103,6 +111,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header, SplatError> {
         vertex_count,
         names,
         body_start,
+        frame,
     })
 }
 
@@ -185,7 +194,10 @@ pub fn read_ply(bytes: &[u8]) -> Result<GaussianCloud, SplatError> {
         }
     }
 
-    GaussianCloud::new(positions, rotations, scales, opacities, degree, sh)
+    Ok(
+        GaussianCloud::new(positions, rotations, scales, opacities, degree, sh)?
+            .with_frame(header.frame),
+    )
 }
 
 /// Serialises a [`GaussianCloud`] as a 3DGS PLY file.
@@ -207,10 +219,12 @@ pub fn write_ply(cloud: &GaussianCloud) -> Vec<u8> {
     names.extend((0..3).map(|i| format!("scale_{i}")));
     names.extend((0..4).map(|i| format!("rot_{i}")));
 
-    let mut out = format!(
-        "ply\nformat binary_little_endian 1.0\nelement vertex {}\n",
-        cloud.len()
-    );
+    let mut out = String::from("ply\nformat binary_little_endian 1.0\n");
+    if cloud.frame() == CoordinateFrame::Rub {
+        out.push_str(RUB_COMMENT);
+        out.push('\n');
+    }
+    out.push_str(&format!("element vertex {}\n", cloud.len()));
     for name in &names {
         out.push_str("property float ");
         out.push_str(name);

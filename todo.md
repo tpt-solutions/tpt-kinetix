@@ -55,8 +55,11 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       sweep would make it O(splats log splats) if sequences get large. Static 3D clouds are not converted to 4D.
       Render check (`tests/render_4d.rs`, M5 core): a test-only CPU renderer draws the source cloud and the decoded slab at the
       same time. Lossless is 83–100 dB and lossy 16/8 about 71 dB, against a negative control (different time) at 26 dB.
-- [ ] **M4 Container + CLI** — MP4 track with custom sample entry via `tpt-kinetix-mux`, read via `tpt-kinetix-demux`;
-      `tpt-kinetix probe` support (count, SH degree, time range) and `transcode ply->splt`.
+- [~] **M4 Container + CLI** — done: `tpt-kinetix splat convert` (PLY/SPZ/SPLT → SPLT lossless or lossy, or → SPZ/PLY) and
+      `tpt-kinetix splat probe` (format, splat count, SH degree, frame; SPLS slabs and time range). Formats are detected from magic
+      bytes. The PLY frame is recorded as a `comment tpt-kinetix frame rub` header line when the cloud is RUB, so the SPZ → PLY
+      conversion no longer mislabels the frame. Open: MP4 track with a custom sample entry (`tpt-kinetix-mux` and `-demux`), and
+      4D SPLS in the CLI (conversion from 4D input has no source format yet).
 - [ ] **M5 Verification renderer + extras** — CPU reference renderer (`condition_on_time` -> EWA -> sorted alpha blend), test-only oracle;
       render-PSNR tests (decode vs source); glTF `KHR_gaussian_splatting` (+ SPZ compression ext); time-slab segment packaging in `tpt-kinetix-package`.
 
