@@ -3068,6 +3068,7 @@ dependencies = [
 name = "tpt-kinetix-splat"
 version = "0.2.1"
 dependencies = [
+ "criterion",
  "flate2",
  "proptest",
  "ruzstd",

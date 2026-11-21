@@ -189,11 +189,11 @@ fetch-h264-conformance:
     bash tools/fetch-h264-conformance.sh
 
 # Every crate that ships a Criterion bench (Phase 0 of todo-perf.md).
-BENCH_CRATES := "out-kinetix-h264 tpt-kinetix-av1 tpt-kinetix-vp9 tpt-kinetix-bitstream tpt-kinetix-lean tpt-kinetix-lossless tpt-kinetix-realtime tpt-kinetix-screen tpt-kinetix-vision tpt-kinetix-face tpt-kinetix-volumetric tpt-kinetix-demux tpt-kinetix-mux tpt-kinetix-pipeline"
+BENCH_CRATES := "out-kinetix-h264 tpt-kinetix-av1 tpt-kinetix-vp9 tpt-kinetix-bitstream tpt-kinetix-lean tpt-kinetix-lossless tpt-kinetix-realtime tpt-kinetix-screen tpt-kinetix-vision tpt-kinetix-face tpt-kinetix-volumetric tpt-kinetix-demux tpt-kinetix-mux tpt-kinetix-pipeline tpt-kinetix-splat"
 
 # Run every Criterion bench in the workspace.
 bench *FLAGS:
-    cargo bench -p out-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-vp9 -p tpt-kinetix-bitstream -p tpt-kinetix-lean -p tpt-kinetix-lossless -p tpt-kinetix-realtime -p tpt-kinetix-screen -p tpt-kinetix-vision -p tpt-kinetix-face -p tpt-kinetix-volumetric -p tpt-kinetix-demux -p tpt-kinetix-mux -p tpt-kinetix-pipeline {{FLAGS}}
+    cargo bench -p out-kinetix-h264 -p tpt-kinetix-av1 -p tpt-kinetix-vp9 -p tpt-kinetix-bitstream -p tpt-kinetix-lean -p tpt-kinetix-lossless -p tpt-kinetix-realtime -p tpt-kinetix-screen -p tpt-kinetix-vision -p tpt-kinetix-face -p tpt-kinetix-volumetric -p tpt-kinetix-demux -p tpt-kinetix-mux -p tpt-kinetix-pipeline -p tpt-kinetix-splat {{FLAGS}}
 
 # Run the benches and print a consolidated timing report.
 bench-report:

@@ -29,6 +29,7 @@ const BENCH_CRATES: &[&str] = &[
     "tpt-kinetix-demux",
     "tpt-kinetix-mux",
     "tpt-kinetix-pipeline",
+    "tpt-kinetix-splat",
 ];
 
 /// One scraped benchmark result.
