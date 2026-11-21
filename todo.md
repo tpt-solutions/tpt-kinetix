@@ -51,8 +51,8 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       and byte ranges, independently decodable slab payloads, `slabs_at(t)` seeking). Channel coding is shared with SPLT via `src/block.rs`.
       Verified: lossless slabs decode to exactly their chunk, lossy stays within bounds, never-panic proptests, and `fuzz_splat_spls`
       (72M runs / 60s, no crashes).
-      Open: no 4D sample or reference exists, so the format is tested only against itself. Membership costs O(slabs × splats); a
-      sweep would make it O(splats log splats) if sequences get large. Static 3D clouds are not converted to 4D.
+      Open: no 4D sample or reference exists, so the format is tested only against itself. Membership is now output-sensitive: each splat
+      is pushed only into the slabs its temporal support touches (same predicate, checked by proptest against `condition_on_time`). Static 3D clouds are not converted to 4D.
       Render check (`tests/render_4d.rs`, M5 core): a test-only CPU renderer draws the source cloud and the decoded slab at the
       same time. Lossless is 83–100 dB and lossy 16/8 about 71 dB, against a negative control (different time) at 26 dB.
 - [~] **M4 Container + CLI** — done: `tpt-kinetix splat convert` (PLY/SPZ/SPLT → SPLT lossless or lossy, or → SPZ/PLY) and
