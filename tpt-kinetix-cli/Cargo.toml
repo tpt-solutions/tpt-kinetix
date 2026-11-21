@@ -38,6 +38,7 @@ tpt-kinetix-demux = { workspace = true, features = ["http"] }
 tpt-kinetix-mux = { workspace = true }
 tpt-kinetix-package = { workspace = true }
 tpt-kinetix-ops = { workspace = true }
+tpt-kinetix-splat = { workspace = true }
 tpt-kinetix-vp9 = { workspace = true, optional = true }
 tpt-kinetix-av1 = { workspace = true }
 tpt-kinetix-vision = { workspace = true }

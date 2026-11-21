@@ -3,6 +3,7 @@
 mod doctor;
 mod package;
 mod png;
+mod splat;
 mod thumbnails;
 
 use std::path::PathBuf;
@@ -26,8 +27,39 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum SplatCommand {
+    /// Convert a splat file. The output format follows its extension: .splt, .spz or .ply.
+    #[command(after_help = "Examples:
+  tpt-kinetix splat convert in.ply out.splt --lossy --position-bits 16 --attribute-bits 8
+  tpt-kinetix splat convert in.spz out.ply")]
+    Convert {
+        /// Input PLY, SPZ or SPLT file.
+        input: PathBuf,
+        /// Output file; the extension picks the format.
+        output: PathBuf,
+        /// Quantise values (SPLT output only). Without this, SPLT is lossless.
+        #[arg(long)]
+        lossy: bool,
+        /// Bits per position coordinate for --lossy (1-24).
+        #[arg(long, default_value_t = 16, requires = "lossy")]
+        position_bits: u8,
+        /// Bits per other channel for --lossy (1-24). 8 matches SPZ's size.
+        #[arg(long, default_value_t = 8, requires = "lossy")]
+        attribute_bits: u8,
+    },
+    /// Print a summary of a splat file (format, splat count, SH degree, frame).
+    Probe {
+        /// Input splat file.
+        input: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Convert and inspect Gaussian splat files (PLY, SPZ, SPLT, SPLS).
+    #[command(subcommand)]
+    Splat(SplatCommand),
     /// Inspect a media container and print its tracks (demux-only, runnable today).
     #[command(after_help = "Examples:
   tpt-kinetix probe in.mp4
@@ -380,6 +412,26 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Probe { input, json } => probe(&input, json),
+        Commands::Splat(cmd) => match cmd {
+            SplatCommand::Convert {
+                input,
+                output,
+                lossy,
+                position_bits,
+                attribute_bits,
+            } => {
+                let quant = if lossy {
+                    tpt_kinetix_splat::Quantization::Lossy {
+                        position_bits,
+                        attribute_bits,
+                    }
+                } else {
+                    tpt_kinetix_splat::Quantization::Lossless
+                };
+                splat::convert(&input, &output, quant)
+            }
+            SplatCommand::Probe { input } => splat::probe(&input),
+        },
         Commands::Doctor { input } => doctor::run(&input),
         Commands::Sanitize {
             input,
