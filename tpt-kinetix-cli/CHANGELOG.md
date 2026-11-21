@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Version set to 0.2.0 with the rest of the workspace (2026-11-08). `tpt-kinetix-ops` is now publishable, so the CLI can be.
+- `tpt-kinetix-ops` is now publishable, so the CLI can be.
 - `remux` to WebM with no WebM-capable track now says which codecs the input has and which WebM carries, instead of "no AV1, VP9 or Opus track".
 - Docs: a README quickstart, [what works with my files](../docs/what-works-with-my-files.md) and a [player and browser compatibility](../docs/compatibility.md) page.
 

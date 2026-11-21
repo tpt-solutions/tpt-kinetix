@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- README: the `DemuxStage` row and usage example described a `data: Vec<u8>` field. The stage takes a
+  `ReadAt` source through `DemuxStage::new`, and it reads MP4 input only.
+
 ## [0.2.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.0...v0.2.1) - 2026-11-20
 
 ### Other
@@ -15,7 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Version set to 0.2.0 with the rest of the workspace (2026-11-08). No code change in this crate.
 
 ## [0.1.3](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.1.2...v0.1.3) - 2026-11-07
 

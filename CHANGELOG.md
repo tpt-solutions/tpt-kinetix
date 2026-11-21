@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- README: the language-bindings row of the status table was split across two lines, which broke the
+  table. The second "Quickstart" heading is now "Build and test", and the current release is named as 0.2.1.
+- `tpt-kinetix-pipeline` README: the `DemuxStage` description and usage example used a `data: Vec<u8>`
+  field that does not exist. They now use `DemuxStage::new(source)` with a `ReadAt` source.
+
+## [0.2.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.0...v0.2.1) - 2026-11-20
+
 ### Changed
 
-- Every workspace member is now at version 0.2.0, and internal dependency requirements match. Before this,
-  the versions were mixed (0.1.2, 0.1.3 and 0.2.0). Python (`pyproject.toml`) and Node (`package.json`)
-  packages are also 0.2.0. `Cargo.lock` changed only in version fields.
+- Every workspace member is versioned together and internal dependency requirements match. Before
+  this, the versions were mixed (0.1.2, 0.1.3 and 0.2.0). Python (`pyproject.toml`) and Node
+  (`package.json`) packages are still at 0.2.0 and are not yet published. `Cargo.lock` changed only in
+  version fields.
 - `tpt-kinetix-ops` is publishable (`publish = true`). The CLI depends on it, so the CLI could not be
   published while it was private. It is in wave 4 of the publish order.
 - `remux` to WebM with no WebM-capable track now names the codecs in the input and the ones WebM
@@ -38,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/user-guide.md` said metadata and chapters were not carried across. Text tags and chapters carry to
   WebM, and cover art carries only from MP4 to MP4.
 - `PUBLISHING.md` tracked 0.1.2 and gave an outdated crates.io status.
+- Per-crate READMEs and changelogs: the 0.2.0 container features are documented in each crate README.
+
+### Dependencies
+
+- Cargo minor and patch updates (the `cargo-minor-patch` group), and `pyo3` 0.30.1 for the Python bindings.
+- GitHub Actions: `actions/upload-artifact` 7, `actions/download-artifact` 8, `actions/setup-python` 7,
+  `docker/login-action` 4 and `softprops/action-gh-release` 3.
 
 ## [0.2.0](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.2.0) - 2026-11-07
 
