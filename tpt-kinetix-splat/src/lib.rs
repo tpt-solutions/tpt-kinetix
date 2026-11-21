@@ -17,6 +17,7 @@ pub mod chunk;
 pub mod cloud;
 pub mod cloud4d;
 pub mod error;
+pub mod gltf;
 pub mod ply;
 pub mod sequence;
 pub mod splt;
@@ -27,6 +28,7 @@ pub use chunk::{chunk_cloud, temporal_chunks, TemporalChunk};
 pub use cloud::{sh_coeffs_for_degree, CoordinateFrame, GaussianCloud, MAX_SH_DEGREE};
 pub use cloud4d::GaussianCloud4D;
 pub use error::SplatError;
+pub use gltf::{to_rub, write_glb};
 pub use ply::{read_ply, write_ply};
 pub use sequence::{
     read_sequence, sequence_config, sequence_from_config, write_sequence, Sequence, SlabEntry,

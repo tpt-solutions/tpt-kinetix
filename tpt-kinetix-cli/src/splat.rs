@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use tpt_kinetix_ops::{mp4_to_spls, spls_to_mp4};
 use tpt_kinetix_splat::{
-    read_ply, read_sequence, read_splt, read_spz, write_ply, write_splt, write_spz,
+    read_ply, read_sequence, read_splt, read_spz, write_glb, write_ply, write_splt, write_spz,
     CoordinateFrame, GaussianCloud, Quantization,
 };
 
@@ -113,7 +113,8 @@ pub fn convert(input: &Path, output: &Path, quant: Quantization) -> Result<()> {
         Some("splt") => write_splt(&cloud, quant)?,
         Some("spz") => write_spz(&cloud)?,
         Some("ply") => write_ply(&cloud),
-        _ => bail!("output must end in .splt, .spz or .ply (or .mp4/.spls for sequences)"),
+        Some("glb") => write_glb(&cloud)?,
+        _ => bail!("output must end in .splt, .spz, .ply or .glb (or .mp4/.spls for sequences)"),
     };
     std::fs::write(output, &bytes).with_context(|| format!("writing {}", output.display()))?;
     println!(
