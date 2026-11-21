@@ -277,6 +277,11 @@ fn decompress_zstd(frame: &[u8], want: usize) -> Result<Vec<u8>, SplatError> {
 /// Decodes the raw streams into a [`GaussianCloud`] in the SPZ frame (RUB).
 fn decode(s: &Streams) -> Result<Native, SplatError> {
     let n = s.n;
+    // A 24-bit fixed-point value cannot carry more fraction bits than that, and
+    // a larger shift would overflow `1 << frac` below.
+    if s.frac_bits > 24 {
+        return Err(SplatError::Parse("SPZ fractional bits above 24"));
+    }
     let positions = s
         .positions
         .chunks_exact(POS_BYTES)
