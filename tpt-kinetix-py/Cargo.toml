@@ -24,6 +24,10 @@ doctest = false
 default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
+[build-dependencies]
+# Used by build.rs to emit the macOS dynamic_lookup link arg for the extension module.
+pyo3-build-config = "0.30"
+
 [dependencies]
 pyo3 = { version = "0.30", features = ["abi3-py39"] }
 tpt-kinetix-ops = { workspace = true }

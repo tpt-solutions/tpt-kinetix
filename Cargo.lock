@@ -3040,6 +3040,7 @@ name = "tpt-kinetix-py"
 version = "0.2.0"
 dependencies = [
  "pyo3",
+ "pyo3-build-config",
  "tpt-kinetix-ops",
 ]
 

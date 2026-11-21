@@ -24,6 +24,10 @@ ignore = [
 # ---------------------------------------------------------------------------
 [licenses]
 version = 2
+# Skip license checks for unpublished workspace crates (publish = false), e.g.
+# the patent-encumbered out-kinetix-h264 (LGPL-2.1-or-later). Its dependencies
+# are still checked; only the crate's own license field is ignored.
+private = { ignore = true }
 allow = [
   "MIT",
   "Apache-2.0",
