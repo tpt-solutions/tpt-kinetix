@@ -42,7 +42,7 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       data. Each channel now stores its own 256-entry frequency table (fitted to its byte histogram) ahead of its rANS stream.
       Results: lossless 31.8% of PLY; lossy 16/12 15.3%, 16/10 13.8%, **16/8 9.7%** (about SPZ's ~9%, so 16/8 is the
       operating point to compare against SPZ; SH dominates the cost at high attribute depths); 12/8 9.4%.
-      Still open: smallest-three quaternion coding for rotations, and context modelling across neighbouring points. The seed corpus
+      Smallest-three quaternion coding for lossy SPLT rotations is done (flag `FLAG_SMALLEST3`; lossless keeps four components; older files still read). Lossy 16/8 is now 9.4% of the reference PLY (was 9.7%); rotations are a small share of the bytes. Still open: context modelling across neighbouring points. The seed corpus
       for `fuzz_splat_splt` is committed (`fuzz/corpus/fuzz_splat_splt`); the deeper decode paths are still covered mainly by proptests.
 - [~] **M3 4D temporal chunking** — done: `GaussianCloud4D` model (`src/cloud4d.rs`: means xyzt, log scales, isoclinic quaternion
       pair, opacity, SH; temporal variance via `tpt-math-splat`), time-slab chunking (`src/chunk.rs`: a splat is in a slab when its

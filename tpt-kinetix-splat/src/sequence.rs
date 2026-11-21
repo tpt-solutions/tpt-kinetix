@@ -89,6 +89,7 @@ pub fn write_sequence(
     let layout = Layout {
         channels: c,
         position_channels: POSITION_CHANNELS,
+        index_channel: None,
     };
 
     let mut payloads = Vec::with_capacity(chunks.len());
@@ -248,6 +249,7 @@ impl<'a> Sequence<'a> {
         let layout = Layout {
             channels: c,
             position_channels: POSITION_CHANNELS,
+            index_channel: None,
         };
         let values = decode_block(&streams, n, layout, self.quant, &ranges)?;
 
