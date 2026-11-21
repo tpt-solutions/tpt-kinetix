@@ -60,8 +60,8 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       bytes. The PLY frame is recorded as a `comment tpt-kinetix frame rub` header line when the cloud is RUB, so the SPZ → PLY
       conversion no longer mislabels the frame. MP4: an SPLS sequence goes into an MP4 `spls` track with one sample per time
       slab (`tpt-kinetix-ops::splat_mp4`), via a new `CodecId::Spls` (core), a `splc` sample entry (mux), and a `meta` handler.
-      The MP4 round-trips to byte-identical SPLS, and ffprobe reads the track (7 samples, 17.5 s). Open: `probe`/`convert`
-      CLI commands for MP4 (not wired yet), and 4D input in the CLI.
+      The MP4 round-trips to byte-identical SPLS, and ffprobe reads the track (7 samples, 17.5 s). The CLI
+      `splat probe` and `splat convert` handle sequences (SPLS <-> MP4), verified end to end. Open: 4D input from PLY/SPZ (no 4D source format yet).
 - [ ] **M5 Verification renderer + extras** — CPU reference renderer (`condition_on_time` -> EWA -> sorted alpha blend), test-only oracle;
       render-PSNR tests (decode vs source); glTF `KHR_gaussian_splatting` (+ SPZ compression ext); time-slab segment packaging in `tpt-kinetix-package`.
 

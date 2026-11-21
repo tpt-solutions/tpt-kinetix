@@ -29,6 +29,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum SplatCommand {
     /// Convert a splat file. The output format follows its extension: .splt, .spz or .ply.
+    /// Sequences (SPLS or MP4 with an spls track) convert to .mp4 or .spls.
     #[command(after_help = "Examples:
   tpt-kinetix splat convert in.ply out.splt --lossy --position-bits 16 --attribute-bits 8
   tpt-kinetix splat convert in.spz out.ply")]
