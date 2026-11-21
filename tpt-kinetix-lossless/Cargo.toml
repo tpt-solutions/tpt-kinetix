@@ -15,8 +15,6 @@ documentation = "https://docs.rs/tpt-kinetix-lossless"
 [dependencies]
 tpt-kinetix-core = { workspace = true }
 tpt-kinetix-bitstream = { workspace = true }
-thiserror = { workspace = true }
-nom = { workspace = true }
 
 [lib]
 path = "src/lib.rs"

@@ -407,12 +407,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "bytes"
 version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2890,7 +2884,6 @@ name = "tpt-kinetix-demux"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "byteorder",
  "criterion",
  "nom 8.0.0",
  "proptest",
@@ -2932,7 +2925,6 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
- "thiserror",
  "tree-sitter",
  "tree-sitter-c",
  "ureq",
@@ -2954,8 +2946,6 @@ name = "tpt-kinetix-lossless"
 version = "0.2.1"
 dependencies = [
  "criterion",
- "nom 8.0.0",
- "thiserror",
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
 ]
@@ -3039,8 +3029,6 @@ name = "tpt-kinetix-realtime"
 version = "0.2.1"
 dependencies = [
  "criterion",
- "nom 8.0.0",
- "thiserror",
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",
 ]
