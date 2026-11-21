@@ -21,6 +21,10 @@ so the same code can run on a server, in a Cloudflare Worker, or in the browser.
 Encryption is CENC with the `cenc` or `cbcs` scheme, ClearKey only, for VP9, AV1 and Opus samples.
 The keys are passed in by the caller; the packager fetches none.
 
+The `splat` module packages a Gaussian splat sequence (SPLS, from `tpt-kinetix-splat`) as one
+standalone segment per time slab (`seg-{k}.spls`), plus a JSON playlist with each slab's time
+range, size and URI. Players do not read splat tracks, so this is for Kinetix-to-Kinetix delivery.
+
 `LivePackager` is the live counterpart: a sliding-window packager that turns pushed
 packets into live fMP4 HLS (low-latency parts, blocking reload, LL-HLS subtitle parts) and dynamic
 DASH, with the same CENC options. It is what `tpt-kinetix-stream`'s `LiveServer` is built on.

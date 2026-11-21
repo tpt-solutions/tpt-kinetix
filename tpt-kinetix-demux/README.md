@@ -6,7 +6,8 @@ trait.
 - **MP4 / ISO-BMFF** (`mp4`) — full box parser, track/codec identification,
   sample-table timing, packet extraction. Reads each track's language (`mdhd`) and
   its default/forced disposition, and WebVTT subtitle tracks (`wvtt`/`vttc`).
-  Codec configuration records are rebuilt for MP4 and WebM inputs that lack them.
+  Codec configuration records are rebuilt for MP4 and WebM inputs that lack them. MP4 `spls` tracks
+  (Gaussian splat sequences) keep their `splc` sample-entry configuration.
 - **Matroska / WebM** (`mkv`, `mkv_reader`, `mkv_stream`, `mkv_metadata`) — `MkvDemuxer` is a basic
   whole-buffer EBML reader (track enumeration, SimpleBlock/Block extraction, no advanced
   lacing). `MkvReader` is indexed and works over a `ReadAt` source, with the `Cues`

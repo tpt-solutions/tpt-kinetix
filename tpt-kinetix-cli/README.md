@@ -19,6 +19,8 @@ cargo run -p tpt-kinetix-cli -- <command> --help
 | `transcode -i <in> -o <out>` | VP9 MP4 to AV1 through the pipeline (VP9 is the only supported input). |
 | `stream` | Older RTMP ingest to MPEG-TS HLS server. |
 | `vision` | Decode a Vision (video-for-machines) bitstream; `--demo` runs a self-contained round trip. |
+| `splat probe <file>` | Print a Gaussian splat file's format, splat count, SH degree and frame; for sequences, the slab count and time range. |
+| `splat convert <in> <out>` | Convert PLY, SPZ or SPLT to each other, or to `.glb` (glTF, `KHR_gaussian_splatting`). `--lossy` quantises SPLT output. SPLS sequences convert to `.spls` or to MP4 with an `spls` track. |
 
 Cargo features: `codec-vp9` (default, VP9 decode for `transcode`), `whip` (WHIP/WebRTC ingest
 in `live`), `tls` (HTTPS / `wss://` / RTMPS in `live`).

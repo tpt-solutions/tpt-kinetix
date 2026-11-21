@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MP4 demux keeps the `splc` sample-entry configuration for `spls` tracks (Gaussian splat sequences).
+
+### Changed
+
+- Removed the unused `byteorder`, `thiserror` and `nom` dependencies.
+
+
 ## [0.2.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.0...v0.2.1) - 2026-11-20
 
 ### Other

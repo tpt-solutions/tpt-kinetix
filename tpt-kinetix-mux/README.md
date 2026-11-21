@@ -7,7 +7,7 @@ media processing engine. This is the write-side counterpart to `tpt-kinetix-demu
 
 - ✅ `Mp4Writer` — multi-track passthrough MP4 writer. Streams are described by
   `StreamInfo`, so any codec with a sample-entry writer is carried (AV1, VP9,
-  Opus, AAC, H.264/H.265, FLAC, AC-3, ...), including audio Kinetix cannot
+  Opus, AAC, H.264/H.265, FLAC, AC-3, ...), and Gaussian splat sequences as `spls` tracks, including audio Kinetix cannot
   decode. Memory is bounded to roughly one chunk per track; output is `moov`-at-end
   and must be seekable.
 - ✅ `faststart` — move `moov` to the front for progressive HTTP playback.

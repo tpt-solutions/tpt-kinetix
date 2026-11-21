@@ -15,5 +15,6 @@ depends on it. Use it directly if you want the same probe, remux and package log
 | `remux` | Stream-copy remux (`remux` and `sanitize`), with the container chosen from the output name |
 | `package` | HLS and DASH packaging of a file into a directory, with optional CENC (`package`, `encryption_from_hex`) |
 | `summary` | The compact track list the C ABI and the bindings return |
+| `splat_mp4` | Gaussian splat sequences (SPLS) to and from an MP4 `spls` track, one sample per time slab |
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md) and the workspace [CHANGELOG.md](../CHANGELOG.md).
