@@ -1,0 +1,42 @@
+[package]
+name = "tpt-kinetix-splat-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tpt-kinetix-splat = { path = ".." }
+
+[[bin]]
+name = "fuzz_splat_ply"
+path = "fuzz_targets/fuzz_splat_ply.rs"
+test = false
+doc = false
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_splat_spz"
+path = "fuzz_targets/fuzz_splat_spz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_splat_splt"
+path = "fuzz_targets/fuzz_splat_splt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_splat_spls"
+path = "fuzz_targets/fuzz_splat_spls.rs"
+test = false
+doc = false

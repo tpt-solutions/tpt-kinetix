@@ -15,6 +15,7 @@ members = [
   "tpt-kinetix-vision",
   "tpt-kinetix-face",
   "tpt-kinetix-volumetric",
+  "tpt-kinetix-splat",
   "tpt-kinetix-mux",
   "tpt-kinetix-package",
   "tpt-kinetix-pipeline",
@@ -26,7 +27,7 @@ members = [
   "tpt-kinetix-py",
   "tpt-kinetix-node",
 ]
-exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "out-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz", "tpt-kinetix-vision/fuzz"]
+exclude = ["tpt-kinetix-demux/fuzz", "tpt-kinetix-av1/fuzz", "tpt-kinetix-vp9/fuzz", "out-kinetix-h264/fuzz", "tpt-kinetix-stream/fuzz", "tpt-kinetix-lean/fuzz", "tpt-kinetix-lossless/fuzz", "tpt-kinetix-volumetric/fuzz", "tpt-kinetix-vision/fuzz", "tpt-kinetix-splat/fuzz"]
 
 [workspace.package]
 edition = "2021"
@@ -73,6 +74,7 @@ tpt-kinetix-screen = { path = "tpt-kinetix-screen", version = "0.2.1" }
 tpt-kinetix-vision = { path = "tpt-kinetix-vision", version = "0.2.1" }
 tpt-kinetix-face = { path = "tpt-kinetix-face", version = "0.2.1" }
 tpt-kinetix-volumetric = { path = "tpt-kinetix-volumetric", version = "0.2.1" }
+tpt-math-splat = "0.1.0"
 tpt-kinetix-lossless = { path = "tpt-kinetix-lossless", version = "0.2.1" }
 tpt-kinetix-mux = { path = "tpt-kinetix-mux", version = "0.2.1" }
 tpt-kinetix-package = { path = "tpt-kinetix-package", version = "0.2.1" }
