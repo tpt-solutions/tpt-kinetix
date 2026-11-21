@@ -18,7 +18,14 @@ use crate::splt::Quantization;
 pub(crate) struct Layout {
     pub channels: usize,
     pub position_channels: usize,
+    /// A lossy-only integer channel holding a value in `0..=3` (the index of a
+    /// quaternion's largest component). It is coded at 2 bits over the fixed
+    /// range `[0, 3]`, so the value survives exactly.
+    pub index_channel: Option<usize>,
 }
+
+/// The fixed domain of the integer index channel.
+const INDEX_RANGE: (f32, f32) = (0.0, 3.0);
 
 /// Bit depth of channel `ch`, or `None` for lossless.
 pub(crate) fn channel_bits(ch: usize, layout: Layout, quant: Quantization) -> Option<u8> {
@@ -27,7 +34,9 @@ pub(crate) fn channel_bits(ch: usize, layout: Layout, quant: Quantization) -> Op
         Quantization::Lossy {
             position_bits,
             attribute_bits,
-        } => Some(if ch < layout.position_channels {
+        } => Some(if layout.index_channel == Some(ch) {
+            2
+        } else if ch < layout.position_channels {
             position_bits
         } else {
             attribute_bits
@@ -53,7 +62,11 @@ pub(crate) fn encode_block(
     let c = layout.channels;
     let mut ranges = Vec::with_capacity(c);
     for ch in 0..c {
-        ranges.push(bounds_1d((0..n).map(|i| data[i * c + ch])));
+        if layout.index_channel == Some(ch) {
+            ranges.push(INDEX_RANGE);
+        } else {
+            ranges.push(bounds_1d((0..n).map(|i| data[i * c + ch])));
+        }
     }
     let mut streams = Vec::with_capacity(c);
     for ch in 0..c {
@@ -121,6 +134,11 @@ pub(crate) fn decode_block(
     ranges: &[(f32, f32)],
 ) -> Result<Vec<f32>, SplatError> {
     let c = layout.channels;
+    if let Some(ch) = layout.index_channel {
+        if ranges.get(ch) != Some(&INDEX_RANGE) {
+            return Err(SplatError::Parse("index channel range is not [0, 3]"));
+        }
+    }
     let mut models = Vec::with_capacity(c);
     let mut decoders = Vec::with_capacity(c);
     for stream in streams {

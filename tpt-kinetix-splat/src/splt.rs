@@ -40,6 +40,9 @@ const MAGIC: [u8; 4] = *b"SPLT";
 const VERSION: u8 = 1;
 const FLAG_LOSSY: u8 = 0b01;
 const FLAG_RUB: u8 = 0b10;
+/// Lossy files store each rotation as its three smallest components plus the
+/// index of the largest. Files without this flag store all four components.
+const FLAG_SMALLEST3: u8 = 0b100;
 /// Hilbert resolution per axis used for ordering. 16 bits gives 48-bit keys.
 const HILBERT_BITS: u32 = 16;
 /// Largest point count accepted, bounding decoder allocation.
@@ -171,15 +174,20 @@ pub fn write_splt(cloud: &GaussianCloud, quant: Quantization) -> Result<Vec<u8>,
     }
     data = sorted;
 
+    let lossy = matches!(quant, Quantization::Lossy { .. });
+    if lossy {
+        data = smallest_three_rows(&data, n, c, degree);
+    }
     let layout = Layout {
         channels: c,
         position_channels: POSITION_CHANNELS,
+        index_channel: lossy.then_some(c - 1),
     };
     let (ranges, streams) = encode_block(&data, n, layout, quant)?;
 
     let mut flags = 0u8;
-    if matches!(quant, Quantization::Lossy { .. }) {
-        flags |= FLAG_LOSSY;
+    if lossy {
+        flags |= FLAG_LOSSY | FLAG_SMALLEST3;
     }
     if cloud.frame() == CoordinateFrame::Rub {
         flags |= FLAG_RUB;
@@ -223,7 +231,10 @@ pub fn read_splt(bytes: &[u8]) -> Result<GaussianCloud, SplatError> {
         return Err(SplatError::Unsupported("SPLT version other than 1"));
     }
     let flags = bytes[5];
-    if flags & !(FLAG_LOSSY | FLAG_RUB) != 0 || bytes[7] != 0 || bytes[14..16] != [0, 0] {
+    if flags & !(FLAG_LOSSY | FLAG_RUB | FLAG_SMALLEST3) != 0
+        || bytes[7] != 0
+        || bytes[14..16] != [0, 0]
+    {
         return Err(SplatError::Parse("reserved SPLT header bits set"));
     }
     let degree = bytes[6];
@@ -253,9 +264,16 @@ pub fn read_splt(bytes: &[u8]) -> Result<GaussianCloud, SplatError> {
     if streams.len() != c {
         return Err(SplatError::Parse("SPLT stream count does not match degree"));
     }
+    let smallest3 = flags & FLAG_SMALLEST3 != 0;
+    if smallest3 && !lossy {
+        return Err(SplatError::Parse(
+            "smallest-three rotations require a lossy file",
+        ));
+    }
     let layout = Layout {
         channels: c,
         position_channels: POSITION_CHANNELS,
+        index_channel: smallest3.then_some(c - 1),
     };
     let values = decode_block(&streams, n, layout, quant, &ranges)?;
 
@@ -269,8 +287,13 @@ pub fn read_splt(bytes: &[u8]) -> Result<GaussianCloud, SplatError> {
         positions.push([r[0], r[1], r[2]]);
         opacities.push(r[3]);
         scales.push([r[4], r[5], r[6]]);
-        rotations.push([r[7], r[8], r[9], r[10]]);
-        sh.extend_from_slice(&r[11..]);
+        if smallest3 {
+            rotations.push(restore_quaternion(r, r[c - 1] as usize));
+            sh.extend_from_slice(&r[10..c - 1]);
+        } else {
+            rotations.push([r[7], r[8], r[9], r[10]]);
+            sh.extend_from_slice(&r[11..]);
+        }
     }
     let frame = if flags & FLAG_RUB != 0 {
         CoordinateFrame::Rub
@@ -278,6 +301,55 @@ pub fn read_splt(bytes: &[u8]) -> Result<GaussianCloud, SplatError> {
         CoordinateFrame::Rdf
     };
     Ok(GaussianCloud::new(positions, rotations, scales, opacities, degree, sh)?.with_frame(frame))
+}
+
+/// Rewrites lossy rows so each rotation is stored as its three smallest
+/// components (sign made consistent with the largest, which is positive), then
+/// the SH block, then the index of the largest component. Rows keep their width.
+/// Quaternions are normalised first. A zero quaternion becomes the identity.
+fn smallest_three_rows(data: &[f32], n: usize, c: usize, degree: u8) -> Vec<f32> {
+    let k3 = 3 * sh_coeffs_for_degree(degree);
+    let mut out = Vec::with_capacity(data.len());
+    for r in data.chunks_exact(c).take(n) {
+        let norm = r[7..11].iter().map(|v| v * v).sum::<f32>().sqrt();
+        let q = if norm > 0.0 && norm.is_finite() {
+            [r[7] / norm, r[8] / norm, r[9] / norm, r[10] / norm]
+        } else {
+            [1.0, 0.0, 0.0, 0.0]
+        };
+        let mut m = 0;
+        for j in 1..4 {
+            if q[j].abs() > q[m].abs() {
+                m = j;
+            }
+        }
+        let sign = if q[m] < 0.0 { -1.0 } else { 1.0 };
+        out.extend_from_slice(&r[0..7]);
+        for (j, &qj) in q.iter().enumerate() {
+            if j != m {
+                out.push(qj * sign);
+            }
+        }
+        out.extend_from_slice(&r[11..11 + k3]);
+        out.push(m as f32);
+    }
+    out
+}
+
+/// Inverse of [`smallest_three_rows`] for one row: the quaternion as `[w, x, y, z]`.
+fn restore_quaternion(r: &[f32], largest: usize) -> [f32; 4] {
+    let mut q = [0f32; 4];
+    let mut sum_sq = 0f32;
+    let mut k = 0;
+    for (j, slot) in q.iter_mut().enumerate() {
+        if j != largest {
+            *slot = r[7 + k];
+            sum_sq += *slot * *slot;
+            k += 1;
+        }
+    }
+    q[largest] = (1.0 - sum_sq).max(0.0).sqrt();
+    q
 }
 
 /// Bounding box of the positions in row-major `data`, ignoring non-finite

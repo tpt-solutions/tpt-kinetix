@@ -104,7 +104,6 @@ proptest! {
         let pos_tol = range(&mut cloud.positions().iter().flatten().copied(), pb);
         let opacity_tol = range(&mut cloud.opacities().iter().copied(), ab);
         let scale_tol = range(&mut cloud.scales().iter().flatten().copied(), ab);
-        let rot_tol = range(&mut cloud.rotations().iter().flatten().copied(), ab);
         let sh_tol = range(&mut cloud.sh().iter().copied(), ab);
         for i in 0..back.len() {
             let d = back.positions()[i];
@@ -119,11 +118,17 @@ proptest! {
                 prop_assert!((orig - dec).abs() <= pos_tol);
             }
             prop_assert!((cloud.opacities()[j] - back.opacities()[i]).abs() <= opacity_tol);
+            // Rotations are stored as smallest-three and come back normalised,
+            // so compare with the normalised original, up to sign.
+            let q = cloud.rotations()[j];
+            let norm = q.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let want: [f32; 4] = if norm > 0.0 { q.map(|x| x / norm) } else { [1.0, 0.0, 0.0, 0.0] };
+            let got = back.rotations()[i];
+            let direct = (0..4).map(|a| (want[a] - got[a]).abs()).fold(0.0, f32::max);
+            let flipped = (0..4).map(|a| (want[a] + got[a]).abs()).fold(0.0, f32::max);
+            prop_assert!(direct.min(flipped) < 0.02, "rotation {:?} vs {:?}", want, got);
             for a in 0..3 {
                 prop_assert!((cloud.scales()[j][a] - back.scales()[i][a]).abs() <= scale_tol);
-            }
-            for a in 0..4 {
-                prop_assert!((cloud.rotations()[j][a] - back.rotations()[i][a]).abs() <= rot_tol);
             }
             let k = &cloud.sh()[j * k3..(j + 1) * k3];
             for (a, b) in k.iter().zip(&back.sh()[i * k3..(i + 1) * k3]) {
