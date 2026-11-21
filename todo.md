@@ -64,6 +64,9 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       `splat probe` and `splat convert` handle sequences (SPLS <-> MP4), verified end to end. Open: 4D input from PLY/SPZ (no 4D source format yet).
 - [ ] **M5 Verification renderer + extras** — CPU reference renderer (`condition_on_time` -> EWA -> sorted alpha blend), test-only oracle;
       render-PSNR tests (decode vs source); glTF `KHR_gaussian_splatting` (+ SPZ compression ext); time-slab segment packaging in `tpt-kinetix-package`.
+      Progress: render check done (`tests/render_4d.rs`). Time-slab packaging done: `tpt-kinetix-package::splat` writes one standalone
+      `SPLS` segment per slab (`seg-{k}.spls`), and a JSON playlist with time ranges, sizes and URIs (`splat_playlist`, `splat_segment`).
+      Players don't read splat tracks, so this is Kinetix-to-Kinetix delivery. glTF extension still open.
 
 Verification for every milestone: `just check`, `just deny`, fuzz >= 60s on any new parser, golden vectors committed.
 Notes: write from papers/specs (original 3DGS code is non-commercial licensed, don't copy it); no ffmpeg oracle exists for splats.

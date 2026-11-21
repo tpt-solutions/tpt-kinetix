@@ -22,6 +22,7 @@ mod dash;
 mod hls;
 pub mod live;
 mod plan;
+pub mod splat;
 mod subtitles;
 #[cfg(feature = "wasm")]
 pub mod wasm;

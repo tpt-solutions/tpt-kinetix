@@ -3013,6 +3013,7 @@ dependencies = [
  "tpt-kinetix-core",
  "tpt-kinetix-demux",
  "tpt-kinetix-mux",
+ "tpt-kinetix-splat",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
