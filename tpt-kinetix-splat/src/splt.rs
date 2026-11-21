@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! 0   magic      b"SPLT"
-//! 4   version    u8 = 1
+//! 4   version    u8 = 2 (1 is the same layout without residual contexts)
 //! 5   flags      u8: bit 0 lossy, bit 1 frame is RUB (0 = RDF)
 //! 6   sh_degree  u8 (0..=3)
 //! 7   reserved   u8 = 0
@@ -37,7 +37,11 @@ use crate::error::SplatError;
 use tpt_kinetix_bitstream::rans::RansStreamSet;
 
 const MAGIC: [u8; 4] = *b"SPLT";
-const VERSION: u8 = 1;
+/// Current layout: each channel's residuals are split into contexts (see
+/// `block.rs`) so each gets its own frequency table.
+const VERSION: u8 = 2;
+/// Earlier layout: one frequency table per channel. Still read, never written.
+const VERSION_PLAIN: u8 = 1;
 const FLAG_LOSSY: u8 = 0b01;
 const FLAG_RUB: u8 = 0b10;
 /// Lossy files store each rotation as its three smallest components plus the
@@ -183,7 +187,7 @@ pub fn write_splt(cloud: &GaussianCloud, quant: Quantization) -> Result<Vec<u8>,
         position_channels: POSITION_CHANNELS,
         index_channel: lossy.then_some(c - 1),
     };
-    let (ranges, streams) = encode_block(&data, n, layout, quant)?;
+    let (ranges, streams) = encode_block(&data, n, layout, quant, true)?;
 
     let mut flags = 0u8;
     if lossy {
@@ -227,9 +231,11 @@ pub fn read_splt(bytes: &[u8]) -> Result<GaussianCloud, SplatError> {
     if bytes.len() < HEADER_LEN || bytes[..4] != MAGIC {
         return Err(SplatError::Parse("not an SPLT file"));
     }
-    if bytes[4] != VERSION {
-        return Err(SplatError::Unsupported("SPLT version other than 1"));
-    }
+    let contexts = match bytes[4] {
+        VERSION => true,
+        VERSION_PLAIN => false,
+        _ => return Err(SplatError::Unsupported("SPLT version other than 1 or 2")),
+    };
     let flags = bytes[5];
     if flags & !(FLAG_LOSSY | FLAG_RUB | FLAG_SMALLEST3) != 0
         || bytes[7] != 0
@@ -275,7 +281,7 @@ pub fn read_splt(bytes: &[u8]) -> Result<GaussianCloud, SplatError> {
         position_channels: POSITION_CHANNELS,
         index_channel: smallest3.then_some(c - 1),
     };
-    let values = decode_block(&streams, n, layout, quant, &ranges)?;
+    let values = decode_block(&streams, n, layout, quant, &ranges, contexts)?;
 
     let k3 = 3 * sh_coeffs_for_degree(degree);
     let mut positions = Vec::with_capacity(n);

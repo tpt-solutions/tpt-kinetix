@@ -101,7 +101,8 @@ pub fn write_sequence(
             return Err(SplatError::Invalid("too many splats in one slab"));
         }
         let data = rows(&sub);
-        let (ranges, streams) = encode_block(&data, n, layout, quant)?;
+        // SPLS keeps the plain per-channel coding; only SPLT uses residual contexts.
+        let (ranges, streams) = encode_block(&data, n, layout, quant, false)?;
         let mut payload = Vec::new();
         payload.extend_from_slice(&(n as u32).to_le_bytes());
         if matches!(quant, Quantization::Lossy { .. }) {
@@ -251,7 +252,7 @@ impl<'a> Sequence<'a> {
             position_channels: POSITION_CHANNELS,
             index_channel: None,
         };
-        let values = decode_block(&streams, n, layout, self.quant, &ranges)?;
+        let values = decode_block(&streams, n, layout, self.quant, &ranges, false)?;
 
         let k3 = 3 * sh_coeffs_for_degree(self.degree);
         let mut means = Vec::with_capacity(n);

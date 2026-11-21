@@ -58,6 +58,7 @@ pub(crate) fn encode_block(
     n: usize,
     layout: Layout,
     quant: Quantization,
+    contexts: bool,
 ) -> Result<EncodedBlock, SplatError> {
     let c = layout.channels;
     let mut ranges = Vec::with_capacity(c);
@@ -68,9 +69,9 @@ pub(crate) fn encode_block(
             ranges.push(bounds_1d((0..n).map(|i| data[i * c + ch])));
         }
     }
-    let mut streams = Vec::with_capacity(c);
+    // Residuals of every value, row-major, so each can use its neighbours as context.
+    let mut residuals = vec![0u64; n * c];
     for ch in 0..c {
-        let mut bytes = Vec::new();
         let mut prev: i64 = 0;
         for i in 0..n {
             let v = data[i * c + ch];
@@ -81,25 +82,87 @@ pub(crate) fn encode_block(
                     i64::from(quantize(v, lo, hi, u32::from(bits)))
                 }
             };
-            push_varint(&mut bytes, zigzag(cur - prev));
+            residuals[i * c + ch] = zigzag(cur - prev);
             prev = cur;
         }
-        // Fit a frequency table to this channel's own byte histogram, store it,
-        // then code the bytes against it. A generic model mismatches these
-        // residuals and expands them.
-        let mut counts = [0u64; 256];
-        for &b in &bytes {
-            counts[usize::from(b)] += 1;
+    }
+    let mut streams = Vec::with_capacity(c);
+    for ch in 0..c {
+        // Each residual's varint goes into the substream its context selects.
+        let mut subs = vec![Vec::new(); context_count(contexts)];
+        for i in 0..n {
+            let idx = i * c + ch;
+            let same = if i == 0 { 0 } else { residuals[idx - c] };
+            let before = if idx == 0 { 0 } else { residuals[idx - 1] };
+            push_varint(
+                &mut subs[context_of(contexts, same, before)],
+                residuals[idx],
+            );
         }
-        let freqs = normalize(&counts);
-        let mut stream = Vec::with_capacity(256 + bytes.len() / 2);
-        for f in &freqs {
-            push_varint(&mut stream, u64::from(*f));
+        let mut stream = Vec::new();
+        for bytes in &subs {
+            if contexts {
+                // An unused context costs one zero byte and no table.
+                if bytes.is_empty() {
+                    push_varint(&mut stream, 0);
+                    continue;
+                }
+                let sub = encode_substream(bytes, contexts);
+                push_varint(&mut stream, sub.len() as u64);
+                stream.extend_from_slice(&sub);
+            } else {
+                stream.extend_from_slice(&encode_substream(bytes, contexts));
+            }
         }
-        stream.extend_from_slice(&rans_encode(&bytes, &TableModel::new(&freqs)));
         streams.push(stream);
     }
     Ok((ranges, streams))
+}
+
+/// Number of residual substreams per channel.
+fn context_count(contexts: bool) -> usize {
+    if contexts {
+        CONTEXTS
+    } else {
+        1
+    }
+}
+
+/// Substream for a residual, from two neighbours' zigzag values: `same`, the
+/// same channel's previous residual, and `before`, the residual just before it
+/// in row-major order. `same` picks one of four magnitude buckets and `before`
+/// splits on whether it reaches 8 bits. Without contexts every residual is in
+/// substream 0.
+fn context_of(contexts: bool, same: u64, before: u64) -> usize {
+    if !contexts {
+        return 0;
+    }
+    let a = (bit_len(same) / 4).min(3);
+    let b = usize::from(bit_len(before) >= 8);
+    ((a * 2 + b) * 2 + usize::from(same & 1 == 1)) * 2 + usize::from(before & 1 == 1)
+}
+
+/// Number of significant bits in `v` (0 for 0).
+fn bit_len(v: u64) -> usize {
+    64 - v.leading_zeros() as usize
+}
+
+/// Residual contexts per channel when context coding is on.
+pub(crate) const CONTEXTS: usize = 32;
+
+/// Fits a frequency table to one substream's byte histogram and codes the
+/// bytes against it, returning the table followed by the rANS bytes. A
+/// generic model mismatches these residuals and expands them.
+fn encode_substream(bytes: &[u8], sparse: bool) -> Vec<u8> {
+    let mut counts = [0u64; 256];
+    for &b in bytes {
+        counts[usize::from(b)] += 1;
+    }
+    let freqs = normalize(&counts);
+    let mut out = Vec::with_capacity(256 + bytes.len() / 2);
+    write_table(&mut out, &freqs, sparse);
+    out.extend_from_slice(&rans_encode(bytes, &TableModel::new(&freqs)));
+    out
 }
 
 /// Writes ranges as `lo, hi` pairs of little-endian `f32`.
@@ -132,6 +195,7 @@ pub(crate) fn decode_block(
     layout: Layout,
     quant: Quantization,
     ranges: &[(f32, f32)],
+    contexts: bool,
 ) -> Result<Vec<f32>, SplatError> {
     let c = layout.channels;
     if let Some(ch) = layout.index_channel {
@@ -139,28 +203,44 @@ pub(crate) fn decode_block(
             return Err(SplatError::Parse("index channel range is not [0, 3]"));
         }
     }
-    let mut models = Vec::with_capacity(c);
-    let mut decoders = Vec::with_capacity(c);
-    for stream in streams {
-        let (freqs, used) = read_table(stream)?;
-        models.push(TableModel::new(&freqs));
-        decoders.push(
-            RansDecoder::new(&stream[used..])
-                .map_err(|_| SplatError::Parse("corrupt rANS stream"))?,
-        );
+    // Per channel, one decoder per substream. `None` marks an unused context.
+    let mut channels: Vec<Vec<Option<(TableModel, RansDecoder<'_>)>>> = Vec::with_capacity(c);
+    for &stream in streams {
+        let mut subs = Vec::with_capacity(context_count(contexts));
+        for sub in split_substreams(stream, contexts)? {
+            subs.push(match sub {
+                None => None,
+                Some(bytes) => {
+                    let (freqs, used) = read_table(bytes, contexts)?;
+                    let dec = RansDecoder::new(&bytes[used..])
+                        .map_err(|_| SplatError::Parse("corrupt rANS stream"))?;
+                    Some((TableModel::new(&freqs), dec))
+                }
+            });
+        }
+        channels.push(subs);
     }
     let max: Vec<u64> = (0..c)
         .map(|ch| channel_bits(ch, layout, quant).map_or(u64::from(u32::MAX), |b| (1u64 << b) - 1))
         .collect();
 
     // Decode row by row, one varint per channel, so the streams advance in
-    // step. No allocation depends on counts read from the stream beyond the
-    // output itself.
+    // step. The context of each varint depends only on the previous residual
+    // of that channel, which the decoder has already read. No allocation
+    // depends on counts read from the stream beyond the output itself.
     let mut prev = vec![0i64; c];
+    let mut prev_zz = vec![0u64; c];
+    let mut last_zz = 0u64;
     let mut rows = Vec::with_capacity(n * c);
     for _ in 0..n {
         for ch in 0..c {
-            let raw = read_varint_stream(&mut decoders[ch], &models[ch])?;
+            let k = context_of(contexts, prev_zz[ch], last_zz);
+            let (model, dec) = channels[ch][k]
+                .as_mut()
+                .ok_or(SplatError::Parse("residual context has no stream"))?;
+            let raw = read_varint_stream(dec, model)?;
+            prev_zz[ch] = raw;
+            last_zz = raw;
             let cur = prev[ch]
                 .checked_add(unzigzag(raw))
                 .ok_or(SplatError::Parse("residual overflow"))?;
@@ -276,16 +356,42 @@ fn normalize(counts: &[u64; 256]) -> [u32; 256] {
 }
 
 /// Reads a channel's 256-entry frequency table, returning it and its length.
-fn read_table(stream: &[u8]) -> Result<([u32; 256], usize), SplatError> {
+fn read_table(stream: &[u8], sparse: bool) -> Result<([u32; 256], usize), SplatError> {
     let mut f = [0u32; 256];
     let mut at = 0usize;
-    for slot in f.iter_mut() {
-        let (v, used) = read_varint_bytes(&stream[at..])?;
-        if v > u64::from(TABLE_TOTAL) {
-            return Err(SplatError::Parse("frequency table entry too large"));
-        }
-        *slot = v as u32;
+    if sparse {
+        // Count of used symbols, then (gap, frequency) per used symbol. The gap
+        // is counted from one past the previous symbol, so symbols strictly increase.
+        let (k, used) = read_varint_bytes(stream)?;
         at += used;
+        if k > 256 {
+            return Err(SplatError::Parse("frequency table lists too many symbols"));
+        }
+        let mut next_min = 0u64;
+        for _ in 0..k {
+            let (gap, used) = read_varint_bytes(&stream[at..])?;
+            at += used;
+            let (freq, used) = read_varint_bytes(&stream[at..])?;
+            at += used;
+            let sym = next_min
+                .checked_add(gap)
+                .filter(|&s| s < 256)
+                .ok_or(SplatError::Parse("frequency table symbol out of range"))?;
+            if freq == 0 || freq > u64::from(TABLE_TOTAL) {
+                return Err(SplatError::Parse("frequency table entry out of range"));
+            }
+            f[sym as usize] = freq as u32;
+            next_min = sym + 1;
+        }
+    } else {
+        for slot in f.iter_mut() {
+            let (v, used) = read_varint_bytes(&stream[at..])?;
+            if v > u64::from(TABLE_TOTAL) {
+                return Err(SplatError::Parse("frequency table entry too large"));
+            }
+            *slot = v as u32;
+            at += used;
+        }
     }
     if f.iter().map(|&x| u64::from(x)).sum::<u64>() != u64::from(TABLE_TOTAL) {
         return Err(SplatError::Parse(
@@ -293,6 +399,25 @@ fn read_table(stream: &[u8]) -> Result<([u32; 256], usize), SplatError> {
         ));
     }
     Ok((f, at))
+}
+
+/// Writes a frequency table: all 256 entries (`sparse` false), or only the
+/// used symbols as `(gap, frequency)` pairs (`sparse` true). See [`read_table`].
+fn write_table(out: &mut Vec<u8>, freqs: &[u32; 256], sparse: bool) {
+    if sparse {
+        let used: Vec<usize> = (0..256).filter(|&s| freqs[s] > 0).collect();
+        push_varint(out, used.len() as u64);
+        let mut next_min = 0usize;
+        for s in used {
+            push_varint(out, (s - next_min) as u64);
+            push_varint(out, u64::from(freqs[s]));
+            next_min = s + 1;
+        }
+    } else {
+        for f in freqs {
+            push_varint(out, u64::from(*f));
+        }
+    }
 }
 
 /// Reads one LEB128 value from raw bytes, returning `(value, bytes used)`.
@@ -309,6 +434,38 @@ fn read_varint_bytes(data: &[u8]) -> Result<(u64, usize), SplatError> {
         }
     }
     Err(SplatError::Parse("table ends mid-value"))
+}
+
+/// Splits one channel's stream into its substreams. Without contexts the whole
+/// stream is one substream. With contexts each substream is a varint length
+/// (0 for an unused context) followed by its bytes.
+fn split_substreams(stream: &[u8], contexts: bool) -> Result<Vec<Option<&[u8]>>, SplatError> {
+    if !contexts {
+        return Ok(vec![Some(stream)]);
+    }
+    let mut out = Vec::with_capacity(CONTEXTS);
+    let mut at = 0usize;
+    for _ in 0..CONTEXTS {
+        let (len, used) = read_varint_bytes(stream.get(at..).unwrap_or(&[]))?;
+        at += used;
+        if len == 0 {
+            out.push(None);
+            continue;
+        }
+        let len = usize::try_from(len).map_err(|_| SplatError::Parse("substream too long"))?;
+        let end = at
+            .checked_add(len)
+            .filter(|&end| end <= stream.len())
+            .ok_or(SplatError::Parse("substream runs past its channel"))?;
+        out.push(Some(&stream[at..end]));
+        at = end;
+    }
+    if at != stream.len() {
+        return Err(SplatError::Parse(
+            "trailing bytes after a channel's substreams",
+        ));
+    }
+    Ok(out)
 }
 
 /// A static model built from one channel's frequency table.
@@ -347,5 +504,103 @@ impl SymbolModel for TableModel {
     fn find(&self, cum_freq: u32) -> (u8, SymbolInfo) {
         let symbol = self.inv[cum_freq as usize];
         (symbol, self.info(symbol))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lossless round trip through both coding modes. Channel 0 jumps by large
+    /// amounts so residuals reach every context; channel 1 is constant, so its
+    /// residuals stay in context 0 and the other contexts are unused.
+    #[test]
+    fn round_trips_in_both_modes_and_every_context() {
+        let c = 4;
+        let n = 3000;
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let mut data = Vec::with_capacity(n * c);
+        let mut walk = 0f32;
+        for _ in 0..n {
+            let r = next();
+            let jump = match r % 4 {
+                0 => 0.001,
+                1 => 3.0,
+                2 => 4000.0,
+                _ => 1.0e7,
+            };
+            walk += jump * if r & 8 == 0 { 1.0 } else { -1.0 };
+            data.push(walk);
+            data.push(1.5);
+            data.push((next() % 1000) as f32 * 0.25);
+            data.push(-0.0);
+        }
+        let layout = Layout {
+            channels: c,
+            position_channels: 3,
+            index_channel: None,
+        };
+        for contexts in [false, true] {
+            let (ranges, streams) =
+                encode_block(&data, n, layout, Quantization::Lossless, contexts).unwrap();
+            let views: Vec<&[u8]> = streams.iter().map(Vec::as_slice).collect();
+            let back =
+                decode_block(&views, n, layout, Quantization::Lossless, &ranges, contexts).unwrap();
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&back), bits(&data), "contexts = {contexts}");
+        }
+    }
+
+    #[test]
+    fn substream_split_rejects_overrun_and_trailing_bytes() {
+        // Context 0 claims 9 bytes but only 2 follow.
+        let mut bad = vec![9u8, 1, 2];
+        bad.extend_from_slice(&[0, 0, 0]);
+        assert!(split_substreams(&bad, true).is_err());
+        // All contexts empty plus a stray byte.
+        let mut stray = vec![0u8; CONTEXTS];
+        stray.push(7);
+        assert!(split_substreams(&stray, true).is_err());
+        // All contexts empty exactly.
+        let empty = vec![0u8; CONTEXTS];
+        let ok = split_substreams(&empty, true).unwrap();
+        assert!(ok.iter().all(Option::is_none));
+    }
+
+    /// Sparse tables round-trip, and sparse and dense parse to the same table.
+    #[test]
+    fn sparse_table_round_trips() {
+        let mut counts = [0u64; 256];
+        for (s, c) in [(0usize, 5u64), (7, 300), (255, 1), (128, 42)] {
+            counts[s] = c;
+        }
+        let freqs = normalize(&counts);
+        let mut sparse = Vec::new();
+        write_table(&mut sparse, &freqs, true);
+        let (back, used) = read_table(&sparse, true).unwrap();
+        assert_eq!(back, freqs);
+        assert_eq!(used, sparse.len());
+        let mut dense = Vec::new();
+        write_table(&mut dense, &freqs, false);
+        assert_eq!(read_table(&dense, false).unwrap().0, freqs);
+    }
+
+    #[test]
+    fn sparse_table_rejects_malformed_input() {
+        // Too many symbols.
+        assert!(read_table(&[0x81, 0x01], true).is_err());
+        // Symbol past 255: gap 255 from zero is fine, then gap 1 pushes it to 256.
+        let mut overflow = vec![2u8, 255, 1, 1, 1];
+        assert!(read_table(&overflow, true).is_err());
+        // A zero frequency is not a used symbol.
+        overflow = vec![1u8, 0, 0];
+        assert!(read_table(&overflow, true).is_err());
+        // Frequencies that do not sum to the total.
+        let bad_sum = vec![1u8, 3, 5];
+        assert!(read_table(&bad_sum, true).is_err());
     }
 }

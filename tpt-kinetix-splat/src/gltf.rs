@@ -236,7 +236,10 @@ pub fn write_glb(cloud: &GaussianCloud) -> Result<Vec<u8>, SplatError> {
     let views_json: Vec<String> = views
         .iter()
         .map(|(offset, len)| {
-            format!("{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{len}}}")
+            // 34962 = ARRAY_BUFFER: every view here holds vertex attribute data.
+            format!(
+                "{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{len},\"target\":34962}}"
+            )
         })
         .collect();
 

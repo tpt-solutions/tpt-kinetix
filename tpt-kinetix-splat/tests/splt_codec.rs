@@ -94,7 +94,7 @@ fn rejects_bad_magic_version_and_reserved_bits() {
     bad_magic[0] = b'X';
     assert!(matches!(read_splt(&bad_magic), Err(SplatError::Parse(_))));
     let mut bad_version = good.clone();
-    bad_version[4] = 2;
+    bad_version[4] = 3;
     assert!(matches!(
         read_splt(&bad_version),
         Err(SplatError::Unsupported(_))
