@@ -159,3 +159,29 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    /// Splitting a sequence into its config record and slab payloads, then
+    /// rebuilding it, must give back the same bytes. This is the path the MP4
+    /// container uses.
+    #[test]
+    fn sequence_parts_rebuild_byte_identical(
+        cloud in cloud_strategy(16),
+        lossy in any::<bool>(),
+        slab in 1.0f32..8.0,
+    ) {
+        let quant = if lossy {
+            Quantization::Lossy { position_bits: 16, attribute_bits: 8 }
+        } else {
+            Quantization::Lossless
+        };
+        let bytes = write_sequence(&cloud, slab, 0.01, quant).unwrap();
+        let seq = read_sequence(&bytes).unwrap();
+        let config = tpt_kinetix_splat::sequence_config(&seq).unwrap();
+        let payloads: Vec<&[u8]> = (0..seq.entries().len())
+            .map(|k| seq.slab_payload(k).unwrap())
+            .collect();
+        let rebuilt = tpt_kinetix_splat::sequence_from_config(&config, &payloads).unwrap();
+        prop_assert_eq!(rebuilt, bytes);
+    }
+}

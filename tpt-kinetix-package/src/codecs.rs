@@ -21,7 +21,8 @@ pub fn codec_string(info: &StreamInfo) -> Option<String> {
         CodecId::Ac3 => "ac-3".into(),
         CodecId::Eac3 => "ec-3".into(),
         CodecId::WebVtt => "wvtt".into(),
-        CodecId::Unknown(_) => return None,
+        // Splat sequences have no RFC 6381 string, so they are not signalled.
+        CodecId::Spls | CodecId::Unknown(_) => return None,
     })
 }
 

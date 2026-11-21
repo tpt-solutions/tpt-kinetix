@@ -28,7 +28,10 @@ pub use cloud::{sh_coeffs_for_degree, CoordinateFrame, GaussianCloud, MAX_SH_DEG
 pub use cloud4d::GaussianCloud4D;
 pub use error::SplatError;
 pub use ply::{read_ply, write_ply};
-pub use sequence::{read_sequence, write_sequence, Sequence, SlabEntry};
+pub use sequence::{
+    read_sequence, sequence_config, sequence_from_config, write_sequence, Sequence, SlabEntry,
+    CONFIG_LEN,
+};
 pub use splt::{read_splt, write_splt, Quantization};
 pub use spz::read_spz;
 pub use spz_write::write_spz;

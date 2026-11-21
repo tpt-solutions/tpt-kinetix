@@ -50,6 +50,10 @@ pub enum CodecId {
     /// WebVTT subtitles in ISO-BMFF (`wvtt`, ISO/IEC 14496-30). Samples are
     /// WebVTT cue boxes; the codec configuration (`vttC`) is the WebVTT header.
     WebVtt,
+    /// Gaussian splat sequence (`spls`, Kinetix-defined, not a standard codec).
+    /// Each sample is one time slab of an `SPLS` file; the configuration
+    /// (`splc`) is the `SPLS` header.
+    Spls,
     /// An unrecognised codec; carries the raw sample-entry fourcc.
     Unknown([u8; 4]),
 }
@@ -81,6 +85,7 @@ impl CodecId {
             b"ac-3" => CodecId::Ac3,
             b"ec-3" => CodecId::Eac3,
             b"wvtt" => CodecId::WebVtt,
+            b"spls" => CodecId::Spls,
             _ => CodecId::Unknown(fourcc),
         }
     }
@@ -98,7 +103,7 @@ impl CodecId {
             | CodecId::Ac3
             | CodecId::Eac3 => MediaType::Audio,
             CodecId::WebVtt => MediaType::Subtitle,
-            CodecId::Unknown(_) => MediaType::Other,
+            CodecId::Spls | CodecId::Unknown(_) => MediaType::Other,
         }
     }
 
@@ -116,6 +121,7 @@ impl CodecId {
             CodecId::Ac3 => "ac3",
             CodecId::Eac3 => "eac3",
             CodecId::WebVtt => "webvtt",
+            CodecId::Spls => "spls",
             CodecId::Unknown(_) => "unknown",
         }
     }

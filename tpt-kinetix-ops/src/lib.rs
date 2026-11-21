@@ -12,7 +12,9 @@
 pub mod package;
 pub mod probe_json;
 pub mod remux;
+pub mod splat_mp4;
 pub mod summary;
 
 pub use package::{encryption_from_hex, package, PackageSummary};
 pub use remux::{faststart_file, remux, sanitize, Limits};
+pub use splat_mp4::{mp4_to_spls, spls_to_mp4};
