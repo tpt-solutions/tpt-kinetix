@@ -13,9 +13,15 @@ publish = false
 # Built as a Python extension by maturin (see pyproject.toml).
 name = "_tpt_kinetix"
 crate-type = ["cdylib", "rlib"]
+# No Rust tests here (the Python tests run against the installed wheel). A test
+# harness would link libpython, which fails on runners without a Python framework.
+test = false
+doctest = false
 
 [features]
-# maturin turns this on; a plain `cargo check` builds without linking to libpython.
+# On by default so plain `cargo build --workspace` links the cdylib without libpython
+# (macOS fails to link it otherwise). maturin enables it too, so this changes nothing there.
+default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
