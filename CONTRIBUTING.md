@@ -1,8 +1,10 @@
 # Contributing to TPT Kinetix
 
-Thank you for your interest in contributing! This document explains how to get
-the project building, how to run the various test layers, and what the PR
-checklist looks like before a merge.
+Thank you for your interest in TPT Kinetix! Contributions are accepted **through
+issues only**: please report bugs, request features, and propose changes by
+opening an issue rather than a pull request. This document explains how to get
+the project building, how to run the various test layers, and what to include
+in an issue.
 
 ---
 
@@ -57,8 +59,8 @@ codec from a written spec rather than porting an existing C decoder.
 
 #### Patents
 
-The roadmap targets **royalty-free formats only** (VP9, Opus, MP3, MPEG-TS). Any PR that
-adds or changes a codec crate must update the encumbrance table in
+The roadmap targets **royalty-free formats only** (VP9, Opus, MP3, MPEG-TS). Any change
+that adds or modifies a codec crate must update the encumbrance table in
 [`PATENTS.md`](PATENTS.md), and — if the codec is patent-encumbered — keep it out of the published crates (name it `out-*`, set
 `publish = false`, and don't make `tpt-kinetix-pipeline` / `tpt-kinetix-cli` depend on it, as with
 `out-kinetix-h264`). See `PATENTS.md` for the project's full
@@ -242,16 +244,13 @@ without panicking.
 
 ---
 
-## Pull request checklist
+## Reporting issues
 
-Before opening a PR, verify the following locally:
+Open an issue for bugs, feature requests, and design proposals. Pull requests
+are not accepted. A useful bug report includes:
 
-- [ ] `cargo build --workspace` succeeds with no warnings
-- [ ] `cargo test --workspace` passes
-- [ ] `cargo clippy --workspace -- -D warnings` is clean
-- [ ] `cargo fmt --check` reports no formatting issues
-- [ ] New public API is documented with `///` doc comments
-- [ ] New parsing code has a corresponding proptest `*_never_panics` test
-- [ ] If a fuzz crash was found, the reproducer is added to the corpus
-- [ ] `cargo deny check` passes (no new unlicensed or advisory-flagged deps)
-- [ ] Coverage does not regress significantly (`cargo llvm-cov --workspace`)
+- The crate and version (or commit) you were using
+- The exact command or code that triggers the problem
+- The input file or stream, if it is small enough to attach (or a description of it)
+- Expected versus actual output, and the output of `cargo test -p <crate>` if relevant
+- For decoder mismatches, how the reference output was produced (for example, the ffmpeg command)
