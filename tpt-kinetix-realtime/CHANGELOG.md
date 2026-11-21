@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Removed the unused `byteorder`, `thiserror` and `nom` dependencies.
+
+### Fixed
+
+- README: the `block_size_log2` table cell now escapes its pipe character so the table renders.
+
+
 ## [0.2.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.0...v0.2.1) - 2026-11-20
 
 ### Other

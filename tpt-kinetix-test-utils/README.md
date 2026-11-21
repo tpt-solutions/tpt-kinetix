@@ -72,7 +72,7 @@ Add it as a dev-dependency:
 
 ```toml
 [dev-dependencies]
-tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.2.0" }
+tpt-kinetix-test-utils = { path = "../tpt-kinetix-test-utils", version = "0.2.1" }
 ```
 
 Optional features:

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `extension-module` is a default feature, so `cargo build --workspace` links without libpython (fixes macOS linking). maturin still enables it, so the wheel build is unchanged.
+- The crate's Rust test and doctest targets are disabled. Its Python tests run against the installed wheel.
+
 - Version set to 0.2.0 (`pyproject.toml`) with the rest of the workspace (2026-11-08).
 - Release workflow `.github/workflows/pypi.yml`: manual dispatch, wheels for Linux, macOS and Windows plus an sdist, publish through PyPI trusted publishing in the `pypi` environment.
 - The PyPI name `tpt-kinetix` is approved. Not published yet: the first publish needs a trusted publisher configured on PyPI.

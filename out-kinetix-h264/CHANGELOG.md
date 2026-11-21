@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Licence is `LGPL-2.1-or-later`, not the workspace MIT/Apache-2.0, because the crate contains FFmpeg-derived code. See `PATENTS.md`.
+- The `dbg_*` tests skip with a message when the local-only oracle excerpt is absent.
+- The FFmpeg oracle excerpts under `oracle/` are no longer tracked in git.
+- Internal refactor: index-based loops in a test are now iterators.
+
 - Version set to 0.2.0 with the rest of the workspace (2026-11-08). No code change in this crate.
 
 ## [0.1.2](https://github.com/tpt-solutions/tpt-kinetix/releases/tag/v0.1.2) - 2026-11-04
