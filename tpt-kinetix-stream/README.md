@@ -46,7 +46,7 @@ Publish with `ffmpeg ... -f webm -method POST http://host:8080/ingest/<key>`, an
 Enhanced RTMP encoder (such as a recent OBS) to `rtmp://host:1935/live/<key>?token=s3cret`,
 or open `http://host:8080/publish` in Chrome. Play `/<key>/master.m3u8` (HLS)
 or `/<key>/manifest.mpd` (DASH). Known hls.js behaviour with audio in
-low-latency mode is written up in [todo-io.md](../todo-io.md).
+low-latency mode is written up in [todo-io.md](../history/todo-io.md).
 
 ## Status & limitations
 

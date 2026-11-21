@@ -18,7 +18,7 @@ loop filtering, frame-context adaptation, and reference management.
 inter, odd size 125x67, multitile) decodes byte-exact against
 `ffmpeg -c:v vp9` on every plane of every frame, and the test asserts it.
 The conformance-frontier work (per-block loop-filter mask construction and the
-persistent loop-filter delta header state) is documented in `todo-vp9.md`.
+persistent loop-filter delta header state) is documented in `history/todo-vp9.md`.
 
 ## Capabilities
 

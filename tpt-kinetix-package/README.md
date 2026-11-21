@@ -30,4 +30,4 @@ subtitles, trick-play and init/media segments, but not WebM input, encryption or
 package for them is described in [npm/README.md](npm/README.md). `examples/edge-worker` is a
 Cloudflare Worker that packages MP4s in object storage on request.
 
-Changes are listed in [CHANGELOG.md](CHANGELOG.md). Open work is in [todo-io.md](../todo-io.md).
+Changes are listed in [CHANGELOG.md](CHANGELOG.md). Open work is in [todo-io.md](../history/todo-io.md).

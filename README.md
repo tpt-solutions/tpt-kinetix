@@ -52,13 +52,12 @@ programmatically via `DecoderCapabilities` (`capabilities()`).
 | MP4 mux / remux | ✅ Works | Multi-track passthrough writer (AV1, VP9, Opus, AAC, H.264/H.265, FLAC, AC-3...), faststart, fragmented MP4 / CMAF writer, CENC (`cenc` and `cbcs`, ClearKey); `tpt-kinetix remux` to MP4, WebM, IVF (one AV1/VP9 track) or Ogg/Opus (`tpt-kinetix-mux`). The old single-track `Mp4Muxer` remains |
 | WebM / MP4 metadata and subtitles | ✅ Works | WebVTT subtitle tracks through demux, mux and remux (MP4 `wvtt`, WebM `S_TEXT/WEBVTT`); track language and default/forced disposition in `probe`; MP4 text metadata, chapters and Matroska tags carry into WebM output |
 | HLS / DASH packaging | ✅ Works | `tpt-kinetix-package`: just-in-time HLS (fMP4) + DASH from an MP4 or WebM index over ranged reads (file, HTTP, or WASM `fetch`); WebVTT subtitle renditions, I-frame trick-play playlists, CENC ClearKey (`cenc`/`cbcs`), `LANGUAGE` on renditions; `package` and `serve` commands; Worker example in `examples/edge-worker`. Verified frame-exact in ffmpeg and playing in hls.js/dash.js, and CENC ClearKey plays in headless Chrome |
-| Live (AV1/VP9 + Opus) | ✅ Works | `tpt-kinetix live`: ingest by HTTP POST, WebSocket (browser `MediaRecorder`, page at `/publish`), WHIP (WebRTC, AV1 or VP9, `--features whip`) or Enhanced RTMP (`--rtmp-port`, incl. multitrack video/audio, HDR `colorInfo`, v2 capability exchange); plays as live fMP4 HLS (low-latency parts, LL-HLS subtitle parts, blocking reload) and dynamic DASH, with WebVTT subtitles from WebM ingest and optional CENC. Ingest hardening (tokens, per-key limits, idle/size/bitrate cut-offs, `/metrics`), DVR recording, HTTPS / `wss://` / RTMPS (`--tls-cert`, build with `--features tls`). See [tpt-kinetix-stream](tpt-kinetix-stream/README.md) and [todo-io.md](todo-io.md) |
-| Language bindings | ✅ Works | C ABI (`tpt-kinetix-ffi`, header `include/tpt_kinetix.h`), Python (`tpt-kinetix-py`, maturin) and Node.js (`tpt-kinetix-node`, napi-rs) for probe, faststart, remux and package, all calling the shared `tpt-kinetix-ops` crate. Tested in CI. The Python (PyPI) and Node.js (npm) packages have approved names but are not published yet (see the
-notes in each crate's README); the WASM packager's npm package is `private` |
+| Live (AV1/VP9 + Opus) | ✅ Works | `tpt-kinetix live`: ingest by HTTP POST, WebSocket (browser `MediaRecorder`, page at `/publish`), WHIP (WebRTC, AV1 or VP9, `--features whip`) or Enhanced RTMP (`--rtmp-port`, incl. multitrack video/audio, HDR `colorInfo`, v2 capability exchange); plays as live fMP4 HLS (low-latency parts, LL-HLS subtitle parts, blocking reload) and dynamic DASH, with WebVTT subtitles from WebM ingest and optional CENC. Ingest hardening (tokens, per-key limits, idle/size/bitrate cut-offs, `/metrics`), DVR recording, HTTPS / `wss://` / RTMPS (`--tls-cert`, build with `--features tls`). See [tpt-kinetix-stream](tpt-kinetix-stream/README.md) and [todo-io.md](history/todo-io.md) |
+| Language bindings | ✅ Works | C ABI (`tpt-kinetix-ffi`, header `include/tpt_kinetix.h`), Python (`tpt-kinetix-py`, maturin) and Node.js (`tpt-kinetix-node`, napi-rs) for probe, faststart, remux and package, all calling the shared `tpt-kinetix-ops` crate. Tested in CI. The Python (PyPI) and Node.js (npm) packages have approved names but are not published yet (see the notes in each crate's README); the WASM packager's npm package is `private` |
 | H.264 decode | ✅ Pixel-exact | ⚖️ Patent-encumbered. CAVLC and CABAC I/P/B (progressive 4:2:0, any display dimensions, deblocking, High-profile 8×8 transform); PAFF field pictures (I/P/B) and MBAFF I/P/B frames bit-exact vs ffmpeg — `capabilities().pixel_exact == true`; strict mode returns `NotPixelExact` only for still-unsupported features (multi-slice pictures, non-4:2:0, >8-bit). Now also gated by the official ITU-T H.264.1 conformance suite (`just fetch-h264-conformance`): 34 curated clips decode byte-exact vs the standard's reference YUV (0 failures; see [docs/CONFORMANCE.md](docs/CONFORMANCE.md)); remaining gaps (multi-slice reconstruction, real MBAFF-CABAC-I, some hierarchical-B GOPs, 4:2:2/4:4:4) are tracked, not yet fixed. **Not published** — kept in-repo for reference only (`out-kinetix-h264`, `publish = false`; see [PATENTS.md](PATENTS.md)) |
 | AV1 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Intra and inter reconstruction, all transforms, deblock/CDEF/loop restoration, film grain, 4:2:0/4:2:2/4:4:4 and 8/10/12-bit. The official FFmpeg FATE AV1 set decodes 204/204 frames byte-exact vs libdav1d (`cargo run --release -p tpt-kinetix-av1 --example av1_fate_score`), and a libaom-encode → Kinetix-vs-dav1d crosscheck (`tpt-kinetix-av1/tests/libaom_crosscheck.rs`) covers far more than FATE does. `capabilities().pixel_exact == true`; results are tabulated in [docs/CONFORMANCE.md](docs/CONFORMANCE.md). Frames above the AV1 level 6.3 picture-size limit are refused before any plane is allocated (found by fuzzing). |
 | AV1 encode | ✅ Works | `rav1e` backend with preset mapping (`tpt-kinetix-av1`) |
-| VP9 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Profile-0 (8-bit 4:2:0) decode implemented end-to-end (reconstruction, reference management, loop filtering, superframes). The whole ffmpeg conformance corpus — 13 clips covering lossless/lossy, content, intra-only, inter, odd size 125x67, and multitile — decodes byte-exact vs `ffmpeg -c:v vp9` on every plane, and the test asserts it (`capabilities().pixel_exact == true`; `tpt-kinetix-vp9`, see `todo-vp9.md`). Wired into the pipeline (`Vp9DecodeStage`) and the CLI (`probe` reports decoder status; VP9-input transcode to AV1 takes this royalty-free path). |
+| VP9 decode | ✅ Pixel-exact | ⚖️ Royalty-free. Profile-0 (8-bit 4:2:0) decode implemented end-to-end (reconstruction, reference management, loop filtering, superframes). The whole ffmpeg conformance corpus — 13 clips covering lossless/lossy, content, intra-only, inter, odd size 125x67, and multitile — decodes byte-exact vs `ffmpeg -c:v vp9` on every plane, and the test asserts it (`capabilities().pixel_exact == true`; `tpt-kinetix-vp9`, see `history/todo-vp9.md`). Wired into the pipeline (`Vp9DecodeStage`) and the CLI (`probe` reports decoder status; VP9-input transcode to AV1 takes this royalty-free path). |
 | Pipeline | ✅ Works | Concurrent demux→decode→filter→encode stages |
 | RTMP ingest | ✅ Works | Handshake, chunk reassembly, AMF connect/publish, FLV depacketization; **Enhanced RTMP** AV1/VP9 + Opus straight into live HLS (`live --rtmp-port`) |
 | HLS output | ✅ Works | MPEG-TS segment muxing + sliding-window `.m3u8` + HTTP serving |
@@ -194,7 +193,7 @@ tpt-kinetix (workspace)
 
 ---
 
-## Quickstart
+## Build and test
 
 ### Prerequisites
 
@@ -307,7 +306,7 @@ All crates in this workspace share the same version number (monorepo style). Whe
 is made to any public API, **all** crates are bumped together. This keeps the dependency graph
 coherent and avoids mixed-version combinations.
 
-The current release is `v0.2.0`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). API stability is **not guaranteed** until `v1.0.0`.
+The current release is `v0.2.1`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). API stability is **not guaranteed** until `v1.0.0`.
 
 ### Publish order
 
@@ -340,7 +339,7 @@ entry. This prevents name squatting. The names to reserve are:
 
 ## Roadmap
 
-- **Open I/O tasks**: [`todo-io.md`](todo-io.md) is the task list. The product is the memory-safe I/O layer (demux, mux, packaging, live ingest, edge/WASM), prioritising royalty-free AV1, VP9 and Opus; Kinetix does not try to out-run ffmpeg/dav1d at codec decode speed (see [docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
+- **Open I/O tasks**: [`todo-io.md`](history/todo-io.md) is the task list. The product is the memory-safe I/O layer (demux, mux, packaging, live ingest, edge/WASM), prioritising royalty-free AV1, VP9 and Opus; Kinetix does not try to out-run ffmpeg/dav1d at codec decode speed (see [docs/PERFORMANCE.md](docs/PERFORMANCE.md)).
 - **Adding codecs**: See [`docs/adding-a-codec.md`](docs/adding-a-codec.md) for the process of adding new codecs via the KG pipeline.
 - **Future codecs**: See [`docs/codec-backlog.md`](docs/codec-backlog.md) for the prioritised list.
 - **Codec evaluations**: [`docs/codec-evaluations/hevc.md`](docs/codec-evaluations/hevc.md) (HEVC is out of scope: patent-encumbered, like H.264). Audio codecs are handled by [tpt-cadence](https://github.com/tpt-solutions/tpt-cadence), not here.

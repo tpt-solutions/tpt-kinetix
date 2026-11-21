@@ -26,7 +26,7 @@ diagnostics: `CAMA1_Sony_C` (real MBAFF CABAC I desync) and `HCHP1_HHI_B`
 (hierarchical B intra-neighbour availability). Further clips outside the
 curated set (some MBAFF, 4:2:2, multi-slice) are informational only. These
 are conformance-frontier failures, not permission to claim approximate output
-is exact. See `todo-h264.md` and `tests/itu_conformance.rs` for the current
+is exact. See `history/todo-h264.md` and `tests/itu_conformance.rs` for the current
 first-divergence evidence.
 
 ### Implemented

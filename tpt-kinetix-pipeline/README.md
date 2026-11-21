@@ -25,7 +25,7 @@ when the buffer is full, preventing unbounded memory growth.
 
 | Stage | Input | Output | Implementation |
 |-------|-------|--------|----------------|
-| `DemuxStage` | (none — reads from `data: Vec<u8>`) | `Packet` | `tpt_kinetix_demux::Mp4Demuxer` |
+| `DemuxStage` | (none — reads from a `ReadAt` source given to `DemuxStage::new`) | `Packet` | `tpt_kinetix_demux::Mp4Reader` (MP4 input only) |
 | `Vp9DecodeStage` | `Packet` | `VideoFrame` | `tpt_kinetix_vp9::Vp9Decoder` (`codec-vp9` feature) |
 | `FilterStage` | `VideoFrame` | `VideoFrame` | `passthrough()`, `scale(w, h)`, or `from_fn(..)` |
 | `EncodeStage` | `VideoFrame` | `Packet` | `tpt_kinetix_av1::Av1Encoder` (rav1e) |
@@ -59,7 +59,7 @@ use tpt_kinetix_pipeline::{Pipeline, DemuxStage, Vp9DecodeStage, FilterStage, Si
 let (sink, frames) = SinkStage::new();
 
 Pipeline::new()
-    .add_stage(DemuxStage { data: mp4_bytes })
+    .add_stage(DemuxStage::new(mp4_source)) // any `ReadAt` source holding an MP4 file
     .add_stage(Vp9DecodeStage)
     .add_stage(FilterStage::scale(1280, 720))
     .add_stage(sink)
