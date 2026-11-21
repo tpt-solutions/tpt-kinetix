@@ -27,7 +27,7 @@
 //! | `slice_grid_rows` | `u8` | rows of the slice grid; also sizes the intra-refresh mask |
 //! | `fec_overhead_pct` | `u8` | FEC repair fraction 0..100 (DECISION 1) |
 //! | `foveation_enabled` | `u8` | 0/1, AR preset only (DECISION 6) |
-//! | `block_size_log2` | `u8` | packed `min<<4 | max` fixed shallow partition |
+//! | `block_size_log2` | `u8` | packed `min<<4 \| max` fixed shallow partition |
 //! | `bit_depth` | `u8` | 8 or 10 |
 //! | `chroma_format` | `u8` | [`ChromaFormat`] discriminant |
 //! | `num_rans_streams` | `u8` | independent entropy sub-streams per frame (== slice count) |
