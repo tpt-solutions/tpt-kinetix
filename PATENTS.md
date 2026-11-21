@@ -33,6 +33,7 @@ third parties who are not contributors.
 | `tpt-kinetix-av1` | AV1 decode / encode | Royalty-free | AOMedia patent license; designed to be royalty-free |
 | `tpt-kinetix-demux` / `-mux` | MP4 / MKV / WebM containers | Unencumbered | Container formats, no known active essential patents |
 | `tpt-kinetix-stream` | RTMP, HLS, MPEG-TS | Unencumbered / expired | MPEG-TS systems-layer patents have expired |
+| `tpt-kinetix-splat` | Gaussian splat I/O (PLY, SPZ) and `SPLT` sequence format | Unencumbered (no known essential patents) | Formats and math from public papers/specs; MPEG GSC is not targeted. Original 3DGS code is not copied |
 | *planned* | VP9, Opus | Royalty-free | Both designed and licensed as royalty-free |
 | *planned* | MP3 | Expired | Last MP3 patents expired in 2017 |
 

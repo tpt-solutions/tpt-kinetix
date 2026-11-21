@@ -1,0 +1,34 @@
+[package]
+name = "tpt-kinetix-splat"
+version = "0.2.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "4D Gaussian splat I/O and codec (PLY/SPZ interop, SPLT sequence format) for the TPT Kinetix media processing engine"
+keywords = ["tpt-kinetix", "gaussian-splatting", "4d", "codec", "multimedia"]
+categories = ["multimedia::video", "graphics"]
+readme = "README.md"
+documentation = "https://docs.rs/tpt-kinetix-splat"
+
+[dependencies]
+tpt-math-splat = { workspace = true }
+tpt-kinetix-bitstream = { workspace = true }
+thiserror = { workspace = true }
+flate2 = "1"
+ruzstd = "0.9"
+# C-backed ZSTD encoder (the `zstd` crate wraps libzstd). It is the only C code
+# in this crate; the crate itself stays `#![forbid(unsafe_code)]`. Disable with
+# `default-features = false` to write uncompressed raw-block SPZ instead.
+zstd = { version = "0.14", optional = true }
+
+[features]
+default = ["zstd-encode"]
+zstd-encode = ["dep:zstd"]
+
+[dev-dependencies]
+proptest = "1"
+
+[lib]
+path = "src/lib.rs"

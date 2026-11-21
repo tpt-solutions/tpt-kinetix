@@ -71,6 +71,10 @@ name = "tpt-kinetix-volumetric"
 publish = true
 
 [[package]]
+name = "tpt-kinetix-splat"
+publish = true
+
+[[package]]
 name = "tpt-kinetix-bitstream"
 publish = true
 

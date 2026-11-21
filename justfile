@@ -65,6 +65,7 @@ fuzz-build:
     cd tpt-kinetix-lossless && cargo fuzz build fuzz_decode_frame
     cd tpt-kinetix-vision && cargo fuzz build fuzz_vision_parser
     cd tpt-kinetix-volumetric && cargo fuzz build fuzz_volumetric_parser
+    cd tpt-kinetix-splat && cargo fuzz build fuzz_splat_ply && cargo fuzz build fuzz_splat_spz && cargo fuzz build fuzz_splat_splt && cargo fuzz build fuzz_splat_spls
 
 # Render docs/perf/*.json into docs/perf/dashboard.html (stdlib Python only).
 perf-dashboard:
