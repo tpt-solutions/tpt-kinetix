@@ -199,6 +199,11 @@ bench *FLAGS:
 bench-report:
     cargo run -p tpt-kinetix-test-utils --example bench_report -- --release
 
+# Show which publishable crates need publishing to crates.io: local vs registry
+# version, commits since the v<version> tag, and the dependency-ordered publish list.
+publish-status:
+    python scripts/publish-status.py
+
 # Record machine + toolchain details and commit a baseline JSON snapshot of
 # every bench target, plus regenerate docs/PERFORMANCE.md from it.
 # Use `just bench-baseline <label>` to label the snapshot (default: today's date).
