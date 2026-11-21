@@ -481,8 +481,8 @@ pub fn gather_intra_edges(
                 edges.left[n - 1 - i] = last;
             }
         } else {
-            for i in 0..n {
-                edges.left[i] = 129;
+            for px in edges.left.iter_mut().take(n) {
+                *px = 129;
             }
         }
     }

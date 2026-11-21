@@ -665,9 +665,9 @@ impl Av1Decoder {
                 apply_grain_to_frame(&mut frame, p, fh.bit_depth, seq);
             }
         }
-        for i in 0..8 {
+        for (i, slot) in self.ref_film_grain.iter_mut().enumerate() {
             if refresh & (1u8 << i) != 0 {
-                self.ref_film_grain[i] = grain.clone();
+                *slot = grain.clone();
             }
         }
         // After a `refresh_context` frame, its adapted CDFs are saved into
@@ -683,9 +683,9 @@ impl Av1Decoder {
         if !fh.disable_frame_end_update_cdf {
             if let Some(ctx) = adapted_cdfs {
                 let arc = std::sync::Arc::new(ctx);
-                for i in 0..8 {
+                for (i, slot) in self.ref_cdf_contexts.iter_mut().enumerate() {
                     if refresh & (1u8 << i) != 0 {
-                        self.ref_cdf_contexts[i] = Some(arc.clone());
+                        *slot = Some(arc.clone());
                     }
                 }
             }
@@ -705,9 +705,9 @@ impl Av1Decoder {
                 None => FrameCdfContext::default_for_qindex(fh.base_q_idx),
             };
             let arc = std::sync::Arc::new(initial);
-            for i in 0..8 {
+            for (i, slot) in self.ref_cdf_contexts.iter_mut().enumerate() {
                 if refresh & (1u8 << i) != 0 {
-                    self.ref_cdf_contexts[i] = Some(arc.clone());
+                    *slot = Some(arc.clone());
                 }
             }
         }

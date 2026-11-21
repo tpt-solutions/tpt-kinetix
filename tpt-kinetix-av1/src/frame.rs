@@ -1032,9 +1032,9 @@ impl FrameHeader {
         let mut seg_id_pre_skip = false;
         let mut last_active_seg_id = 0u8;
         if segmentation_enabled {
-            for i in 0..8 {
-                for j in 0..8 {
-                    if seg_params.enabled[i][j] {
+            for (i, row) in seg_params.enabled.iter().enumerate() {
+                for (j, &enabled) in row.iter().enumerate() {
+                    if enabled {
                         last_active_seg_id = i as u8;
                         if j >= SEG_LVL_REF_FRAME {
                             seg_id_pre_skip = true;
@@ -1631,14 +1631,14 @@ fn parse_loop_filter(
     if delta_enabled {
         let delta_update = read_flag(br)?;
         if delta_update {
-            for i in 0..8 {
+            for delta in deltas.loop_filter_ref_deltas.iter_mut() {
                 if read_flag(br)? {
-                    deltas.loop_filter_ref_deltas[i] = read_su(br, 7)? as i8;
+                    *delta = read_su(br, 7)? as i8;
                 }
             }
-            for i in 0..2 {
+            for delta in deltas.loop_filter_mode_deltas.iter_mut() {
                 if read_flag(br)? {
-                    deltas.loop_filter_mode_deltas[i] = read_su(br, 7)? as i8;
+                    *delta = read_su(br, 7)? as i8;
                 }
             }
         }

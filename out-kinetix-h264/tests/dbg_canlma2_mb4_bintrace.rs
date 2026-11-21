@@ -136,8 +136,7 @@ fn canlma2_poc1_mb4_bintrace() {
                     eprintln!("ACCOPY grid={} blk={} {:?}", gi, bi, &blk[..]);
                 }
             }
-            for i in 0..p.macroblocks.len() {
-                let mb = &p.macroblocks[i];
+            for (i, mb) in p.macroblocks.iter().enumerate() {
                 let motion_str = mb
                     .motion
                     .as_ref()

@@ -357,14 +357,14 @@ pub fn parse_uncompressed_header(
     if h.loop_filter.delta_enabled {
         h.loop_filter.delta_updated = br.try_f(1, "loop_filter_delta_update")? == 1;
         if h.loop_filter.delta_updated {
-            for i in 0..4 {
+            for delta in h.loop_filter.ref_deltas.iter_mut() {
                 if br.try_f(1, "update_ref_delta")? == 1 {
-                    h.loop_filter.ref_deltas[i] = get_sbits_inv(&mut br, 6, "ref_delta")?;
+                    *delta = get_sbits_inv(&mut br, 6, "ref_delta")?;
                 }
             }
-            for i in 0..2 {
+            for delta in h.loop_filter.mode_deltas.iter_mut() {
                 if br.try_f(1, "update_mode_delta")? == 1 {
-                    h.loop_filter.mode_deltas[i] = get_sbits_inv(&mut br, 6, "mode_delta")?;
+                    *delta = get_sbits_inv(&mut br, 6, "mode_delta")?;
                 }
             }
         }
@@ -395,8 +395,8 @@ pub fn parse_uncompressed_header(
         h.segmentation.enabled = true;
         if br.try_f(1, "segmentation_update_map")? == 1 {
             h.segmentation.update_map = true;
-            for i in 0..7 {
-                h.segmentation.tree_probs[i] = if br.try_f(1, "prob_coded")? == 1 {
+            for prob in h.segmentation.tree_probs.iter_mut() {
+                *prob = if br.try_f(1, "prob_coded")? == 1 {
                     br.try_f(8, "segment_tree_prob")? as u8
                 } else {
                     255
@@ -404,8 +404,8 @@ pub fn parse_uncompressed_header(
             }
             if br.try_f(1, "segmentation_temporal_update")? == 1 {
                 h.segmentation.temporal_update = true;
-                for i in 0..3 {
-                    h.segmentation.pred_probs[i] = if br.try_f(1, "prob_coded")? == 1 {
+                for prob in h.segmentation.pred_probs.iter_mut() {
+                    *prob = if br.try_f(1, "prob_coded")? == 1 {
                         br.try_f(8, "segment_pred_prob")? as u8
                     } else {
                         255
@@ -791,22 +791,22 @@ pub fn parse_compressed_header(
             _ => TxfmMode::Switchable,
         };
         if h.txfm_mode == TxfmMode::Switchable {
-            for i in 0..2 {
+            for p in probs.mode.tx8p.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.tx8p[i] = update_prob(bc, probs.mode.tx8p[i]);
+                    *p = update_prob(bc, *p);
                 }
             }
-            for i in 0..2 {
-                for j in 0..2 {
+            for row in probs.mode.tx16p.iter_mut() {
+                for p in row.iter_mut() {
                     if bc.read_bool(252) {
-                        probs.mode.tx16p[i][j] = update_prob(bc, probs.mode.tx16p[i][j]);
+                        *p = update_prob(bc, *p);
                     }
                 }
             }
-            for i in 0..2 {
-                for j in 0..3 {
+            for row in probs.mode.tx32p.iter_mut() {
+                for p in row.iter_mut() {
                     if bc.read_bool(252) {
-                        probs.mode.tx32p[i][j] = update_prob(bc, probs.mode.tx32p[i][j]);
+                        *p = update_prob(bc, *p);
                     }
                 }
             }
@@ -866,33 +866,33 @@ pub fn parse_compressed_header(
     }
 
     // Skip flag.
-    for i in 0..3 {
+    for p in probs.mode.skip.iter_mut() {
         if bc.read_bool(252) {
-            probs.mode.skip[i] = update_prob(bc, probs.mode.skip[i]);
+            *p = update_prob(bc, *p);
         }
     }
 
     if h.frame_type != FrameType::Key && !h.intra_only {
         // Inter mode probs.
-        for i in 0..7 {
-            for j in 0..3 {
+        for row in probs.mode.mv_mode.iter_mut() {
+            for p in row.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.mv_mode[i][j] = update_prob(bc, probs.mode.mv_mode[i][j]);
+                    *p = update_prob(bc, *p);
                 }
             }
         }
         if h.filter_mode == 3 {
-            for i in 0..4 {
-                for j in 0..2 {
+            for row in probs.mode.filter.iter_mut() {
+                for p in row.iter_mut() {
                     if bc.read_bool(252) {
-                        probs.mode.filter[i][j] = update_prob(bc, probs.mode.filter[i][j]);
+                        *p = update_prob(bc, *p);
                     }
                 }
             }
         }
-        for i in 0..4 {
+        for p in probs.mode.intra.iter_mut() {
             if bc.read_bool(252) {
-                probs.mode.intra[i] = update_prob(bc, probs.mode.intra[i]);
+                *p = update_prob(bc, *p);
             }
         }
 
@@ -905,9 +905,9 @@ pub fn parse_compressed_header(
             }
             h.comp_pred_mode = mode as u8;
             if h.comp_pred_mode == PRED_SWITCHABLE {
-                for i in 0..5 {
+                for p in probs.mode.comp.iter_mut() {
                     if bc.read_bool(252) {
-                        probs.mode.comp[i] = update_prob(bc, probs.mode.comp[i]);
+                        *p = update_prob(bc, *p);
                     }
                 }
             }
@@ -916,86 +916,86 @@ pub fn parse_compressed_header(
         }
 
         if h.comp_pred_mode != PRED_COMPREF {
-            for i in 0..5 {
+            for row in probs.mode.single_ref.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.single_ref[i][0] = update_prob(bc, probs.mode.single_ref[i][0]);
+                    row[0] = update_prob(bc, row[0]);
                 }
                 if bc.read_bool(252) {
-                    probs.mode.single_ref[i][1] = update_prob(bc, probs.mode.single_ref[i][1]);
+                    row[1] = update_prob(bc, row[1]);
                 }
             }
         }
         if h.comp_pred_mode != PRED_SINGLEREF {
-            for i in 0..5 {
+            for p in probs.mode.comp_ref.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.comp_ref[i] = update_prob(bc, probs.mode.comp_ref[i]);
+                    *p = update_prob(bc, *p);
                 }
             }
         }
 
-        for i in 0..4 {
-            for j in 0..9 {
+        for row in probs.mode.y_mode.iter_mut() {
+            for p in row.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.y_mode[i][j] = update_prob(bc, probs.mode.y_mode[i][j]);
+                    *p = update_prob(bc, *p);
                 }
             }
         }
-        for i in 0..4 {
-            for j in 0..4 {
-                for k in 0..3 {
+        // Partition probs are stored in reverse block-size order (3 - i).
+        for part in probs.mode.partition.iter_mut().rev() {
+            for row in part.iter_mut() {
+                for p in row.iter_mut() {
                     if bc.read_bool(252) {
-                        probs.mode.partition[3 - i][j][k] =
-                            update_prob(bc, probs.mode.partition[3 - i][j][k]);
+                        *p = update_prob(bc, *p);
                     }
                 }
             }
         }
 
         // MV fields use plain 7-bit literals, not the subexp model.
-        for i in 0..3 {
+        for p in probs.mode.mv_joint.iter_mut() {
             if bc.read_bool(252) {
-                probs.mode.mv_joint[i] = (bc.read_literal(7) as u8) << 1 | 1;
+                *p = (bc.read_literal(7) as u8) << 1 | 1;
             }
         }
-        for i in 0..2 {
+        for comp in probs.mode.mv_comp.iter_mut() {
             if bc.read_bool(252) {
-                probs.mode.mv_comp[i].sign = (bc.read_literal(7) as u8) << 1 | 1;
+                comp.sign = (bc.read_literal(7) as u8) << 1 | 1;
             }
-            for j in 0..10 {
+            for p in comp.classes.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.mv_comp[i].classes[j] = (bc.read_literal(7) as u8) << 1 | 1;
+                    *p = (bc.read_literal(7) as u8) << 1 | 1;
                 }
             }
             if bc.read_bool(252) {
-                probs.mode.mv_comp[i].class0 = (bc.read_literal(7) as u8) << 1 | 1;
+                comp.class0 = (bc.read_literal(7) as u8) << 1 | 1;
             }
-            for j in 0..10 {
+            for p in comp.bits.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.mv_comp[i].bits[j] = (bc.read_literal(7) as u8) << 1 | 1;
+                    *p = (bc.read_literal(7) as u8) << 1 | 1;
                 }
             }
         }
-        for i in 0..2 {
-            for j in 0..2 {
-                for k in 0..3 {
+        for comp in probs.mode.mv_comp.iter_mut() {
+            for row in comp.class0_fp.iter_mut() {
+                for p in row.iter_mut() {
                     if bc.read_bool(252) {
-                        probs.mode.mv_comp[i].class0_fp[j][k] = (bc.read_literal(7) as u8) << 1 | 1;
+                        *p = (bc.read_literal(7) as u8) << 1 | 1;
                     }
                 }
             }
-            for j in 0..3 {
+            for p in comp.fp.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.mv_comp[i].fp[j] = (bc.read_literal(7) as u8) << 1 | 1;
+                    *p = (bc.read_literal(7) as u8) << 1 | 1;
                 }
             }
         }
         if h.allow_high_precision_mv {
-            for i in 0..2 {
+            for comp in probs.mode.mv_comp.iter_mut() {
                 if bc.read_bool(252) {
-                    probs.mode.mv_comp[i].class0_hp = (bc.read_literal(7) as u8) << 1 | 1;
+                    comp.class0_hp = (bc.read_literal(7) as u8) << 1 | 1;
                 }
                 if bc.read_bool(252) {
-                    probs.mode.mv_comp[i].hp = (bc.read_literal(7) as u8) << 1 | 1;
+                    comp.hp = (bc.read_literal(7) as u8) << 1 | 1;
                 }
             }
         }
@@ -1060,9 +1060,9 @@ pub fn derive_segment_features(h: &FrameHeader) -> SegFeatures {
                 );
             }
         } else {
-            for j in 0..4 {
-                seg.lflvl[i][j][0] = lflvl_base as u8;
-                seg.lflvl[i][j][1] = lflvl_base as u8;
+            for lvl in seg.lflvl[i].iter_mut() {
+                lvl[0] = lflvl_base as u8;
+                lvl[1] = lflvl_base as u8;
             }
         }
     }

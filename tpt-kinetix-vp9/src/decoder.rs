@@ -597,9 +597,9 @@ perf-clip envelope (mid-stream keyframes included)",
         let frame_rc = Arc::new(std::mem::replace(&mut state.frame, FrameData::empty()));
 
         // ref frame setup
-        for i in 0..8 {
+        for (i, slot) in self.refs.iter_mut().enumerate() {
             if h.refresh_frame_flags & (1 << i) != 0 {
-                self.refs[i] = Some(frame_rc.clone());
+                *slot = Some(frame_rc.clone());
             }
         }
         self.prev = Some(frame_rc.clone());

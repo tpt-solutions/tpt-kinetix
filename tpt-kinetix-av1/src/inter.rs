@@ -1038,8 +1038,8 @@ pub fn read_mv_component(
         ((bit << 3) | (fr << 1) | hp) + 1
     } else {
         let mut d = 0i32;
-        for i in 0..mv_class {
-            let b = dec.read_symbol(&mut cdfs.mv_bit[comp][i]) as i32;
+        for (i, cdf) in cdfs.mv_bit[comp].iter_mut().enumerate().take(mv_class) {
+            let b = dec.read_symbol(cdf) as i32;
             d |= b << i;
         }
         let mut mag = CLASS0_SIZE << (mv_class + 2);
