@@ -66,7 +66,12 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       render-PSNR tests (decode vs source); glTF `KHR_gaussian_splatting` (+ SPZ compression ext); time-slab segment packaging in `tpt-kinetix-package`.
       Progress: render check done (`tests/render_4d.rs`). Time-slab packaging done: `tpt-kinetix-package::splat` writes one standalone
       `SPLS` segment per slab (`seg-{k}.spls`), and a JSON playlist with time ranges, sizes and URIs (`splat_playlist`, `splat_segment`).
-      Players don't read splat tracks, so this is Kinetix-to-Kinetix delivery. glTF extension still open.
+      Players don't read splat tracks, so this is Kinetix-to-Kinetix delivery.
+      glTF: `tpt-kinetix-splat::gltf` writes static clouds as GLB with `KHR_gaussian_splatting` (ellipse kernel, srgb_rec709_display).
+      RUB clouds export unchanged, and RDF (PLY) clouds get the 180° X flip (positions, quaternions, and SH signs read from the basis).
+      Verified by a view-dependent colour invariance test, GLB container tests, and a CLI `.glb` output. Not verified: the official
+      glTF validator, which could not run in this session (the npm download was denied). Run it before relying on the file.
+      Not in scope: COLOR_0 fallback, and sequences (glTF has no 4D form).
 
 Verification for every milestone: `just check`, `just deny`, fuzz >= 60s on any new parser, golden vectors committed.
 Notes: write from papers/specs (original 3DGS code is non-commercial licensed, don't copy it); no ffmpeg oracle exists for splats.
