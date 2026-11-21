@@ -77,33 +77,45 @@ pub fn temporal_chunks(
         ));
     }
 
-    let mut chunks = Vec::with_capacity(slabs);
-    for s in 0..slabs {
-        let a = t0 + s as f32 * slab;
-        let b = a + slab;
-        // Distance from each splat's time to this slab. The weight at that
-        // nearest point is above eps exactly when the distance is below r.
-        let members: Vec<usize> = support
-            .iter()
-            .enumerate()
-            .filter(|&(_, &(t, r))| {
-                let d = if t < a {
-                    a - t
-                } else if t > b {
-                    t - b
-                } else {
-                    0.0
-                };
-                d < r
-            })
-            .map(|(i, _)| i)
-            .collect();
-        chunks.push(TemporalChunk {
+    // Slab bounds, computed exactly as the chunks report them.
+    let bounds: Vec<(f32, f32)> = (0..slabs)
+        .map(|s| {
+            let a = t0 + s as f32 * slab;
+            (a, a + slab)
+        })
+        .collect();
+    // A splat belongs to slab [a, b] exactly when its distance to the slab is
+    // below r, i.e. a < t + r and b > t − r. Each splat's support covers a
+    // contiguous range of slabs, so push it only into those, and verify the
+    // exact predicate. The estimated range may be off by one at a boundary.
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); slabs];
+    for (i, &(t, r)) in support.iter().enumerate() {
+        let lo = t - r;
+        let hi = t + r;
+        let first = (((lo - t0) / slab).floor() as isize - 1).clamp(0, slabs as isize - 1) as usize;
+        let last = (((hi - t0) / slab).floor() as isize + 1).clamp(0, slabs as isize - 1) as usize;
+        for (s, &(a, b)) in bounds.iter().enumerate().take(last + 1).skip(first) {
+            let d = if t < a {
+                a - t
+            } else if t > b {
+                t - b
+            } else {
+                0.0
+            };
+            if d < r {
+                members[s].push(i);
+            }
+        }
+    }
+    let chunks = bounds
+        .into_iter()
+        .zip(members)
+        .map(|((a, b), members)| TemporalChunk {
             t_start: a,
             t_end: b,
             members,
-        });
-    }
+        })
+        .collect();
     Ok(chunks)
 }
 
