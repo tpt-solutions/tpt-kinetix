@@ -15,7 +15,7 @@ One data model covers 3DGS and 4DGS (static 3D = degenerate case).
       3DGS `.ply` read/write (INRIA property order, bounds checked before allocation), 9 unit + 4 proptest tests (never-panic on random and
       mutated input, bit-exact round trip). Fuzz target `fuzz_splat_ply` ran 60s in WSL Ubuntu-24.04 (`cargo +nightly fuzz run -s none`, no crashes). The Windows nightly
       has no ASan runtime, so Linux is the place to fuzz.
-      Not started: 4D `SplatSequence` (M3).
+      The 4D `SplatSequence` is done under M3.
       - [x] **SPZ read** (`src/spz.rs`): legacy gzip v2/v3 (`flate2`) and NGSP v4 (`ruzstd`). Reader matches the reference
         `spz_to_ply` exactly on v2 (horned, racoon) and v4 (horned): positions, scales, opacity, DC, rest SH are bit-equal, and rotation is
         within 2e-5. Output stays in SPZ's native RUB frame (the reference default, no conversion). Files with extensions (flag 0x2) are refused.
