@@ -257,9 +257,19 @@ fn run_payload(
     Ok(ops.len())
 }
 
+/// Path to the local-only FFmpeg reference excerpt. `oracle/` is untracked
+/// (LGPL source; see oracle/README.md), so tests skip when it is absent.
+fn oracle_src() -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
+    p.is_file().then_some(p)
+}
+
 #[test]
 fn single_step_probe() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
+    let Some(src) = oracle_src() else {
+        eprintln!("skipping: oracle/cabac_ref.c not present (local-only)");
+        return;
+    };
     let t = FfTables::parse(&src);
     let mut rng = Rng(0xDEADBEEFCAFEBABE);
 
@@ -316,7 +326,10 @@ fn single_step_probe() {
 
 #[test]
 fn reverse_engineer_ff_state_mapping() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
+    let Some(src) = oracle_src() else {
+        eprintln!("skipping: oracle/cabac_ref.c not present (local-only)");
+        return;
+    };
     let t = FfTables::parse(&src);
 
     // Spec rangeTabLPS (Table 9-44), transcribed from src/entropy.rs.
@@ -411,7 +424,10 @@ fn reverse_engineer_ff_state_mapping() {
 
 #[test]
 fn engine_lockstep_vs_ffmpeg() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
+    let Some(src) = oracle_src() else {
+        eprintln!("skipping: oracle/cabac_ref.c not present (local-only)");
+        return;
+    };
     let tables = FfTables::parse(&src);
 
     let mut rng = Rng(0x9E3779B97F4A7C15);

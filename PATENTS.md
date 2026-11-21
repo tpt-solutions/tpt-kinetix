@@ -64,6 +64,11 @@ of `just check`) fails if any `out-*` crate is publishable, is missing a `publis
 FFmpeg reference sources used by the H.264 crate's `dbg_*` tests live in
 `out-kinetix-h264/oracle/` and are not part of any published package.
 
+**Licence of the H.264 crate.** `out-kinetix-h264` is licensed `LGPL-2.1-or-later` (not the
+workspace MIT/Apache-2.0) because it contains FFmpeg-derived code. The FFmpeg reference excerpts in
+`out-kinetix-h264/oracle/` are LGPL-2.1+ and are untracked in git; the `dbg_*` tests skip when they are
+absent.
+
 **Container-level H.264.** The published `tpt-kinetix-mux`, `tpt-kinetix-demux` and
 `tpt-kinetix-stream` crates frame and carry H.264 bitstreams (MP4 `avc1`, MPEG-TS/FLV, Annex-B
 framing). They contain no H.264 encoder or decoder. Applications that decode or encode H.264 must

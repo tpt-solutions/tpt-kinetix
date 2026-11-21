@@ -5,6 +5,10 @@
 > `tpt-kinetix-pipeline` or `tpt-kinetix-cli`. It is kept for local/reference work only.
 > See [PATENTS.md](../PATENTS.md).
 
+> **Licence: LGPL-2.1-or-later, not the workspace MIT/Apache-2.0.** Parts of this crate are
+> transcribed or ported from FFmpeg's `libavcodec` (LGPL-2.1+). The workspace MIT/Apache grant does
+> not cover this crate. Do not copy it into MIT/Apache-licensed code.
+
 H.264/AVC bitstream decoder for the TPT Kinetix engine, parallelised with `rayon`
 at the macroblock-row level.
 

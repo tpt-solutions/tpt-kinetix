@@ -262,6 +262,13 @@ fn cabac_payload() -> Option<(Vec<u8>, i32)> {
     Some((r.remaining_bytes().to_vec(), slice_qp))
 }
 
+/// Path to the local-only FFmpeg reference excerpt. `oracle/` is untracked
+/// (LGPL source; see oracle/README.md), so tests skip when it is absent.
+fn oracle_src() -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
+    p.is_file().then_some(p)
+}
+
 #[test]
 fn mbaff_ip_p_engine_lockstep_through_mb9_mb_type() {
     if !ffmpeg_available() {
@@ -286,7 +293,10 @@ fn mbaff_ip_p_engine_lockstep_through_mb9_mb_type() {
             .join(" ")
     );
 
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle/cabac_ref.c");
+    let Some(src) = oracle_src() else {
+        eprintln!("skipping: oracle/cabac_ref.c not present (local-only)");
+        return;
+    };
     let t = FfTables::parse(&src);
 
     // ctxIdx 70-72 (mb_field_decoding_flag): the crate's
