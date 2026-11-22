@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.3.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.1...v0.3.0) - 2026-11-22
 
-- `CodecId::Spls` for 4D Gaussian splat sequences carried in MP4.
+### Changed
 
+- **Breaking:** new `CodecId::Spls` variant for 4D Gaussian splat sequences carried in MP4. An exhaustive `match` on `CodecId` must handle it.
 
 ## [0.2.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.0...v0.2.1) - 2026-11-20
 

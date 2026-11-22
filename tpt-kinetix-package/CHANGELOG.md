@@ -7,11 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.1...v0.3.0) - 2026-11-22
+
 ### Added
 
 - `splat` module: packages an SPLS sequence as one standalone segment per time slab, plus a JSON playlist with time ranges and URIs.
 - Splat codec mapping in `codecs.rs`.
-
 
 ## [0.2.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.0...v0.2.1) - 2026-11-20
 

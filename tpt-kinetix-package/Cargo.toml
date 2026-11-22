@@ -1,6 +1,6 @@
 [package]
 name = "tpt-kinetix-package"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -22,7 +22,7 @@ tpt-kinetix-demux = { workspace = true }
 tpt-kinetix-mux = { workspace = true }
 # No default features: the optional C-backed ZSTD encoder is not needed for reading, and this
 # crate also builds for WebAssembly.
-tpt-kinetix-splat = { path = "../tpt-kinetix-splat", version = "0.2.1", default-features = false }
+tpt-kinetix-splat = { path = "../tpt-kinetix-splat", version = "0.3.0", default-features = false }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }

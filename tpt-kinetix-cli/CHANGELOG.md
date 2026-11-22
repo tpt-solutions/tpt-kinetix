@@ -7,11 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.1...v0.3.0) - 2026-11-22
+
 ### Added
 
 - `tpt-kinetix splat probe` reports format, splat count, SH degree and frame, and the slab time range for sequences.
 - `tpt-kinetix splat convert` converts PLY, SPZ and SPLT to SPLT (lossless or lossy), SPZ, PLY, glTF `.glb`, and SPLS ↔ MP4.
-
 
 ## [0.2.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.0...v0.2.1) - 2026-11-20
 

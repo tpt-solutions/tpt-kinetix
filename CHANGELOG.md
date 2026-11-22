@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.1...v0.3.0) - 2026-11-22
+
+- **Breaking:** `CodecId` (in `tpt-kinetix-core`) gained the `Spls` variant. An exhaustive `match` on it must handle the new variant.
+
 ### Added
 
 - `tpt-kinetix-splat`: Gaussian splat I/O, native `SPLT` and `SPLS` codecs, glTF export, and MP4 carriage of 4D sequences. Not yet published.

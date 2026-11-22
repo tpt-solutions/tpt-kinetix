@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-av1"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -2858,7 +2858,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-bitstream"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "tpt-kinetix-core",
@@ -2866,7 +2866,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2890,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-demux"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-face"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "nom 8.0.0",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-kg"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2949,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-lean"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "thiserror",
@@ -2960,7 +2960,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-lossless"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "tpt-kinetix-bitstream",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-mux"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "aes",
  "criterion",
@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-ops"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "tpt-kinetix-core",
@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-package"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "proptest",
@@ -3020,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-pipeline"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3046,7 +3046,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-realtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "tpt-kinetix-bitstream",
@@ -3055,7 +3055,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-screen"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "nom 8.0.0",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-splat"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "flate2",
@@ -3081,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-stream"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-vision"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "nom 8.0.0",
@@ -3135,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-volumetric"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "nom 8.0.0",
@@ -3147,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "tpt-kinetix-vp9"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "backtrace",
  "criterion",

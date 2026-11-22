@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.2.1...v0.3.0) - 2026-11-22
+
 ### Added
 
 - 3DGS PLY read and write. The frame (RDF or RUB) is recorded in a header comment.
@@ -23,5 +25,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RUB ↔ RDF conversion is not implemented. Writers do not convert.
 - SPZ extensions are refused on read and are not written.
 - No 4D source format is read yet. 4D data can only come from SPLS input. No 4D reference exists, so the format is tested only against itself.
-
-
