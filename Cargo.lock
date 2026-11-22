@@ -3126,7 +3126,6 @@ name = "tpt-kinetix-vision"
 version = "0.3.0"
 dependencies = [
  "criterion",
- "nom 8.0.0",
  "thiserror",
  "tpt-kinetix-bitstream",
  "tpt-kinetix-core",

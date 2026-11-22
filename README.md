@@ -309,7 +309,7 @@ All crates in this workspace share the same version number (monorepo style). Whe
 is made to any public API, **all** crates are bumped together. This keeps the dependency graph
 coherent and avoids mixed-version combinations.
 
-The current release is `v0.2.1`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). API stability is **not guaranteed** until `v1.0.0`.
+The current release is `v0.3.0`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). API stability is **not guaranteed** until `v1.0.0`.
 
 ### Publish order
 
