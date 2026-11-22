@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/tpt-solutions/tpt-kinetix/compare/v0.3.0...v0.3.1) - 2026-11-22
+
+### Other
+
+- remove unused nom dependency; README release line to v0.3.0
+
 ### Removed
 
 - Unused `nom` dependency.
