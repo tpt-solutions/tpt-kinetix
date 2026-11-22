@@ -71,7 +71,7 @@ tpt-kinetix-lean = { path = "tpt-kinetix-lean", version = "0.3.0" }
 tpt-kinetix-bitstream = { path = "tpt-kinetix-bitstream", version = "0.3.0" }
 tpt-kinetix-realtime = { path = "tpt-kinetix-realtime", version = "0.3.0" }
 tpt-kinetix-screen = { path = "tpt-kinetix-screen", version = "0.3.0" }
-tpt-kinetix-vision = { path = "tpt-kinetix-vision", version = "0.3.0" }
+tpt-kinetix-vision = { path = "tpt-kinetix-vision", version = "0.3.1" }
 tpt-kinetix-face = { path = "tpt-kinetix-face", version = "0.3.0" }
 tpt-kinetix-volumetric = { path = "tpt-kinetix-volumetric", version = "0.3.0" }
 tpt-kinetix-splat = { path = "tpt-kinetix-splat", version = "0.3.0" }
